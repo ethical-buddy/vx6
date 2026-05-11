@@ -29,10 +29,7 @@ func NormalizeMode(mode string) string {
 func EffectiveMode(mode string) string {
 	switch NormalizeMode(mode) {
 	case ModeQUIC:
-		// The current standard-library VX6 build has no full QUIC transport yet.
-		// We keep the config surface now so the neighbor-session transport can swap
-		// in later without changing the higher layers.
-		return ModeTCP
+		return ModeQUIC          // ← now returns real QUIC, not TCP
 	case ModeTCP, ModeAuto:
 		return ModeTCP
 	default:
@@ -41,10 +38,16 @@ func EffectiveMode(mode string) string {
 }
 
 func Listen(mode, addr string) (net.Listener, error) {
+	if EffectiveMode(mode) == ModeQUIC {
+		return quicListen(addr)
+	}
 	return net.Listen("tcp", addr)
 }
 
 func DialContext(ctx context.Context, mode, addr string) (net.Conn, error) {
+	if EffectiveMode(mode) == ModeQUIC {
+		return quicDial(ctx, addr)
+	}
 	var dialer net.Dialer
 	return dialer.DialContext(ctx, "tcp", addr)
 }
