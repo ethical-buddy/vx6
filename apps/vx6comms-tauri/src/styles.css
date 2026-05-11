@@ -13,7 +13,7 @@ body {
 }
 
 .app {
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 2rem 1rem 3rem;
 }
@@ -36,6 +36,12 @@ body {
   margin-bottom: 1rem;
 }
 
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
 label {
   display: block;
   margin-bottom: 0.4rem;
@@ -47,6 +53,7 @@ input {
   border: 1px solid #cad5cb;
   border-radius: 8px;
   padding: 0.65rem 0.75rem;
+  margin-bottom: 0.5rem;
 }
 
 .row {
@@ -68,6 +75,11 @@ button:hover {
   filter: brightness(0.95);
 }
 
+button.ghost {
+  background: #f3f7f4;
+  color: #14342d;
+}
+
 .status {
   margin-top: 0;
   color: #1f4d40;
@@ -83,3 +95,8 @@ pre {
   white-space: pre-wrap;
 }
 
+@media (max-width: 980px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
