@@ -27,13 +27,17 @@ func quicListen(addr string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &quicListener{ln: ln}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	return &quicListener{ln: ln, ctx: ctx, cancel: cancel}, nil
 }
 
 // quicDial opens a QUIC connection to addr and returns its first stream as a net.Conn.
 func quicDial(ctx context.Context, addr string) (net.Conn, error) {
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true, // peer identity verified by VX6's secure/session layer above
+		// Peer identity is verified by VX6's secure/session layer above transport.
+		// InsecureSkipVerify skips TLS certificate chain validation only — the
+		// Ed25519-based node identity check still happens in internal/secure.
+		InsecureSkipVerify: true,
 		NextProtos:         []string{"vx6/1"},
 		MinVersion:         tls.VersionTLS13,
 	}
@@ -49,7 +53,7 @@ func quicDial(ctx context.Context, addr string) (net.Conn, error) {
 	return &quicStreamConn{conn: conn, stream: stream}, nil
 }
 
-// quicCfg returns shared QUIC settings.
+// quicCfg returns shared QUIC connection settings.
 func quicCfg() *quic.Config {
 	return &quic.Config{
 		MaxIdleTimeout:  30 * time.Second,
@@ -58,7 +62,7 @@ func quicCfg() *quic.Config {
 }
 
 // selfSignedTLS generates a throw-away TLS certificate for the QUIC listener.
-// Real peer authentication happens in VX6's secure/session handshake on top.
+// Real peer authentication is handled by VX6's secure/session handshake on top.
 func selfSignedTLS() (*tls.Config, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -86,14 +90,22 @@ func selfSignedTLS() (*tls.Config, error) {
 
 // ── quicListener wraps *quic.Listener as net.Listener ─────────────────────────
 
-type quicListener struct{ ln *quic.Listener }
+type quicListener struct {
+	ln     *quic.Listener
+	ctx    context.Context    // cancelled when Close() is called
+	cancel context.CancelFunc // lets Accept() unblock cleanly on shutdown
+}
 
 func (l *quicListener) Accept() (net.Conn, error) {
-	conn, err := l.ln.Accept(context.Background())
+	// Use our own cancellable context so Accept unblocks immediately
+	// when Close() is called, rather than blocking forever.
+	conn, err := l.ln.Accept(l.ctx)
 	if err != nil {
 		return nil, err
 	}
-	stream, err := conn.AcceptStream(context.Background())
+	// Use the connection's own context so AcceptStream unblocks if the
+	// connection drops before the first stream is opened.
+	stream, err := conn.AcceptStream(conn.Context())
 	if err != nil {
 		_ = conn.CloseWithError(0, "stream accept failed")
 		return nil, err
@@ -101,22 +113,43 @@ func (l *quicListener) Accept() (net.Conn, error) {
 	return &quicStreamConn{conn: conn, stream: stream}, nil
 }
 
-func (l *quicListener) Close() error   { return l.ln.Close() }
+func (l *quicListener) Close() error {
+	l.cancel() // unblock any Accept() call waiting on l.ctx
+	return l.ln.Close()
+}
+
 func (l *quicListener) Addr() net.Addr { return l.ln.Addr() }
 
 // ── quicStreamConn wraps a QUIC stream as net.Conn ────────────────────────────
 
 type quicStreamConn struct {
-	conn   *quic.Conn   // *quic.Conn in v0.53+  (was quic.Connection interface before)
-	stream *quic.Stream // *quic.Stream in v0.53+ (was quic.Stream interface before)
+	conn   *quic.Conn
+	stream *quic.Stream
 }
 
 func (c *quicStreamConn) Read(b []byte) (int, error)  { return c.stream.Read(b) }
 func (c *quicStreamConn) Write(b []byte) (int, error) { return c.stream.Write(b) }
+
 func (c *quicStreamConn) Close() error {
+	// Step 1: Close the write side of the stream gracefully.
+	// This sends a FIN to the peer so they know no more data is coming,
+	// and lets them drain any remaining bytes before we disappear.
+	// This is stream-level, not connection-level.
+	if err := c.stream.Close(); err != nil {
+		// Stream already closed or reset — cancel read side and return.
+		c.stream.CancelRead(0)
+		return err
+	}
+	// Step 2: Cancel the read side — we are done receiving on this stream.
 	c.stream.CancelRead(0)
-	return c.conn.CloseWithError(0, "closed")
+
+	// Step 3: Do NOT call conn.CloseWithError here.
+	// In this single-stream-per-connection model the QUIC connection
+	// idles out naturally via MaxIdleTimeout (30s). Killing the connection
+	// immediately here would race with the peer still reading the FIN.
+	return nil
 }
+
 func (c *quicStreamConn) LocalAddr() net.Addr             { return c.conn.LocalAddr() }
 func (c *quicStreamConn) RemoteAddr() net.Addr            { return c.conn.RemoteAddr() }
 func (c *quicStreamConn) SetDeadline(t time.Time) error      { return c.stream.SetDeadline(t) }
