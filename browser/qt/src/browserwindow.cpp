@@ -768,6 +768,7 @@ void BrowserWindow::buildDock()
         "vx6://identity",
         "vx6://files",
         "vx6://permissions",
+        "vx6://transfers"
     });
     m_shortcuts->setFocusPolicy(Qt::NoFocus);
     m_shortcuts->setStyleSheet(

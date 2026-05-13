@@ -35,6 +35,8 @@ public:
     bool receiveEnabled() const;
     QString toggleReceive(bool enable);
     QString filesPageHtml() const;
+    QString transfersPageHtml() const;
+    QString sentTransfersHtml() const;
 
     bool nodeRunning() const;
     QString currentDownloadPath() const;

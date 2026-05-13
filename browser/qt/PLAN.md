@@ -46,6 +46,11 @@ The current browser app already provides:
   - config path
   - download directory
   - received files grouped by sender folder (`sender_name_nodeID_vx6`)
+- `vx6://transfers` page showing:
+  - sender-grouped received transfers
+  - browser-side sent transfer history
+  - transfer timestamps and status
+  - transfer dashboard navigation integration
 
 ## How It Is Built Today
 
@@ -103,12 +108,23 @@ Planned follow-up work:
 - better integrated localhost and internet navigation rules 
 - file transfer progress indicators and download speed display
 - a button to open received file folders directly on the filesystem
-- structured receive storage where incoming files are grouped into sender-specific VX6 directories      (`sender_name_nodeID_vx6`)
 - browser-side visualization for sender-grouped received file folders
 - automatic creation of sender-specific receive directories during incoming file transfers
 - safer receive storage organization instead of mixing VX6 files into the global Downloads directory
 - debugging and validation work for ensuring the active runtime receive path correctly creates sender-specific receive folders
 - future transfer history and per-sender download tracking support
+- safer receive storage organization outside the global Downloads root
+- automatic sender-grouped receive directory creation during incoming transfers
+- browser-side transfer history persistence for sent and received transfers
+- transfer retry and failed-transfer recovery support
+- transfer progress tracking and live speed monitoring integration
+- runtime validation for active receive-directory creation behavior
+- recent peer activity tracking and persistence
+- transfer observability and operational logging improvements
+- safer local file access and filesystem permission handling
+- better localhost and internet navigation separation enforcement
+- session persistence for active VX6 tabs and internal pages
+- future queued/offline transfer experimentation for decentralized delivery workflows
 
 ## How To Contribute
 

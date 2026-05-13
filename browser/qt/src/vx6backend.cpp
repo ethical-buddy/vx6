@@ -11,6 +11,8 @@
 #include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTextStream>
+#include <QDateTime>
 
 #include <chrono>
 #include <thread>
@@ -394,6 +396,8 @@ QString VX6Backend::homePageHtml() const
     cards += dashboardCard("vx6://dht", "DHT", "Open lookup, replication, and resolver health.", "#23c18f");
     cards += dashboardCard("vx6://registry", "Registry", "Inspect the discovery registry snapshot.", "#ffd166");
     cards += dashboardCard("vx6://services", "Services", "View local configured services.", "#f78c6b");
+    cards += dashboardCard("vx6://transfers","Transfers","View grouped received files and transfer history.","#4cd137");
+
 
     QString body;
     body += QStringLiteral(
@@ -408,7 +412,7 @@ QString VX6Backend::homePageHtml() const
     body += QStringLiteral(
         "<div class=\"section\"><h2>Shortcuts</h2>"
         "<div class=\"hint\">Use <code>vx6://status</code>, <code>vx6://dht</code>, <code>vx6://services</code>, "
-        "<code>vx6://peers</code>, and <code>vx6://identity</code> as your overview pages. Operational actions live in the left drawer.</div>"
+        "<code>vx6://peers</code>, <code>vx6://transfers</code> and <code>vx6://identity</code> as your overview pages. Operational actions live in the left drawer.</div>"
         "</div>");
 
     return makePageShell("VX6 Home", "One system. One key. One VX6 runtime.", body, "#6ea8ff");
@@ -696,8 +700,34 @@ QString VX6Backend::sendFile(const QString &filePath, const QString &target, boo
     bool ok = false;
     const QString result = runVX6(args, &ok);
     if (ok) {
+        QFile historyFile(QDir::homePath() + "/.vx6-transfer-history.log");
+
+        if (historyFile.open(QIODevice::Append | QIODevice::Text))
+        {
+            QTextStream out(&historyFile);
+
+            out << QDateTime::currentDateTime().toString(Qt::ISODate)
+                << "|SEND|SUCCESS|"
+                << QFileInfo(trimmedFile).fileName()
+                << "|"
+                << trimmedTarget
+                << "\n";
+        }
         return QStringLiteral("file send complete:\n%1").arg(result.trimmed());
     }
+    QFile historyFile(QDir::homePath() + "/.vx6-transfer-history.log");
+
+        if (historyFile.open(QIODevice::Append | QIODevice::Text))
+        {
+            QTextStream out(&historyFile);
+
+            out << QDateTime::currentDateTime().toString(Qt::ISODate)
+                << "|SEND|FAILED|"
+                << QFileInfo(trimmedFile).fileName()
+                << "|"
+                << trimmedTarget
+                << "\n";
+        }
     return QStringLiteral("file send failed:\n%1").arg(result.trimmed());
 }
 
@@ -798,15 +828,19 @@ QString VX6Backend::downloadedFilesHtml(const QString &downloadDir) const
             rows.append(QStringLiteral("<li><strong>%1</strong> — %2</li>")
                 .arg(info.fileName().toHtmlEscaped(), QString::number(info.size())));
         }
-        sections.append(QStringLiteral("<div class=\"hint\"><strong>%1</strong></div><ul style=\"margin:0 0 16px 20px;\">%2</ul>")
-            .arg(folder.fileName().toHtmlEscaped(), rows.join(QString())));
+       sections.append(QStringLiteral(
+    "<div class=\"panel\">"
+    "<h3>Sender Group: %1</h3>"
+    "%2"
+    "</div>")
+    .arg(folder.fileName().toHtmlEscaped(), rows.join(QString())));
     }
 
     if (sections.isEmpty()) {
         return QStringLiteral("<div class=\"output\">No sender-specific received folders found. Received files are stored in sender subdirectories ending with <code>_vx6</code>.</div>");
     }
 
-    return QStringLiteral("<div class=\"output\">%1</div>").arg(sections.join(QString()));
+    return sections.join(QString());
 }
 
 QString VX6Backend::filesPageHtml() const
@@ -815,6 +849,7 @@ QString VX6Backend::filesPageHtml() const
     const QString configPath = resolveConfigPath();
     const QString downloadDir = currentDownloadPath();
     const QString filesHtml = downloadedFilesHtml(downloadDir);
+   
     const QString body = QStringLiteral(
         "<div class=\"hint\">This page shows file receive/download status and quick file transfer actions.</div>"
         "<div class=\"section\"><h2>Receive Status</h2>%1</div>"
@@ -823,6 +858,82 @@ QString VX6Backend::filesPageHtml() const
         "<div class=\"section\"><h2>Downloaded Files</h2>%4</div>")
         .arg(commandBlock(status), commandBlock(configPath), commandBlock(downloadDir), filesHtml);
     return makePageShell("VX6 Files", "File transfer and receive status", body, "#ff9f43");
+}
+QString VX6Backend::transfersPageHtml() const
+{
+    const QString downloadDir = currentDownloadPath();
+    const QString filesHtml = downloadedFilesHtml(downloadDir);
+
+    const QString sentHtml = sentTransfersHtml();
+
+    const QString body = QStringLiteral(
+        "<div class=\"hint\">This page shows grouped VX6 file transfers and received files.</div>"
+        "<div class=\"section\"><h2>Download Directory</h2>%1</div>"
+        "<div class=\"section\"><h2>Transfer Groups</h2>%2</div>"
+        "<div class=\"section\"><h2>Sent Transfers</h2>%3</div>")
+        .arg(commandBlock(downloadDir), filesHtml, sentHtml);
+    return makePageShell(
+        "VX6 Transfers",
+        "Grouped transfer history and received files",
+        body,
+        "#4cd137");
+}
+QString VX6Backend::sentTransfersHtml() const
+{
+    QFile historyFile(QDir::homePath() + "/.vx6-transfer-history.log");
+
+    if (!historyFile.exists())
+    {
+        return QStringLiteral(
+            "<div class=\"output\">No sent transfer history found.</div>");
+    }
+
+    if (!historyFile.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return QStringLiteral(
+            "<div class=\"output\">Failed to open sent transfer history.</div>");
+    }
+
+    QTextStream in(&historyFile);
+
+    QStringList rows;
+
+    while (!in.atEnd())
+    {
+        const QString line = in.readLine();
+        const QStringList parts = line.split('|');
+
+        if (parts.size() < 5)
+        {
+            continue;
+        }
+
+        const QString timestamp = parts[0];
+        const QString status = parts[2];
+        const QString fileName = parts[3];
+        const QString target = parts[4];
+
+        rows.append(QStringLiteral(
+            "<div style=\"padding:14px; margin-bottom:12px; border:1px solid rgba(255,255,255,0.08); border-radius:14px; background:rgba(255,255,255,0.02);\">"
+            "<div style=\"font-size:16px; font-weight:600; margin-bottom:8px;\">%1</div>"
+            "<div class=\"hint\">Target: %2</div>"
+            "<div class=\"hint\">Status: %3</div>"
+            "<div class=\"hint\">Time: %4</div>"
+            "</div>")
+            .arg(
+                fileName.toHtmlEscaped(),
+                target.toHtmlEscaped(),
+                status.toHtmlEscaped(),
+                timestamp.toHtmlEscaped()));
+    }
+
+    if (rows.isEmpty())
+    {
+        return QStringLiteral(
+            "<div class=\"output\">No sent transfers recorded yet.</div>");
+    }
+
+    return QStringLiteral("%1").arg(rows.join(QString()));
 }
 
 QString VX6Backend::stopHostedService(const QString &serviceName)
