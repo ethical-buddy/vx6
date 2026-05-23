@@ -39,6 +39,7 @@ const (
 	syncMaxRounds       = 3
 	syncParallelTargets = 6
 	dhtRefreshLead      = 5 * time.Minute
+	maxConcurrentConns  = 1024
 )
 
 type ServiceRefresher func() map[string]string
@@ -206,6 +207,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
+	connSem := make(chan struct{}, maxConcurrentConns)
 
 	for {
 		conn, err := listener.Accept()
@@ -223,8 +225,16 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
+		select {
+		case connSem <- struct{}{}:
+		default:
+			_ = conn.Close()
+			continue
+		}
+
 		wg.Add(1)
 		go func() {
+			defer func() { <-connSem }()
 			defer wg.Done()
 			defer conn.Close()
 			done := make(chan struct{})
@@ -236,8 +246,14 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				case <-done:
 				}
 			}()
+			//bug: after listener.Accept() the goroutine immediately calls proto.ReadHeader(reader) with no timeout
+			//a malicious peer can open thousands of tcp connections without sending data each holding a goroutine+file descriptor forever
 			reader := bufio.NewReader(conn)
+			//fix:add a read deadline immediately after the reader is created
+			conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 			kind, err := proto.ReadHeader(reader)
+			//after successful read clear the deadline
+			conn.SetReadDeadline(time.Time{})
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					return
