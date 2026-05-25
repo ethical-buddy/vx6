@@ -39,6 +39,7 @@ type NodeConfig struct {
 	HideEndpoint         bool             `json:"hide_endpoint"`
 	RelayMode            string           `json:"relay_mode,omitempty"`
 	RelayResourcePercent int              `json:"relay_resource_percent,omitempty"`
+	MaxConcurrentConns   int              `json:"max_concurrent_conns,omitempty"`
 	DataDir              string           `json:"data_dir"`
 	DownloadDir          string           `json:"download_dir"`
 	KnownPeerAddrs       []string         `json:"known_peer_addrs,omitempty"`
@@ -352,6 +353,7 @@ func normalize(cfg *File) {
 		cfg.Node.RelayMode = RelayModeOn
 	}
 	cfg.Node.RelayResourcePercent = NormalizeRelayResourcePercent(cfg.Node.RelayResourcePercent)
+	cfg.Node.MaxConcurrentConns = NormalizeMaxConcurrentConns(cfg.Node.MaxConcurrentConns)
 	if cfg.Node.DataDir == "" || cfg.Node.DataDir == "./data/inbox" {
 		cfg.Node.DataDir = defaultDataDirValue()
 	}
@@ -601,6 +603,19 @@ func NormalizeRelayResourcePercent(percent int) int {
 		return 90
 	default:
 		return percent
+	}
+}
+
+func NormalizeMaxConcurrentConns(n int) int {
+	switch {
+	case n <= 0:
+		return 1024
+	case n < 64:
+		return 64
+	case n > 65535:
+		return 65535
+	default:
+		return n
 	}
 }
 

@@ -31,14 +31,22 @@ import (
 )
 
 const (
-	syncCycleInterval   = 10 * time.Second
-	syncWarmupInterval  = 2 * time.Second
-	syncWarmupRounds    = 4
-	syncTargetTimeout   = 2 * time.Second
-	syncProbeTimeout    = 1 * time.Second
-	syncMaxRounds       = 3
-	syncParallelTargets = 6
-	dhtRefreshLead      = 5 * time.Minute
+	syncCycleInterval         = 10 * time.Second
+	syncWarmupInterval        = 2 * time.Second
+	syncWarmupRounds          = 4
+	syncTargetTimeout         = 2 * time.Second
+	syncProbeTimeout          = 1 * time.Second
+	syncMaxRounds             = 3
+	syncParallelTargets       = 6
+	dhtRefreshLead            = 5 * time.Minute
+	defaultMaxConcurrentConns = 1024
+	headerReadDeadline        = 10 * time.Second
+	handshakeDeadline         = 30 * time.Second
+	dhtPayloadDeadline        = 15 * time.Second
+	discoveryDeadline         = 30 * time.Second
+	relayHandshakeDeadline    = 60 * time.Second
+	serviceProxyDeadline      = 30 * time.Second
+	idleSessionDeadline       = 5 * time.Minute
 )
 
 type ServiceRefresher func() map[string]string
@@ -53,6 +61,7 @@ type Config struct {
 	HideEndpoint         bool
 	RelayMode            string
 	RelayResourcePercent int
+	MaxConcurrentConns   int
 	DataDir              string
 	ReceiveDir           string
 	FileReceiveMode      string
@@ -206,6 +215,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
+	connCap := effectiveMaxConcurrentConns(cfg.MaxConcurrentConns)
+	connSem := make(chan struct{}, connCap)
+	fmt.Fprintf(log, "connection cap: %d concurrent connections\n", connCap)
 
 	for {
 		conn, err := listener.Accept()
@@ -223,8 +235,17 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
+		select {
+		case connSem <- struct{}{}:
+		default:
+			fmt.Fprintf(log, "connection cap saturated (%d/%d), dropping connection from %s\n", connCap, connCap, conn.RemoteAddr().String())
+			_ = conn.Close()
+			continue
+		}
+
 		wg.Add(1)
 		go func() {
+			defer func() { <-connSem }()
 			defer wg.Done()
 			defer conn.Close()
 			done := make(chan struct{})
@@ -236,7 +257,13 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				case <-done:
 				}
 			}()
+
 			reader := bufio.NewReader(conn)
+
+			if err := conn.SetReadDeadline(time.Now().Add(headerReadDeadline)); err != nil {
+				fmt.Fprintf(log, "failed to set header read deadline for %s: %v\n", conn.RemoteAddr().String(), err)
+				return
+			}
 			kind, err := proto.ReadHeader(reader)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -245,16 +272,26 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
 				return
 			}
+
+			if err := conn.SetReadDeadline(time.Time{}); err != nil {
+				fmt.Fprintf(log, "failed to clear header deadline for %s: %v\n", conn.RemoteAddr().String(), err)
+				return
+			}
+
 			liveCfg := runtimeConfig(cfg)
 			relayGovernor.Update(liveCfg.RelayMode, liveCfg.RelayResourcePercent)
 
 			switch kind {
 			case proto.KindFileTransfer:
+
+				_ = conn.SetDeadline(time.Now().Add(handshakeDeadline))
 				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
 				if err != nil {
 					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
+
+				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
 				res, err := transfer.ReceiveFileWithPolicy(secureConn, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg))
 				if err != nil {
 					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
@@ -266,17 +303,23 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				}
 				fmt.Fprintf(log, "received %q (%d bytes) from node %q into %s\n", res.FileName, res.BytesReceived, res.SenderNode, absPath)
 			case proto.KindDiscoveryReq:
+
+				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
 				if err := cfg.Registry.HandleConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
 					fmt.Fprintf(log, "discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
 				fmt.Fprintf(log, "processed discovery request from %s\n", conn.RemoteAddr().String())
 			case proto.KindDHT:
+
+				_ = conn.SetReadDeadline(time.Now().Add(dhtPayloadDeadline))
 				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
 				if err != nil {
 					fmt.Fprintf(log, "dht read error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
+
+				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
 				var dr proto.DHTRequest
 				if err := json.Unmarshal(payload, &dr); err != nil {
 					fmt.Fprintf(log, "dht decode error from %s: %v\n", conn.RemoteAddr().String(), err)
@@ -294,11 +337,15 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					return
 				}
 				defer release()
+
+				_ = conn.SetDeadline(time.Now().Add(relayHandshakeDeadline))
 				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindExtend, cfg.Identity)
 				if err != nil {
 					fmt.Fprintf(log, "extend secure handshake error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
+
+				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
 				if err := onion.HandleExtend(ctx, secureConn, cfg.Identity); err != nil {
 					fmt.Fprintf(log, "extend error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
@@ -309,6 +356,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					return
 				}
 				defer release()
+
+				_ = conn.SetDeadline(time.Now().Add(relayHandshakeDeadline))
 				liveServices := liveCfg.Services
 				if err := hidden.HandleConn(ctx, &bufferedConn{Conn: conn, reader: reader}, hidden.HandlerConfig{
 					Identity:      cfg.Identity,
@@ -321,6 +370,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					fmt.Fprintf(log, "hidden service error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			case proto.KindServiceConn:
+
+				_ = conn.SetDeadline(time.Now().Add(serviceProxyDeadline))
 				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, runtimeServices(cfg)); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
@@ -336,6 +387,13 @@ func endpointPublishMode(hidden bool) string {
 		return "hidden"
 	}
 	return "published"
+}
+
+func effectiveMaxConcurrentConns(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return defaultMaxConcurrentConns
 }
 
 func shouldRunPeerSyncTasks(cfg Config) bool {
@@ -1019,6 +1077,7 @@ func runtimeConfig(base Config) Config {
 	live.HideEndpoint = cfgFile.Node.HideEndpoint
 	live.RelayMode = cfgFile.Node.RelayMode
 	live.RelayResourcePercent = cfgFile.Node.RelayResourcePercent
+	live.MaxConcurrentConns = cfgFile.Node.MaxConcurrentConns
 	live.PeerAddrs = config.ConfiguredPeerAddresses(cfgFile)
 	live.FileReceiveMode = cfgFile.Node.FileReceiveMode
 	live.AllowedFileSenders = append([]string(nil), cfgFile.Node.AllowedFileSenders...)

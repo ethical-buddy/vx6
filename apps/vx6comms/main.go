@@ -1684,6 +1684,35 @@ func parseDeviceNamesFromFFmpeg(kind string) []string {
 	return opts
 }
 
+func (s *state) runDeviceTest(cfg mediaConfig) (string, error) {
+	vConn, vPort, err := listenRTPPort()
+	if err != nil {
+		return "", fmt.Errorf("could not open video RTP port: %w", err)
+	}
+	defer vConn.Close()
+	aConn, aPort, err := listenRTPPort()
+	if err != nil {
+		return "", fmt.Errorf("could not open audio RTP port: %w", err)
+	}
+	defer aConn.Close()
+
+	cmd := buildFFmpegCaptureCommand(vPort, aPort, cfg)
+	if cmd == nil {
+		return "", fmt.Errorf("ffmpeg not found or unsupported platform")
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		snippet := string(output)
+		if len(snippet) > 512 {
+			snippet = snippet[:512] + "…"
+		}
+		return "", fmt.Errorf("device test failed: %w\n%s", err, snippet)
+	}
+	report := fmt.Sprintf("Device test passed.\nVideo device: %s\nAudio device: %s\nResolution: %dx%d @ %d fps\nVideo bitrate: %d kbps\nAudio bitrate: %d kbps",
+		cfg.VideoDevice, cfg.AudioDevice, cfg.Width, cfg.Height, cfg.FPS, cfg.VideoBitrateKbps, cfg.AudioBitrateKbps)
+	return report, nil
+}
+
 func (s *state) showMediaPreview(path string, win fyne.Window) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
