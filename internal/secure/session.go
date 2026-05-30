@@ -14,6 +14,8 @@ import (
 	"io"
 	"net"
 
+	"golang.org/x/crypto/hkdf"
+
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 )
@@ -90,8 +92,15 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 		return nil, fmt.Errorf("derive shared key: %w", err)
 	}
 
-	key := sha256.Sum256(append(shared, kind))
-	block, err := aes.NewCipher(key[:])
+	localEph := priv.PublicKey().Bytes()
+	transcript := buildTranscript(kind, localEph, remoteEph, id.NodeID, remoteHello.NodeID, initiator)
+
+	key, err := deriveKey(shared, transcript)
+	if err != nil {
+		return nil, fmt.Errorf("derive session key: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
 	}
@@ -114,6 +123,44 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 		c.readDir = 0
 	}
 	return c, nil
+}
+
+func deriveKey(sharedSecret, transcript []byte) ([]byte, error) {
+	salt := sha256.Sum256(transcript)
+	kdf := hkdf.New(sha256.New, sharedSecret, salt[:], []byte("vx6-session-v1"))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(kdf, key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func buildTranscript(kind byte, localEph, remoteEph []byte, localID, remoteID string, initiator bool) []byte {
+	var clientEph, serverEph []byte
+	var clientID, serverID string
+	if initiator {
+		clientEph = localEph
+		serverEph = remoteEph
+		clientID = localID
+		serverID = remoteID
+	} else {
+		clientEph = remoteEph
+		serverEph = localEph
+		clientID = remoteID
+		serverID = localID
+	}
+
+	var out []byte
+	out = append(out, []byte("vx6-transcript-v1\n")...)
+	out = append(out, kind)
+	out = append(out, '\n')
+	out = append(out, []byte(clientID)...)
+	out = append(out, '\n')
+	out = append(out, []byte(serverID)...)
+	out = append(out, '\n')
+	out = append(out, clientEph...)
+	out = append(out, serverEph...)
+	return out
 }
 
 func (c *Conn) LocalNodeID() string {
