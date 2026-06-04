@@ -141,3 +141,8 @@ b4d5e89 | progb4atys | progb4pawgs@gmail.com | Sat May 23 23:10:00 2026 +0530 | 
 66e7e0f | nakoshi | 131874894+SonOfTroll@users.noreply.github.com | Mon May 25 14:23:49 2026 +0530 | fix(node): add handshake timeout and connection limit to accept loop (#34)
 653be95 | progb4atys | progb4pawgs@gmail.com | Sat May 30 20:38:27 2026 +0530 | secure: use HKDF for session key derivation, bind transcript to both peers
 f72ca28 | Nolan | 131874894+SonOfTroll@users.noreply.github.com | Sat May 30 20:53:24 2026 +0530 | Merge pull request #1 from ethical-buddy/main
+b70c816 | suryansh deshwal | suryanshdeshwal@gmail.com | Thu Jun 4 21:00:03 2026 +0530 | Add VX6 ownership proof package
+4c688a8 | suryansh deshwal | suryanshdeshwal@gmail.com | Thu Jun 4 21:01:48 2026 +0530 | untracked files on main: b70c816 Add VX6 ownership proof package
+1207322 | suryansh deshwal | suryanshdeshwal@gmail.com | Thu Jun 4 21:01:48 2026 +0530 | index on main: b70c816 Add VX6 ownership proof package
+49807ea | suryansh deshwal | suryanshdeshwal@gmail.com | Thu Jun 4 21:01:48 2026 +0530 | On main: preserve unrelated local files before ownership proof push
+4aae5de | suryansh deshwal | suryanshdeshwal@gmail.com | Thu Jun 4 21:00:03 2026 +0530 | Add VX6 ownership proof package
