@@ -23,7 +23,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxext-dev libxkbcommon-dev libgl1-mesa-dev
+          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxext-dev libxkbcommon-dev libgl1-mesa-dev libxxf86vm-dev
 
       - name: Build all
         run: go build ./...
