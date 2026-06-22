@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Suryansh Deshwal
+// Licensed under the Apache License, Version 2.0
+
 package node
 
 import (
