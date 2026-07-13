@@ -4,10 +4,12 @@
 package secure
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -23,8 +25,11 @@ import (
 
 const maxHandshakeSize = 8 * 1024
 const maxChunkSize = 32 * 1024
+const secureSessionVersion byte = 1
+const secureSessionLabel = "vx6-secure-session"
 
 type hello struct {
+	Version   byte   `json:"version"`
 	NodeID    string `json:"node_id"`
 	PublicKey string `json:"public_key"`
 	Ephemeral string `json:"ephemeral"`
@@ -93,8 +98,11 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 		return nil, fmt.Errorf("derive shared key: %w", err)
 	}
 
-	key := sha256.Sum256(append(shared, kind))
-	block, err := aes.NewCipher(key[:])
+	key, err := deriveSessionKey(shared, kind, id.NodeID, remoteHello.NodeID, priv.PublicKey().Bytes(), remoteEph)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
 	}
@@ -165,8 +173,9 @@ func (c *Conn) Write(p []byte) (int, error) {
 }
 
 func buildHello(id identity.Identity, kind byte, eph []byte) (hello, error) {
-	sig := ed25519.Sign(id.PrivateKey, signingPayload(kind, id.NodeID, eph))
+	sig := ed25519.Sign(id.PrivateKey, signingPayload(secureSessionVersion, kind, id.NodeID, eph))
 	return hello{
+		Version:   secureSessionVersion,
 		NodeID:    id.NodeID,
 		PublicKey: base64.StdEncoding.EncodeToString(id.PublicKey),
 		Ephemeral: base64.StdEncoding.EncodeToString(eph),
@@ -185,6 +194,10 @@ func readHello(r io.Reader, kind byte) (hello, error) {
 		return hello{}, fmt.Errorf("decode handshake: %w", err)
 	}
 
+	if h.Version != secureSessionVersion {
+		return hello{}, fmt.Errorf("unsupported secure-session version %d", h.Version)
+	}
+
 	pub, err := base64.StdEncoding.DecodeString(h.PublicKey)
 	if err != nil {
 		return hello{}, fmt.Errorf("decode public key: %w", err)
@@ -201,7 +214,7 @@ func readHello(r io.Reader, kind byte) (hello, error) {
 	if identity.NodeIDFromPublicKey(ed25519.PublicKey(pub)) != h.NodeID {
 		return hello{}, fmt.Errorf("handshake node id mismatch")
 	}
-	if !ed25519.Verify(ed25519.PublicKey(pub), signingPayload(kind, h.NodeID, eph), sig) {
+	if !ed25519.Verify(ed25519.PublicKey(pub), signingPayload(secureSessionVersion, kind, h.NodeID, eph), sig) {
 		return hello{}, fmt.Errorf("handshake signature verification failed")
 	}
 
@@ -224,15 +237,46 @@ func (h hello) ephemeralBytes() ([]byte, error) {
 	return eph, nil
 }
 
-func signingPayload(kind byte, nodeID string, eph []byte) []byte {
+func signingPayload(version byte, kind byte, nodeID string, eph []byte) []byte {
 	var out []byte
 	out = append(out, []byte("vx6-secure\n")...)
+	out = append(out, version)
+	out = append(out, '\n')
 	out = append(out, kind)
 	out = append(out, '\n')
 	out = append(out, []byte(nodeID)...)
 	out = append(out, '\n')
 	out = append(out, eph...)
 	return out
+}
+
+func deriveSessionKey(shared []byte, kind byte, localNodeID, peerNodeID string, localEph, peerEph []byte) ([]byte, error) {
+	transcript := sessionTranscript(kind, localNodeID, peerNodeID, localEph, peerEph)
+	key, err := hkdf.Key(sha256.New, shared, transcript, secureSessionLabel, 32)
+	if err != nil {
+		return nil, fmt.Errorf("derive session key: %w", err)
+	}
+	return key, nil
+}
+
+func sessionTranscript(kind byte, localNodeID, peerNodeID string, localEph, peerEph []byte) []byte {
+	aID, bID, aEph, bEph := localNodeID, peerNodeID, localEph, peerEph
+	if localNodeID > peerNodeID || (localNodeID == peerNodeID && bytes.Compare(localEph, peerEph) > 0) {
+		aID, bID, aEph, bEph = peerNodeID, localNodeID, peerEph, localEph
+	}
+
+	var out bytes.Buffer
+	out.WriteString("vx6-secure-session\n")
+	out.WriteByte(kind)
+	out.WriteByte('\n')
+	out.WriteString(aID)
+	out.WriteByte('\n')
+	out.WriteString(bID)
+	out.WriteByte('\n')
+	out.Write(aEph)
+	out.WriteByte('\n')
+	out.Write(bEph)
+	return out.Bytes()
 }
 
 func nonce(dir byte, counter uint64) []byte {
