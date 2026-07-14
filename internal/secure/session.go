@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -24,7 +25,10 @@ import (
 const maxHandshakeSize = 8 * 1024
 const maxChunkSize = 32 * 1024
 
+const sessionVersion = uint8(2)
+
 type hello struct {
+	Version   uint8  `json:"version"`
 	NodeID    string `json:"node_id"`
 	PublicKey string `json:"public_key"`
 	Ephemeral string `json:"ephemeral"`
@@ -74,6 +78,10 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 		return nil, err
 	}
 
+	if remoteHello.Version != sessionVersion {
+		return nil, fmt.Errorf("secure: peer uses session version %d, we require %d", remoteHello.Version, sessionVersion)
+	}
+
 	if !initiator {
 		if err := writeHello(conn, localHello); err != nil {
 			return nil, err
@@ -93,8 +101,21 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 		return nil, fmt.Errorf("derive shared key: %w", err)
 	}
 
-	key := sha256.Sum256(append(shared, kind))
-	block, err := aes.NewCipher(key[:])
+	localStaticPub := []byte(id.PublicKey)
+	remoteStaticPub, err := base64.StdEncoding.DecodeString(remoteHello.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode remote static public key: %w", err)
+	}
+
+	localEph := priv.PublicKey().Bytes()
+	transcript := buildTranscript(kind, localEph, remoteEph, localStaticPub, remoteStaticPub, initiator)
+
+	key, err := deriveKey(shared, transcript)
+	if err != nil {
+		return nil, fmt.Errorf("derive session key: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
 	}
@@ -117,6 +138,42 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 		c.readDir = 0
 	}
 	return c, nil
+}
+
+func deriveKey(sharedSecret, transcript []byte) ([]byte, error) {
+	salt := sha256.Sum256(transcript)
+	key, err := hkdf.Key(sha256.New, sharedSecret, salt[:], "vx6-session-v2", 32)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func buildTranscript(kind byte, localEph, remoteEph, localStaticPub, remoteStaticPub []byte, initiator bool) []byte {
+	var clientEph, serverEph, clientPub, serverPub []byte
+	if initiator {
+		clientEph = localEph
+		serverEph = remoteEph
+		clientPub = localStaticPub
+		serverPub = remoteStaticPub
+	} else {
+		clientEph = remoteEph
+		serverEph = localEph
+		clientPub = remoteStaticPub
+		serverPub = localStaticPub
+	}
+
+	var out []byte
+	out = append(out, []byte("vx6-transcript-v2\n")...)
+	out = append(out, kind)
+	out = append(out, '\n')
+	out = append(out, clientPub...)
+	out = append(out, '\n')
+	out = append(out, serverPub...)
+	out = append(out, '\n')
+	out = append(out, clientEph...)
+	out = append(out, serverEph...)
+	return out
 }
 
 func (c *Conn) LocalNodeID() string {
@@ -165,8 +222,9 @@ func (c *Conn) Write(p []byte) (int, error) {
 }
 
 func buildHello(id identity.Identity, kind byte, eph []byte) (hello, error) {
-	sig := ed25519.Sign(id.PrivateKey, signingPayload(kind, id.NodeID, eph))
+	sig := ed25519.Sign(id.PrivateKey, signingPayload(sessionVersion, kind, id.NodeID, eph))
 	return hello{
+		Version:   sessionVersion,
 		NodeID:    id.NodeID,
 		PublicKey: base64.StdEncoding.EncodeToString(id.PublicKey),
 		Ephemeral: base64.StdEncoding.EncodeToString(eph),
@@ -201,7 +259,7 @@ func readHello(r io.Reader, kind byte) (hello, error) {
 	if identity.NodeIDFromPublicKey(ed25519.PublicKey(pub)) != h.NodeID {
 		return hello{}, fmt.Errorf("handshake node id mismatch")
 	}
-	if !ed25519.Verify(ed25519.PublicKey(pub), signingPayload(kind, h.NodeID, eph), sig) {
+	if !ed25519.Verify(ed25519.PublicKey(pub), signingPayload(h.Version, kind, h.NodeID, eph), sig) {
 		return hello{}, fmt.Errorf("handshake signature verification failed")
 	}
 
@@ -224,9 +282,11 @@ func (h hello) ephemeralBytes() ([]byte, error) {
 	return eph, nil
 }
 
-func signingPayload(kind byte, nodeID string, eph []byte) []byte {
+func signingPayload(version uint8, kind byte, nodeID string, eph []byte) []byte {
 	var out []byte
 	out = append(out, []byte("vx6-secure\n")...)
+	out = append(out, version)
+	out = append(out, '\n')
 	out = append(out, kind)
 	out = append(out, '\n')
 	out = append(out, []byte(nodeID)...)
