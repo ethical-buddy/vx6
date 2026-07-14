@@ -6,6 +6,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -387,7 +388,7 @@ func Publish(ctx context.Context, address string, rec record.EndpointRecord) (re
 		return record.EndpointRecord{}, err
 	}
 	if !resp.OK {
-		return record.EndpointRecord{}, fmt.Errorf(resp.Error)
+		return record.EndpointRecord{}, errors.New(resp.Error)
 	}
 	return resp.Record, nil
 }
@@ -401,7 +402,7 @@ func PublishService(ctx context.Context, address string, rec record.ServiceRecor
 		return record.ServiceRecord{}, err
 	}
 	if !resp.OK {
-		return record.ServiceRecord{}, fmt.Errorf(resp.Error)
+		return record.ServiceRecord{}, errors.New(resp.Error)
 	}
 	return resp.ServiceRecord, nil
 }
@@ -416,7 +417,7 @@ func Resolve(ctx context.Context, address, name, nodeID string) (record.Endpoint
 		return record.EndpointRecord{}, err
 	}
 	if !resp.OK {
-		return record.EndpointRecord{}, fmt.Errorf(resp.Error)
+		return record.EndpointRecord{}, errors.New(resp.Error)
 	}
 	if err := record.VerifyEndpointRecord(resp.Record, time.Now()); err != nil {
 		return record.EndpointRecord{}, err
@@ -433,7 +434,7 @@ func ResolveService(ctx context.Context, address, service string) (record.Servic
 		return record.ServiceRecord{}, err
 	}
 	if !resp.OK {
-		return record.ServiceRecord{}, fmt.Errorf(resp.Error)
+		return record.ServiceRecord{}, errors.New(resp.Error)
 	}
 	if err := record.VerifyServiceRecord(resp.ServiceRecord, time.Now()); err != nil {
 		return record.ServiceRecord{}, err
@@ -447,7 +448,7 @@ func Snapshot(ctx context.Context, address string) ([]record.EndpointRecord, []r
 		return nil, nil, err
 	}
 	if !resp.OK {
-		return nil, nil, fmt.Errorf(resp.Error)
+		return nil, nil, errors.New(resp.Error)
 	}
 	return resp.Records, resp.ServiceRecords, nil
 }

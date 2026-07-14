@@ -8,6 +8,7 @@ import (
 	"crypto/ecdh"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -304,7 +305,7 @@ func extendCircuit(conn net.Conn, circuitID [16]byte, relay record.EndpointRecor
 	if cmd == relayCmdError {
 		var e errorCommand
 		if json.Unmarshal(payload, &e) == nil && e.Message != "" {
-			return clientHop{}, fmt.Errorf(e.Message)
+			return clientHop{}, errors.New(e.Message)
 		}
 		return clientHop{}, fmt.Errorf("relay extend failed")
 	}
@@ -333,7 +334,7 @@ func beginCircuit(conn net.Conn, circuitID [16]byte, targetAddr string, hops []c
 	if cmd == relayCmdError {
 		var e errorCommand
 		if json.Unmarshal(payload, &e) == nil && e.Message != "" {
-			return fmt.Errorf(e.Message)
+			return errors.New(e.Message)
 		}
 		return fmt.Errorf("relay begin failed")
 	}
@@ -600,7 +601,7 @@ func (c *clientCircuitConn) readPump() {
 			case relayCmdError:
 				var e errorCommand
 				if json.Unmarshal(body, &e) == nil && e.Message != "" {
-					c.errCh <- fmt.Errorf(e.Message)
+					c.errCh <- errors.New(e.Message)
 				} else {
 					c.errCh <- fmt.Errorf("relay circuit closed with error")
 				}

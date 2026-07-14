@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -176,7 +177,7 @@ func send(ctx context.Context, infoPath, action string) (Response, error) {
 		if out.Error == "" {
 			out.Error = "runtime control rejected request"
 		}
-		return out, fmt.Errorf(out.Error)
+		return out, errors.New(out.Error)
 	}
 	return out, nil
 }
