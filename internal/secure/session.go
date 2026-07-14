@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Suryansh Deshwal
+// Licensed under the Apache License, Version 2.0
+
 package secure
 
 import (
@@ -5,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,8 +17,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-
-	"golang.org/x/crypto/hkdf"
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
@@ -140,9 +142,8 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 
 func deriveKey(sharedSecret, transcript []byte) ([]byte, error) {
 	salt := sha256.Sum256(transcript)
-	kdf := hkdf.New(sha256.New, sharedSecret, salt[:], []byte("vx6-session-v2"))
-	key := make([]byte, 32)
-	if _, err := io.ReadFull(kdf, key); err != nil {
+	key, err := hkdf.Key(sha256.New, sharedSecret, salt[:], "vx6-session-v2", 32)
+	if err != nil {
 		return nil, err
 	}
 	return key, nil
@@ -221,7 +222,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 }
 
 func buildHello(id identity.Identity, kind byte, eph []byte) (hello, error) {
-	sig := ed25519.Sign(id.PrivateKey, signingPayload(kind, id.NodeID, eph))
+	sig := ed25519.Sign(id.PrivateKey, signingPayload(sessionVersion, kind, id.NodeID, eph))
 	return hello{
 		Version:   sessionVersion,
 		NodeID:    id.NodeID,
@@ -258,7 +259,7 @@ func readHello(r io.Reader, kind byte) (hello, error) {
 	if identity.NodeIDFromPublicKey(ed25519.PublicKey(pub)) != h.NodeID {
 		return hello{}, fmt.Errorf("handshake node id mismatch")
 	}
-	if !ed25519.Verify(ed25519.PublicKey(pub), signingPayload(kind, h.NodeID, eph), sig) {
+	if !ed25519.Verify(ed25519.PublicKey(pub), signingPayload(h.Version, kind, h.NodeID, eph), sig) {
 		return hello{}, fmt.Errorf("handshake signature verification failed")
 	}
 
@@ -281,9 +282,11 @@ func (h hello) ephemeralBytes() ([]byte, error) {
 	return eph, nil
 }
 
-func signingPayload(kind byte, nodeID string, eph []byte) []byte {
+func signingPayload(version uint8, kind byte, nodeID string, eph []byte) []byte {
 	var out []byte
 	out = append(out, []byte("vx6-secure\n")...)
+	out = append(out, version)
+	out = append(out, '\n')
 	out = append(out, kind)
 	out = append(out, '\n')
 	out = append(out, []byte(nodeID)...)
