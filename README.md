@@ -271,5 +271,4 @@ Commercial-use request flow:
 1. Send a written request with intended commercial use details.
 2. Contact through:
    - Email: `suryanshdeshwal@gmail.com`
-   - GitHub: https://github.com/dailker
 3. Wait for explicit written approval and a signed commercial agreement before commercial deployment or distribution.
