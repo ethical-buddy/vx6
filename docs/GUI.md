@@ -3,7 +3,7 @@
 VX6 now has two local frontends:
 
 - `vx6-gui`
-- `browser/qt`, which builds the Qt browser shell
+- `products/browser/qt`, which builds the Qt browser shell
 
 ## What They Are
 
@@ -34,7 +34,7 @@ It exposes:
 - eBPF status
 - custom CLI argument execution
 
-## `browser/qt`
+## `products/browser/qt`
 
 This is the browser-style VX6 shell built with Qt WebEngine.
 It exposes:

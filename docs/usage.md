@@ -44,7 +44,7 @@ The invite secret is what keeps the blinded hidden lookup key from being guessab
 Open the Qt browser frontend:
 
 ```bash
-browser/qt/build/vx6-browser
+products/browser/qt/build/vx6-browser
 ```
 
 Use it when you want a browser-style home page with:

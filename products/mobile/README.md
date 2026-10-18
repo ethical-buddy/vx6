@@ -9,7 +9,7 @@ It intentionally exposes simple `string`/JSON APIs so `gomobile bind` can genera
 ```bash
 go install golang.org/x/mobile/cmd/gomobile@latest
 gomobile init
-gomobile bind -target=android/arm64,android/amd64 -o apps/vx6comms-android/app/libs/vx6mobile.aar ./mobile
+gomobile bind -target=android/arm64,android/amd64 -o products/apps/vx6comms-android/app/libs/vx6mobile.aar ./products/mobile
 ```
 
 Targets:
@@ -20,7 +20,7 @@ Targets:
 ## iOS
 
 ```bash
-gomobile bind -target=ios -o apps/vx6comms-ios/VX6Mobile.xcframework ./mobile
+gomobile bind -target=ios -o products/apps/vx6comms-ios/VX6Mobile.xcframework ./products/mobile
 ```
 
 ## First App Flow

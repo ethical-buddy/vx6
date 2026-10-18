@@ -21,7 +21,7 @@ VX6 is usable now for controlled testing and temporary internal deployment.
 - file transfer with local permission policy
 - runtime status and reload
 - `vx6-gui` over the same CLI/runtime surface
-- `browser/qt` as a separate Qt WebEngine frontend over the same VX6 binary
+- `products/browser/qt` as a separate Qt WebEngine frontend over the same VX6 binary
 
 ## Linux Position
 

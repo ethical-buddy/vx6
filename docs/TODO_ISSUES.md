@@ -22,7 +22,7 @@ This file is a short task list for follow-up PRs.
 - Add OS-specific adapter files only for paths, signals, firewall, and service manager behavior.
 - Add macOS support files for launch/startup and firewall guidance.
 - Add BSD support files for service startup and firewall guidance.
-- Add a fuller browser product on top of `browser/qt` that talks to the same local VX6 runtime API on every OS.
+- Add a fuller browser product on top of `products/browser/qt` that talks to the same local VX6 runtime API on every OS.
 
 ## Windows
 - Add a proper Windows installer that can create firewall rules during install.

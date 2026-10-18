@@ -20,7 +20,7 @@ No direct commits. Merge only via PR that passes:
 4. Fuzz smoke pass:
    - short fuzz job on DHT/session/signaling parsers
 5. App smoke checks:
-   - `apps/vx6comms` build
+   - `products/apps/vx6comms` build
    - startup + invite flow basic validation
 
 ## Release Process

@@ -54,19 +54,19 @@ The current browser app already provides:
 
 ## How It Is Built Today
 
-The browser is in `browser/qt`.
+The browser is in `products/browser/qt`.
 
 Main pieces:
 
-- `browser/qt/CMakeLists.txt`
+- `products/browser/qt/CMakeLists.txt`
   - CMake build entry for Qt 6 WebEngine
-- `browser/qt/src/main.cpp`
+- `products/browser/qt/src/main.cpp`
   - starts the app and registers the `vx6://` custom scheme
-- `browser/qt/src/browserwindow.cpp`
+- `products/browser/qt/src/browserwindow.cpp`
   - main window, toolbar, tabs, log drawer, and node control
-- `browser/qt/src/vx6backend.cpp`
+- `products/browser/qt/src/vx6backend.cpp`
   - runs the VX6 binary and turns command output into pages
-- `browser/qt/src/vx6schemehandler.cpp`
+- `products/browser/qt/src/vx6schemehandler.cpp`
   - serves `vx6://` pages inside Qt WebEngine
 
 The browser does not implement VX6 discovery or routing itself.
@@ -131,7 +131,7 @@ Planned follow-up work:
 The safest contribution model is:
 
 1. keep VX6 protocol changes in the Go core only
-2. keep browser work inside `browser/qt`
+2. keep browser work inside `products/browser/qt`
 3. keep Qt UI changes separate from protocol changes
 4. update docs whenever a visible browser behavior changes
 5. test the browser shell on at least Linux before claiming a UI change is done
@@ -153,8 +153,8 @@ Avoid mixing browser UI work with DHT or hidden-service logic unless the change 
 Linux example:
 
 ```bash
-cmake -S browser/qt -B browser/qt/build -DCMAKE_BUILD_TYPE=Release
-cmake --build browser/qt/build
+cmake -S products/browser/qt -B products/browser/qt/build -DCMAKE_BUILD_TYPE=Release
+cmake --build products/browser/qt/build
 ```
 
 If Qt is not found automatically, point CMake at your Qt installation first.
@@ -162,15 +162,15 @@ If Qt is not found automatically, point CMake at your Qt installation first.
 Windows example:
 
 ```powershell
-cmake -S browser/qt -B browser/qt/build -DCMAKE_BUILD_TYPE=Release
-cmake --build browser/qt/build --config Release
+cmake -S products/browser/qt -B products/browser/qt/build -DCMAKE_BUILD_TYPE=Release
+cmake --build products/browser/qt/build --config Release
 ```
 
 macOS example:
 
 ```bash
-cmake -S browser/qt -B browser/qt/build -DCMAKE_BUILD_TYPE=Release
-cmake --build browser/qt/build
+cmake -S products/browser/qt -B products/browser/qt/build -DCMAKE_BUILD_TYPE=Release
+cmake --build products/browser/qt/build
 ```
 
 The browser expects the VX6 binary to be available as:

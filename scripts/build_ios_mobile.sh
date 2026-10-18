@@ -7,7 +7,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="$ROOT/apps/vx6comms-ios/VX6Mobile.xcframework"
+OUT="$ROOT/products/apps/vx6comms-ios/VX6Mobile.xcframework"
 
 if ! command -v gomobile >/dev/null 2>&1; then
   echo "gomobile not found. Install with:"
@@ -20,6 +20,6 @@ gomobile init
 gomobile bind \
   -target=ios \
   -o "$OUT" \
-  "$ROOT/mobile"
+  "$ROOT/products/mobile"
 
 echo "wrote $OUT"

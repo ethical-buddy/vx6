@@ -11,8 +11,8 @@ It is separate from the Go protocol core:
 Example CMake build:
 
 ```bash
-cmake -S browser/qt -B browser/qt/build
-cmake --build browser/qt/build
+cmake -S products/browser/qt -B products/browser/qt/build
+cmake --build products/browser/qt/build
 ```
 
 The executable is `vx6-browser`.

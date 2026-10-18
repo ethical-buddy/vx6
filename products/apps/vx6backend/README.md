@@ -15,7 +15,7 @@ This app runs a local HTTP API on loopback and wraps the existing `vx6` CLI beha
 From repository root:
 
 ```bash
-go build -o vx6d ./apps/vx6backend/cmd/vx6d
+go build -o vx6d ./products/apps/vx6backend/cmd/vx6d
 ./vx6d --listen 127.0.0.1:4866
 ```
 

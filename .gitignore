@@ -1,4 +1,11 @@
 /vx6
+/vx6-gui
+/vx6-browser
+/vx6-proxy
+/vx6d
+/vx6comms
+/vx6share
+/vx6-benchmark-report.html
 /chat
 internal/ebpf/onion_relay.o
 cmd/vx6/vx6
@@ -22,6 +29,8 @@ apps/
 !apps/vx6comms-android/
 !apps/vx6comms-android/**
 platform/
+!products/
+!products/**
 
 # Content/editor scratch that should not block core VX6 development.
 website-content/
@@ -29,5 +38,13 @@ plan.md
 
 # Generated or exported artifacts.
 docs/main-protocol-hidden-implementation-plan.pdf
+docs/archive/internal-material/
+docs/archive/reports/
+docs/archive/provenance/
+docs/archive/legacy-file-map.md
+docs/internal/
+scripts/make_vx6_education_proposal_docx.py
 
 /.vscode
+
+products/apps/vx6comms-tauri/src-tauri/gen/

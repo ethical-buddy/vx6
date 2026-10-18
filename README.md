@@ -1,274 +1,94 @@
-<p align="right">
-<b>SPONSORED BY</b><br>
-<a href="https://github.com/dailker">@dailker (Ilker)</a>
-</p>
+# VX6
 
-<h1 align="center">VX6</h1>
+VX6 is a peer-to-peer service network for applications that already run locally. A VX6 node publishes signed service records, discovers peers through the DHT, and opens encrypted connections so another node can reach a service without exposing it directly to the public internet.
 
-<p align="center"> <strong>linux / windows / unix peer-to-peer service networking for real local apps.</strong><br> signed discovery, encrypted sessions, dht-backed lookup, relay paths, hidden services, file transfer, and a browser-ready frontend. </p> <p align="center"> this branch is the <strong>linux-first</strong> release branch.<br> build <code>vx6</code> and <code>vx6-gui</code> from the Go tree, and build the Qt browser frontend from <code>browser/qt</code>. </p>
+The core project is a Go module. It provides the `vx6` command and the Go SDK. Optional desktop, browser, and mobile projects live under [`products/`](products/README.md) and build independently.
 
-## What VX6 Is
+## What VX6 provides
 
-VX6 is a service network built for applications that already work locally.
+- Node identities and signed service records
+- Direct and DHT-backed service discovery
+- Encrypted node sessions and local service forwarding
+- Public, private, and invite-based hidden services
+- Relay paths and file transfer
+- Local status and runtime reload controls
 
-The model is simple:
+The current transport is TCP. QUIC and eBPF/XDP acceleration are not production transport paths. Hidden-service routing is under active hardening and should not be treated as equivalent to a mature anonymity network. See [security and limitations](docs/security.md).
 
-- your service stays on localhost
-- VX6 publishes a signed record for that service
-- another VX6 node resolves the record
-- VX6 creates an encrypted stream between the two nodes
-- the remote machine reaches the service through its own local forwarder
+## Repository map
 
-That means you do not have to redesign your application just to share it across a peer network.
+| Path | Purpose |
+|---|---|
+| `cmd/vx6/` | Main command entrypoint; builds the only core release binary, `vx6` |
+| `internal/` | Protocol and runtime implementation; private to this Go module |
+| `sdk/` | Public Go embedding API, including `sdk/chat` |
+| `products/` | Optional apps, Qt browser, and mobile bridge; independent build targets |
+| `deployments/` | systemd and Arch Linux packaging files |
+| `docs/` | Short user and contributor guides, architecture references, and archive material |
+| `scripts/` | Build helpers and maintenance utilities |
 
-VX6 is split into two layers:
+For the detailed directory and package map, see [Repository map](docs/repository-map.md). For app-specific status and build instructions, see [Products](products/README.md).
 
-- the Go core, which owns identity, discovery, DHT, relays, hidden services, and transfers
-- the browser/frontend layer, which presents those features in a local app UI without changing the core protocol
+## Build the core
 
-Good fits include:
+Requirements: Go version from [`go.mod`](go.mod); Linux builds that enable Fyne GUI dependencies may also need the system libraries noted in the product-specific documentation.
 
-- SSH
-- internal APIs
-- dashboards
-- development tools
-- databases
-- private admin services
-- hidden internal services
+```sh
+go build -o ./vx6 ./cmd/vx6
+```
 
-## What This Branch Is For
+Or use the Makefile:
 
-This branch is meant for:
-
-- Windows & UNIX/Linux builds
-- Test deployments
-- Production-style staging
-- The reference protocol and security behavior for VX6
-
-Typical binaries here are:
-
-- `vx6`
-- `vx6-gui`
-- `vx6-browser` from `browser/qt`
-
-## Connection Modes
-
-VX6 currently supports three access styles:
-
-1. `direct`
-   Connect to a known VX6 node address directly.
-
-2. `named`
-   Resolve a public or private service through discovery and the DHT.
-
-3. `hidden`
-   Resolve a hidden service through blinded DHT keys and relay paths.
-
-## What Works Right Now
-
-- signed node identity with Ed25519
-- encrypted node-to-node sessions
-- public service publishing and lookup
-- private per-user service catalogs
-- hidden services with:
-  - encrypted hidden descriptors
-  - blinded rotating DHT keys
-  - invite secrets
-  - anonymous descriptor store and lookup over relay paths
-- relay budgeting so transit work does not consume all local capacity
-- file transfer with local receive policy
-- runtime status and reload over a local control channel
-- TCP-based transport across the whole system
-- `vx6-gui` as a local web UI over the same CLI/runtime
-- `browser/qt` as a separate Qt WebEngine browser frontend that talks to the same VX6 binary
-
-## What Is Still In Progress
-
-- real QUIC transport
-- seamless mid-stream hidden TCP failover after relay loss
-- stronger anti-Sybil and WAN-tuned DHT behavior
-- a proven active eBPF/XDP fast path for the current encrypted relay plane
-- production-grade Windows installer and service automation
-- production-grade macOS packaging
-
-## Platform Notes
-
-### Linux
-
-This is the branch you should use if your target environment is Linux.
-
-Current Linux expectations:
-
-- build `vx6`
-- build `vx6-gui`
-- build `vx6-browser`
-- run the full current VX6 protocol feature set
-- use TCP transport
-- use the local runtime control channel
-- optionally use Linux-only eBPF/XDP status and attach commands
-
-Important:
-
-- eBPF/XDP is still experimental
-- it should be treated as optional work, not the reason to adopt VX6
-
-### Windows
-
-Windows follows the same protocol and service behavior through the shared Go core and Windows-specific runtime files.
-
-That branch is intended for:
-
-- `vx6.exe`
-- `vx6-gui.exe`
-- `vx6-browser` built from the Qt browser directory
-- Windows 11
-- Windows Server class deployments
-
-## Security Model In Plain Language
-
-VX6 is not claiming full Tor-equivalent anonymity.
-
-What it does provide today:
-
-- signed node and service identity
-- encrypted peer-to-peer sessions
-- encrypted hidden-service descriptors
-- blinded rotating hidden lookup keys
-- relay-based hidden-service paths
-
-What it still does not fully solve:
-
-- perfect traffic-analysis resistance
-- seamless hidden-stream continuation after relay failure
-- hardened large-scale adversarial DHT admission
-
-## Transport
-
-VX6 is currently TCP-only in production behavior.
-
-The config surface may still mention `quic` for forward compatibility, but the current build does not activate a real QUIC transport.
-
-## GUI
-
-`vx6-gui` is the local command-driven control UI.
-`browser/qt` is the browser-ready Qt WebEngine frontend.
-
-They are both thin frontends over the same VX6 core, so the protocol logic stays in one place.
-
-`vx6-gui`:
-
-- starts on your own machine
-- calls the `vx6` binary underneath
-- exposes the same core features through forms instead of shell commands
-
-`browser/qt`:
-
-- opens a colorful browser-style home page
-- supports `vx6://` internal pages
-- keeps runtime logs in a side panel
-- is designed so a future fuller browser can sit on top of the same backend
-
-This keeps the GUI aligned with the CLI and avoids splitting the protocol logic into two different apps.
-
-## Quick Start
-
-### Build
-
-```bash
+```sh
 make build
 ```
 
-Or:
+`make build` builds only `vx6`. The optional GUI, browser, and companion apps have separate instructions under `products/`.
 
-```bash
-go build ./cmd/vx6
-go build ./cmd/vx6-gui
-cmake -S browser/qt -B browser/qt/build
-cmake --build browser/qt/build
+## First node
+
+Initialize a node identity and configuration:
+
+```sh
+./vx6 init --name alice --listen '[::]:4242'
 ```
 
-### Initialize a node
+Start it in the foreground:
 
-```bash
-vx6 init --name alice --listen '[::]:4242'
+```sh
+./vx6 node
 ```
 
-### Run the node
+In another terminal, inspect status:
 
-```bash
-vx6 node
+```sh
+./vx6 status
 ```
 
-### Add a public service
+Publish a local service and connect to it from another node:
 
-```bash
-vx6 service add --name web --target 127.0.0.1:8080
+```sh
+./vx6 service add --name web --target 127.0.0.1:8080
+./vx6 connect --service alice.web --listen 127.0.0.1:8081
 ```
 
-### Inspect status
+The second command creates a local listener that forwards traffic to the discovered service. See [Usage](docs/usage.md) for complete workflows and [Commands](docs/commands.md) for CLI details.
 
-```bash
-vx6 status
-```
+## Use the Go SDK
 
-### Open the GUI
+Import `github.com/vx6/vx6/sdk` to embed node, forwarding, observation, and sharing APIs. Chat helpers are in `github.com/vx6/vx6/sdk/chat`. The SDK is the supported application boundary; `internal/` packages are implementation details.
 
-```bash
-vx6-gui
-```
-
-### Open the browser app
-
-```bash
-browser/qt/build/vx6-browser
-```
+Start with the [SDK guide](docs/sdk.md). Mobile binding experiments are documented separately under [`products/mobile`](products/mobile/README.md).
 
 ## Documentation
 
-- [Setup](./docs/SETUP.md)
-- [Linux Guide](./docs/LINUX.md)
-- [Usage](./docs/USAGE.md)
-- [Commands](./docs/COMMANDS.md)
-- [Architecture](./docs/architecture.md)
-- [Discovery](./docs/discovery.md)
-- [DHT](./docs/dht.md)
-- [Services](./docs/services.md)
-- [Identity](./docs/identity.md)
-- [GUI](./docs/GUI.md)
-- [SDK](./docs/SDK.md)
-- [Proxy Launcher](./docs/PROXY.md)
-- [Browser Frontend](./browser/qt/README.md)
-- [eBPF Status](./docs/ebpf.md)
-- [Systemd](./docs/systemd.md)
-- [Status](./docs/STATUS.md)
-- [File Map](./docs/FILE_MAP.md)
-- [Changes Directory](./docs/changes/)
+- [Setup and build](docs/setup.md)
+- [Usage workflows](docs/usage.md)
+- [Command reference](docs/commands.md)
+- [Architecture](docs/architecture.md)
+- [SDK guide](docs/sdk.md)
+- [Current status and limitations](docs/status.md)
+- [Security notes](docs/security.md)
+- [Contributing](CONTRIBUTING.md)
 
-## Release Position
-
-VX6 is already a working system for controlled testing and temporary internal deployment.
-
-It is best described as:
-
-- a strong working prototype
-- protocol-complete enough for real usage
-- still in need of hardening, failover polish, and deeper adversarial testing
-
-## Licensing
-
-VX6 uses a dual-licensing model:
-
-- Open/community usage is available under Apache-2.0: [LICENSE](./LICENSE)
-- Commercial usage requires prior written permission from Suryansh Deshwal under separate terms: [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md)
-
-Related legal files:
-
-- [NOTICE](./NOTICE)
-- [TRADEMARK.md](./TRADEMARK.md)
-
-Commercial-use request flow:
-
-1. Send a written request with intended commercial use details.
-2. Contact through:
-   - Email: `suryanshdeshwal@gmail.com`
-3. Wait for explicit written approval and a signed commercial agreement before commercial deployment or distribution.
+Archived proposals, benchmark reports, and provenance material are kept outside the main reading path in `docs/archive/`.
