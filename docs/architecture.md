@@ -86,21 +86,16 @@ Important point:
 - diversity checks can use an optional offline ASN map when operators provide one
 - if no ASN map exists, the DHT falls back to the existing prefix-based diversity logic
 
-## 6. Encryption
+## 6. Security layers
 
-VX6 uses two different protection layers:
+The CLI dataplane is moving to two standard protection layers:
 
-- secure session encryption between nodes
-- layered relay protection for hidden-service paths
+- IKEv2-managed IPsec ESP tunnel mode protects routed inner IP packets, including their transport headers, while they cross the tunnel.
+- QUIC with TLS 1.3 is the intended primary service transport; TCP with TLS 1.3 is the fallback. Both authenticate the expected peer and encrypt service data.
 
-Hidden services also use:
+The layers have different jobs. IPsec protects packets on the network path; the service transport authenticates the VX6 peer and protects the service connection. Per-peer service authorization is a separate policy check and must happen before a backend connection is opened. These target properties are not all implemented yet; see [the current security status](security.md) and [the dataplane threat model](dataplane-threat-model.md).
 
-- encrypted hidden descriptors
-- blinded rotating lookup keys
-- invite secrets
-
-That means a hidden invite is not just a name.
-It is the name plus a secret part that changes the lookup key.
+Hidden services also use encrypted descriptors, blinded rotating lookup keys, and invite secrets. These mechanisms are separate from normal-mode endpoint identity and dataplane transport protection.
 
 ## 7. Hidden Services
 
@@ -120,11 +115,19 @@ Current result:
 The browser frontend and GUI both sit on top of this same core.
 They do not change the protocol.
 
-## 8. Transport
+## 8. CLI service dataplane
 
-Current transport is TCP only.
+The target direct-service flow is:
 
-The code keeps a transport abstraction so QUIC can be added later, but this build does not use QUIC.
+1. The nodes establish an IKEv2-authenticated IPsec ESP tunnel using a maintained platform implementation.
+2. VX6 establishes a QUIC connection with TLS 1.3 mutual authentication and verifies the expected node identity.
+3. Each forwarded local TCP connection gets a bidirectional QUIC stream. A bounded encrypted request selects an opaque configured service identifier.
+4. The receiving node checks the authenticated peer's service permission before dialing only the configured local backend.
+5. TCP with TLS 1.3 provides a fallback when QUIC is unavailable. It uses the same peer identity and service authorization policy; security failures never trigger fallback.
+
+The repository currently has a custom secure session and QUIC transport code, but QUIC is not yet the `auto` default, its current wrapper exposes one stream per connection, IKEv2/IPsec is not integrated, and service authorization needs work. The target architecture is a roadmap, not a claim about the current build. See [the dataplane threat model](dataplane-threat-model.md) for packet visibility, assumptions, and acceptance checks.
+
+The tunnel does not provide anonymity. The outer tunnel endpoint addresses, packet sizes, timing, and volume remain observable. Normal mode accepts endpoint identity exposure; hidden-mode identity protection is handled separately.
 
 ## 9. Runtime Control
 
