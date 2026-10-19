@@ -113,6 +113,13 @@ firewall behavior, tunnel-loss fail-closed behavior, and a packet capture
 showing ESP rather than VX6 TCP/QUIC payloads. No such two-peer wire test has
 been completed by the current repository tests.
 
+Run `scripts/test-ipsec-containers.sh` to install the real nftables rules in
+two separate Docker network namespaces and verify that a cleartext TCP
+connection to a VX6 listener is dropped. This checks Linux firewall hook
+behavior only; it does not launch strongSwan, establish IKE/ESP, test wrong-key
+authentication, or capture tunnel packets. Those remain required integration
+tests before describing the dataplane as verified.
+
 For an already provisioned Linux peer pair, run
 `sudo bash scripts/verify-ipsec-linux.sh <interface> <peer-ipv6> <vx6-port> -- <traffic-test-command>`.
 It checks the installed SA and XFRM state, captures the outer interface while
