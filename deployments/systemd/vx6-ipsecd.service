@@ -1,0 +1,32 @@
+[Unit]
+Description=VX6 IPsec Control Service
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/bin/swanctl
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=vx6
+RuntimeDirectoryMode=0755
+StateDirectory=vx6/ipsec
+StateDirectoryMode=0700
+ExecStart=/usr/bin/vx6-ipsecd --config /etc/vx6/ipsecd.json
+ExecStartPre=/usr/bin/swanctl --list-sas
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ReadWritePaths=/run/vx6 /var/lib/vx6/ipsec
+
+[Install]
+WantedBy=multi-user.target

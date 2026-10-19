@@ -18,50 +18,6 @@ import (
 	"github.com/vx6/vx6/internal/runtimectl"
 )
 
-func TestStatusProbeAddrUsesAdvertiseForWildcardListen(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.File{
-		Node: config.NodeConfig{
-			ListenAddr:    "[::]:4242",
-			AdvertiseAddr: "[2001:db8::10]:4242",
-		},
-	}
-
-	if got := statusProbeAddr(cfg); got != "[2001:db8::10]:4242" {
-		t.Fatalf("unexpected probe address %q", got)
-	}
-}
-
-func TestStatusProbeAddrFallsBackToLoopbackForWildcardListen(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.File{
-		Node: config.NodeConfig{
-			ListenAddr: "[::]:4242",
-		},
-	}
-
-	if got := statusProbeAddr(cfg); got != "[::1]:4242" {
-		t.Fatalf("unexpected probe address %q", got)
-	}
-}
-
-func TestStatusProbeAddrKeepsConcreteListenAddress(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.File{
-		Node: config.NodeConfig{
-			ListenAddr:    "[2001:db8::20]:4242",
-			AdvertiseAddr: "[2001:db8::10]:4242",
-		},
-	}
-
-	if got := statusProbeAddr(cfg); got != "[2001:db8::20]:4242" {
-		t.Fatalf("unexpected probe address %q", got)
-	}
-}
-
 func TestExtractLeadingConnectService(t *testing.T) {
 	t.Parallel()
 
@@ -166,6 +122,55 @@ func TestRunPeerRedactsStoredPeerAddresses(t *testing.T) {
 	}
 	if strings.Contains(output, "[2001:db8::10]:4242") {
 		t.Fatalf("peer output leaked address: %q", output)
+	}
+}
+
+func TestSignedEndpointRecordCanBeExportedAndUsedAsBootstrap(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	t.Setenv("VX6_CONFIG_PATH", configPath)
+	store, err := config.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Node.Name = "bootstrap"
+	cfg.Node.DataDir = filepath.Join(root, "data")
+	cfg.Node.AdvertiseAddr = "[2001:db8::10]:4242"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	idStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := idStore.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	endpointPath := filepath.Join(root, "endpoint.json")
+	if err := runIdentityExportEndpoint([]string{"--out", endpointPath}); err != nil {
+		t.Fatalf("export signed endpoint: %v", err)
+	}
+	if err := runPeer([]string{"add", "--record", endpointPath}); err != nil {
+		t.Fatalf("import signed bootstrap endpoint: %v", err)
+	}
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers, _ := registry.Snapshot()
+	if len(peers) != 1 || peers[0].NodeName != "bootstrap" || peers[0].Address != cfg.Node.AdvertiseAddr {
+		t.Fatalf("signed endpoint was not imported into local registry: %+v", peers)
+	}
+	updated, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Node.KnownPeers) != 1 || updated.Node.KnownPeers[0].PublicKey != peers[0].PublicKey {
+		t.Fatalf("signed public key was not persisted in known peers: %+v", updated.Node.KnownPeers)
 	}
 }
 

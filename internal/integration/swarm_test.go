@@ -23,14 +23,26 @@ import (
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/serviceproxy"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
+
+func testRootContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return vxtransport.WithDialGuard(ctx, func(context.Context, string) error { return nil }), cancel
+}
+
+func newIntegrationDHT(nodeID string) *dht.Server {
+	server := dht.NewServer(nodeID)
+	server.SetDialGuard(func(context.Context, string) error { return nil })
+	return server
+}
 
 func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-node integration test in short mode")
 	}
 
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -82,7 +94,7 @@ func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 		t.Fatalf("resolve service from client registry: %v", err)
 	}
 
-	dhtClient := dht.NewServer("observer")
+	dhtClient := newIntegrationDHT("observer")
 	dhtClient.RT.AddNode(proto.NodeInfo{ID: "seed:" + bootstrap.listenAddr, Addr: bootstrap.listenAddr})
 
 	waitForCondition(t, 5*time.Second, func() bool {
@@ -140,7 +152,7 @@ func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 }
 
 func TestDirectIPv6ServiceWithoutBootstrap(t *testing.T) {
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -172,7 +184,7 @@ func TestDirectIPv6ServiceWithoutBootstrap(t *testing.T) {
 }
 
 func TestSyncOnlyBootstrapClientLearnsAndUsesRemoteService(t *testing.T) {
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -243,7 +255,7 @@ func TestBootstrapLossStillAllowsRepublish(t *testing.T) {
 		t.Skip("skipping bootstrap-loss integration test in short mode")
 	}
 
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -309,7 +321,7 @@ func TestBootstrapLossStillAllowsRepublish(t *testing.T) {
 		return err == nil && rec.Address == ownerRestarted.listenAddr
 	}, "peer-to-peer owner record update after bootstrap loss")
 
-	dhtClient := dht.NewServer("post-bootstrap-client")
+	dhtClient := newIntegrationDHT("post-bootstrap-client")
 	dhtClient.RT.AddNode(proto.NodeInfo{ID: "peer:" + cachedPeer.Address, Addr: cachedPeer.Address})
 	waitForCondition(t, 10*time.Second, func() bool {
 		value, err := dhtClient.RecursiveFindValue(rootCtx, dht.ServiceKey("owner.echo"))
@@ -322,7 +334,7 @@ func TestBootstrapLossStillAllowsRepublish(t *testing.T) {
 }
 
 func TestDeadBootstrapIsSkippedWhileHealthyBootstrapStillSyncs(t *testing.T) {
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -349,7 +361,7 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 		t.Skip("skipping hidden-service integration test in short mode")
 	}
 
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -411,7 +423,7 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 		t.Fatalf("hidden owner endpoint should not be published publicly")
 	}
 
-	dhtClient := dht.NewServer("hidden-observer")
+	dhtClient := newIntegrationDHT("hidden-observer")
 	dhtClient.RT.AddNode(proto.NodeInfo{ID: "seed:" + bootstrap.listenAddr, Addr: bootstrap.listenAddr})
 	hiddenKey := dht.HiddenServiceKey(serviceInvite)
 	var serviceRec record.ServiceRecord
@@ -555,7 +567,7 @@ func TestHiddenServiceReconnectsAfterIntroLoss(t *testing.T) {
 		t.Skip("set VX6_RUN_HIDDEN_FAILOVER=1 to run the relay-loss hidden failover scenario")
 	}
 
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -691,7 +703,7 @@ func TestPrivateServiceCatalogLookup(t *testing.T) {
 		return publicSeen && !privateSeen
 	}, "public registry without private service leak")
 
-	observer := dht.NewServer("observer")
+	observer := newIntegrationDHT("observer")
 	observer.RT.AddNode(proto.NodeInfo{ID: bootstrap.id.NodeID, Addr: bootstrap.listenAddr})
 	nodes, _ := client.registry.Snapshot()
 	for _, rec := range nodes {
@@ -731,7 +743,7 @@ func TestOnionRelayInspectVisibility(t *testing.T) {
 		t.Skip("skipping onion relay inspection integration test in short mode")
 	}
 
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
 	baseDir := t.TempDir()
@@ -914,6 +926,23 @@ type runningNode struct {
 	registry   *discovery.Registry
 }
 
+type integrationIPsec struct{}
+
+func (integrationIPsec) PreparePeer(_ context.Context, peer record.EndpointRecord) error {
+	return record.VerifyEndpointRecord(peer, time.Now())
+}
+
+func (integrationIPsec) EnsurePeer(_ context.Context, peer record.EndpointRecord) error {
+	return record.VerifyEndpointRecord(peer, time.Now())
+}
+
+func (integrationIPsec) AcceptPeer(context.Context, string) bool { return true }
+
+var signedTestEndpoints = struct {
+	sync.RWMutex
+	byAddress map[string]record.EndpointRecord
+}{byAddress: make(map[string]record.EndpointRecord)}
+
 func startVX6Node(t *testing.T, parent context.Context, dir, name string, bootstraps []string, services map[string]string) runningNode {
 	return startVX6NodeWithOptions(t, parent, nodeOptions{
 		dir:        dir,
@@ -962,6 +991,26 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 	if advertiseAddr == "" && !opts.disableAdvertise {
 		advertiseAddr = listenAddr
 	}
+	for _, bootstrapAddr := range opts.bootstraps {
+		signedTestEndpoints.RLock()
+		bootstrap, ok := signedTestEndpoints.byAddress[bootstrapAddr]
+		signedTestEndpoints.RUnlock()
+		if ok {
+			if err := registry.Import([]record.EndpointRecord{bootstrap}, nil); err != nil {
+				t.Fatalf("seed signed bootstrap identity for %s: %v", opts.name, err)
+			}
+		}
+	}
+	var ownEndpoint record.EndpointRecord
+	if advertiseAddr != "" {
+		ownEndpoint, err = record.NewEndpointRecord(id, opts.name, advertiseAddr, 24*time.Hour, time.Now())
+		if err != nil {
+			t.Fatalf("create signed endpoint for %s: %v", opts.name, err)
+		}
+		signedTestEndpoints.Lock()
+		signedTestEndpoints.byAddress[advertiseAddr] = ownEndpoint
+		signedTestEndpoints.Unlock()
+	}
 	configPath := filepath.Join(opts.dir, "config.json")
 	store, err := config.NewStore(configPath)
 	if err != nil {
@@ -1006,6 +1055,7 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		DHT:           dht.NewServerWithIdentity(id),
 		Identity:      id,
 		Registry:      registry,
+		IPsecTunnel:   integrationIPsec{},
 		RefreshServices: func() map[string]string {
 			c, err := store.Load()
 			if err != nil {

@@ -1,0 +1,6 @@
+{
+  "socket": "/run/vx6/ipsecd.sock",
+  "state_dir": "/var/lib/vx6/ipsec",
+  "socket_gid": 998,
+  "allowed_uids": [1000]
+}

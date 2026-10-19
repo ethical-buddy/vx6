@@ -21,6 +21,8 @@ import (
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/hidden"
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/ipsec"
+	"github.com/vx6/vx6/internal/netutil"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
@@ -101,9 +103,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 service")
 	fmt.Fprintln(w, "  vx6 peer")
 	fmt.Fprintln(w, "  vx6 list [--user USER] [--hidden]")
-	fmt.Fprintln(w, "  vx6 peer add --addr [ipv6]:port [--name NAME]")
+	fmt.Fprintln(w, "  vx6 peer add --record ENDPOINT.json")
+	fmt.Fprintln(w, "  vx6 peer add --addr [ipv6]:port [--name NAME] (address only; IPsec requires a signed record)")
+	fmt.Fprintln(w, "  vx6 peer revoke --node-id ID (local, persistent deny)")
 	fmt.Fprintln(w, "  vx6 identity")
 	fmt.Fprintln(w, "  vx6 identity rename --name NAME")
+	fmt.Fprintln(w, "  vx6 identity export-endpoint --addr [ipv6]:port --out FILE [--ttl 24h]")
 	fmt.Fprintln(w, "  vx6 status")
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
@@ -510,6 +515,20 @@ func runNode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	bootstrapRecords := make([]record.EndpointRecord, 0, len(cfgFile.Node.KnownPeers))
+	for _, peer := range cfgFile.Node.KnownPeers {
+		rec := record.EndpointRecord{
+			NodeID: peer.NodeID, NodeName: peer.NodeName, Address: peer.Address,
+			PublicKey: peer.PublicKey, IssuedAt: peer.IdentityIssuedAt,
+			ExpiresAt: peer.IdentityExpiresAt, Signature: peer.IdentitySignature,
+		}
+		if record.VerifyEndpointRecord(rec, time.Now()) == nil {
+			bootstrapRecords = append(bootstrapRecords, rec)
+		}
+	}
+	if err := registry.Import(bootstrapRecords, nil); err != nil {
+		return fmt.Errorf("load signed bootstrap identities: %w", err)
+	}
 	controlInfoPath, err := config.RuntimeControlPath(store.Path())
 	if err != nil {
 		return err
@@ -628,6 +647,18 @@ func runConnect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		return err
+	}
+	if err := importConfiguredKnownPeers(cfg, registry); err != nil {
+		return err
+	}
+	_, guard, err := newIPsecDialGuard(cfg, id, registry, nil)
+	if err != nil {
+		return err
+	}
+	ctx = vxtransport.WithDialGuard(ctx, guard)
 
 	requestServiceName := requestedServiceName(finalSvc)
 	serviceRec := record.ServiceRecord{}
@@ -645,6 +676,18 @@ func runConnect(ctx context.Context, args []string) error {
 		serviceRec, err = resolveServiceDistributed(ctx, cfg, finalSvc)
 		if err != nil {
 			return fmt.Errorf("service %q not found. try running 'vx6 list --user NAME' or 'vx6 list --hidden' to verify", finalSvc)
+		}
+	}
+	if !serviceRec.IsHidden && *addrFlag == "" {
+		peer, err := resolveNodeDistributed(ctx, cfg, serviceRec.NodeName)
+		if err != nil {
+			return fmt.Errorf("resolve signed peer identity for service %s: %w", finalSvc, err)
+		}
+		if peer.NodeID != serviceRec.NodeID || peer.Address != serviceRec.Address || peer.PublicKey != serviceRec.PublicKey {
+			return fmt.Errorf("service record does not match its signed node endpoint")
+		}
+		if err := registry.Import([]record.EndpointRecord{peer}, nil); err != nil {
+			return fmt.Errorf("cache verified peer identity: %w", err)
 		}
 	}
 
@@ -824,13 +867,115 @@ func runService(args []string) error {
 }
 
 func runPeer(args []string) error {
+	if len(args) > 0 && args[0] == "revoke" {
+		fs := flag.NewFlagSet("peer revoke", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		nodeID := fs.String("node-id", "", "verified peer node ID to revoke locally")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *nodeID == "" {
+			return errors.New("peer revoke requires --node-id")
+		}
+		store, err := config.NewStore("")
+		if err != nil {
+			return err
+		}
+		cfg, err := store.Load()
+		if err != nil {
+			return err
+		}
+		var peer record.EndpointRecord
+		for _, entry := range cfg.Node.KnownPeers {
+			if entry.NodeID == *nodeID {
+				peer = record.EndpointRecord{NodeID: entry.NodeID, NodeName: entry.NodeName, Address: entry.Address, PublicKey: entry.PublicKey, IssuedAt: entry.IdentityIssuedAt, ExpiresAt: entry.IdentityExpiresAt, Signature: entry.IdentitySignature}
+				break
+			}
+		}
+		if peer.NodeID == "" {
+			return fmt.Errorf("no signed endpoint record for peer %q in the local peer directory", *nodeID)
+		}
+		if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+			return fmt.Errorf("cannot revoke peer without a current verified endpoint record: %w", err)
+		}
+		idStore, err := identity.NewStoreForConfig(store.Path())
+		if err != nil {
+			return err
+		}
+		id, err := idStore.Load()
+		if err != nil {
+			return err
+		}
+		localAddress := cfg.Node.AdvertiseAddr
+		if localAddress == "" {
+			_, port, err := net.SplitHostPort(cfg.Node.ListenAddr)
+			if err != nil {
+				return fmt.Errorf("invalid configured listener address: %w", err)
+			}
+			localAddress, err = netutil.DetectAdvertiseAddress(port)
+			if err != nil {
+				return err
+			}
+		}
+		client, err := ipsec.NewClient(ipsec.DefaultSocket(), localAddress, id)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := client.RevokePeer(ctx, peer); err != nil {
+			return err
+		}
+		fmt.Printf("peer_revoked_locally\t%s\n", peer.NodeID)
+		return nil
+	}
 	if len(args) >= 1 && args[0] == "add" {
 		fs := flag.NewFlagSet("peer add", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		name := fs.String("name", "", "peer name")
 		addr := fs.String("addr", "", "peer address")
+		recordPath := fs.String("record", "", "verified signed endpoint record JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		if *recordPath != "" {
+			data, err := os.ReadFile(*recordPath)
+			if err != nil {
+				return fmt.Errorf("read endpoint record: %w", err)
+			}
+			var peer record.EndpointRecord
+			if err := json.Unmarshal(data, &peer); err != nil {
+				return fmt.Errorf("decode endpoint record: %w", err)
+			}
+			if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+				return fmt.Errorf("reject endpoint record: %w", err)
+			}
+			if *addr != "" && *addr != peer.Address {
+				return fmt.Errorf("--addr does not match the signed endpoint record")
+			}
+			if *name != "" && *name != peer.NodeName {
+				return fmt.Errorf("--name does not match the signed endpoint record")
+			}
+			store, err := config.NewStore("")
+			if err != nil {
+				return err
+			}
+			if err := store.UpsertKnownPeerRecord(peer); err != nil {
+				return err
+			}
+			cfg, err := store.Load()
+			if err != nil {
+				return err
+			}
+			registry, err := loadLocalRegistry(cfg.Node.DataDir)
+			if err != nil {
+				return err
+			}
+			if err := registry.Import([]record.EndpointRecord{peer}, nil); err != nil {
+				return err
+			}
+			fmt.Printf("known_peer\t%s\t%s\n", peer.NodeName, peer.Address)
+			return nil
 		}
 		if *addr == "" {
 			*addr = prompt("Peer Address")
@@ -936,6 +1081,18 @@ func runSend(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		return err
+	}
+	if err := importConfiguredKnownPeers(cfg, registry); err != nil {
+		return err
+	}
+	_, guard, err := newIPsecDialGuard(cfg, id, registry, nil)
+	if err != nil {
+		return err
+	}
+	ctx = vxtransport.WithDialGuard(ctx, guard)
 	if *nodeName == "" {
 		*nodeName = cfg.Node.Name
 	}
@@ -1185,40 +1342,14 @@ func runStatus(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	probeAddr := statusProbeAddr(cfg)
-	conn, err := vxtransport.DialTimeout(cfg.Node.TransportMode, probeAddr, 500*time.Millisecond)
-	if err != nil {
-		printRuntimeStatus("OFFLINE", runtimectl.Status{
-			NodeName:        cfg.Node.Name,
-			AdvertiseAddr:   cfg.Node.AdvertiseAddr,
-			EndpointPublish: endpointPublishMode(cfg.Node.HideEndpoint),
-			TransportConfig: cfg.Node.TransportMode,
-			TransportActive: vxtransport.EffectiveMode(cfg.Node.TransportMode),
-			RelayMode:       cfg.Node.RelayMode,
-			RelayPercent:    cfg.Node.RelayResourcePercent,
-		})
-		return nil
-	}
-	_ = conn.Close()
-
-	registry, regErr := loadLocalRegistry(cfg.Node.DataDir)
-	nodeCount := 0
-	serviceCount := 0
-	if regErr == nil {
-		nodes, services := registry.Snapshot()
-		nodeCount = len(nodes)
-		serviceCount = len(services)
-	}
-	printRuntimeStatus("ONLINE", runtimectl.Status{
-		NodeName:         cfg.Node.Name,
-		AdvertiseAddr:    cfg.Node.AdvertiseAddr,
-		EndpointPublish:  endpointPublishMode(cfg.Node.HideEndpoint),
-		TransportConfig:  cfg.Node.TransportMode,
-		TransportActive:  vxtransport.EffectiveMode(cfg.Node.TransportMode),
-		RelayMode:        cfg.Node.RelayMode,
-		RelayPercent:     cfg.Node.RelayResourcePercent,
-		RegistryNodes:    nodeCount,
-		RegistryServices: serviceCount,
+	printRuntimeStatus("OFFLINE", runtimectl.Status{
+		NodeName:        cfg.Node.Name,
+		AdvertiseAddr:   cfg.Node.AdvertiseAddr,
+		EndpointPublish: endpointPublishMode(cfg.Node.HideEndpoint),
+		TransportConfig: cfg.Node.TransportMode,
+		TransportActive: vxtransport.EffectiveMode(cfg.Node.TransportMode),
+		RelayMode:       cfg.Node.RelayMode,
+		RelayPercent:    cfg.Node.RelayResourcePercent,
 	})
 	return nil
 }
@@ -1272,23 +1403,6 @@ func printRuntimeStatus(label string, status runtimectl.Status) {
 	fmt.Printf("hidden_descriptor_stale\t%d\n", status.HiddenDescriptorStale)
 }
 
-func statusProbeAddr(cfg config.File) string {
-	probe := cfg.Node.ListenAddr
-	host, port, err := net.SplitHostPort(probe)
-	if err != nil {
-		return probe
-	}
-
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		if cfg.Node.AdvertiseAddr != "" {
-			return cfg.Node.AdvertiseAddr
-		}
-		return net.JoinHostPort("::1", port)
-	}
-
-	return probe
-}
-
 func runIdentity(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("identity", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1299,6 +1413,8 @@ func runIdentity(ctx context.Context, args []string) error {
 		switch fs.Args()[0] {
 		case "rename":
 			return runIdentityRename(ctx, fs.Args()[1:])
+		case "export-endpoint":
+			return runIdentityExportEndpoint(fs.Args()[1:])
 		default:
 			return fmt.Errorf("unknown identity subcommand %q", fs.Args()[0])
 		}
@@ -1327,6 +1443,60 @@ func runIdentity(ctx context.Context, args []string) error {
 	fmt.Printf("relay_mode\t%s\n", cfg.Node.RelayMode)
 	fmt.Printf("relay_percent\t%d\n", cfg.Node.RelayResourcePercent)
 	fmt.Printf("config_path\t%s\n", store.Path())
+	return nil
+}
+
+func runIdentityExportEndpoint(args []string) error {
+	fs := flag.NewFlagSet("identity export-endpoint", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addr := fs.String("addr", "", "IPv6 VX6 endpoint")
+	name := fs.String("name", "", "node name (defaults to configured name)")
+	outPath := fs.String("out", "", "output file (defaults to stdout)")
+	ttl := fs.Duration("ttl", 24*time.Hour, "record validity")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if *name == "" {
+		*name = cfg.Node.Name
+	}
+	if *addr == "" {
+		*addr = cfg.Node.AdvertiseAddr
+	}
+	if *name == "" || *addr == "" {
+		return errors.New("identity export-endpoint requires a configured node name and --addr")
+	}
+	idStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		return err
+	}
+	id, err := idStore.Load()
+	if err != nil {
+		return err
+	}
+	endpoint, err := record.NewEndpointRecord(id, *name, *addr, *ttl, time.Now())
+	if err != nil {
+		return err
+	}
+	data, err := record.JSON(endpoint)
+	if err != nil {
+		return err
+	}
+	if *outPath == "" {
+		_, err = os.Stdout.Write(data)
+		return err
+	}
+	if err := os.WriteFile(*outPath, data, 0o600); err != nil {
+		return fmt.Errorf("write signed endpoint record: %w", err)
+	}
+	fmt.Printf("endpoint_record\t%s\t%s\n", endpoint.NodeName, endpoint.Address)
 	return nil
 }
 
@@ -1841,6 +2011,13 @@ func resolvePeerForSend(ctx context.Context, store *config.Store, cfg config.Fil
 	if err != nil {
 		return "", err
 	}
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		return "", err
+	}
+	if err := registry.Import([]record.EndpointRecord{rec}, nil); err != nil {
+		return "", fmt.Errorf("cache verified peer identity: %w", err)
+	}
 	_ = store.AddPeer(rec.NodeName, rec.Address)
 	return rec.Address, nil
 }
@@ -2205,21 +2382,42 @@ func newDHTClient(cfg config.File) (*dht.Server, error) {
 	_, _ = dht.ConfigureASNResolver(mustDefaultConfigPath())
 	client := dht.NewServer("cli-observer")
 	var registryNodes []record.EndpointRecord
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := importConfiguredKnownPeers(cfg, registry); err != nil {
+		return nil, err
+	}
+	registryNodes, _ = registry.Snapshot()
 
 	for _, addr := range config.ConfiguredPeerAddresses(cfg) {
 		if addr != "" {
 			client.RT.AddNode(proto.NodeInfo{ID: "seed:" + addr, Addr: addr})
 		}
 	}
-	if registry, err := loadLocalRegistry(cfg.Node.DataDir); err == nil {
-		nodes, _ := registry.Snapshot()
-		registryNodes = append(registryNodes, nodes...)
-		for _, rec := range nodes {
-			if rec.NodeID != "" && rec.Address != "" {
-				client.RT.AddNode(proto.NodeInfo{ID: rec.NodeID, Addr: rec.Address})
-			}
+	for _, rec := range registryNodes {
+		if record.VerifyEndpointRecord(rec, time.Now()) == nil {
+			client.RT.AddNode(dht.NodeInfoFromEndpointRecord(rec))
 		}
 	}
+	store, err := config.NewStore("")
+	if err != nil {
+		return nil, err
+	}
+	idStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		return nil, err
+	}
+	id, err := idStore.Load()
+	if err != nil {
+		return nil, err
+	}
+	_, guard, err := newIPsecDialGuard(cfg, id, registry, client.RT)
+	if err != nil {
+		return nil, err
+	}
+	client.SetDialGuard(guard)
 	client.SetHiddenDescriptorPrivacy(dht.HiddenDescriptorPrivacyConfig{
 		TransportMode: cfg.Node.TransportMode,
 		RelayHopCount: 3,
@@ -2238,6 +2436,62 @@ func newDHTClient(cfg config.File) (*dht.Server, error) {
 		},
 	})
 	return client, nil
+}
+
+func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discovery.Registry, rt *dht.RoutingTable) (*ipsec.Client, vxtransport.DialGuard, error) {
+	localAddr := cfg.Node.AdvertiseAddr
+	if localAddr == "" {
+		_, port, err := net.SplitHostPort(cfg.Node.ListenAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve local IPv6 endpoint for IPsec: %w", err)
+		}
+		localAddr, err = netutil.DetectAdvertiseAddress(port)
+		if err != nil {
+			return nil, nil, fmt.Errorf("detect local IPv6 endpoint for IPsec: %w", err)
+		}
+	}
+	client, err := ipsec.NewClient(ipsec.DefaultSocket(), localAddr, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	guard := func(ctx context.Context, addr string) error {
+		if registry != nil {
+			nodes, _ := registry.Snapshot()
+			for _, peer := range nodes {
+				if peer.Address == addr && record.VerifyEndpointRecord(peer, time.Now()) == nil {
+					return client.EnsurePeer(ctx, peer)
+				}
+			}
+		}
+		if rt != nil {
+			info, ok := rt.NodeByAddress(addr)
+			if ok && dht.VerifyNodeInfo(info, time.Now()) == nil {
+				peer := record.EndpointRecord{
+					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
+					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
+					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
+				}
+				return client.EnsurePeer(ctx, peer)
+			}
+		}
+		return fmt.Errorf("no verified signed peer identity for endpoint %s", addr)
+	}
+	return client, guard, nil
+}
+
+func importConfiguredKnownPeers(cfg config.File, registry *discovery.Registry) error {
+	records := make([]record.EndpointRecord, 0, len(cfg.Node.KnownPeers))
+	for _, peer := range cfg.Node.KnownPeers {
+		rec := record.EndpointRecord{
+			NodeID: peer.NodeID, NodeName: peer.NodeName, Address: peer.Address,
+			PublicKey: peer.PublicKey, IssuedAt: peer.IdentityIssuedAt,
+			ExpiresAt: peer.IdentityExpiresAt, Signature: peer.IdentitySignature,
+		}
+		if err := record.VerifyEndpointRecord(rec, time.Now()); err == nil {
+			records = append(records, rec)
+		}
+	}
+	return registry.Import(records, nil)
 }
 
 func mustDefaultConfigPath() string {

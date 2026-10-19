@@ -296,22 +296,49 @@ func (c *Client) ResolveService(ctx context.Context, service string) (record.Ser
 func (c *Client) newDHTClient(cfg config.File) (*dht.Server, error) {
 	_, _ = dht.ConfigureASNResolver(c.store.Path())
 	client := dht.NewServer("sdk-observer")
+	idStore, err := identity.NewStoreForConfig(c.store.Path())
+	if err != nil {
+		return nil, err
+	}
+	id, err := idStore.Load()
+	if err != nil {
+		return nil, err
+	}
 	var registryNodes []record.EndpointRecord
+	registry, err := discovery.NewRegistry(filepath.Join(cfg.Node.DataDir, "registry.json"))
+	if err != nil {
+		return nil, err
+	}
+	for _, configured := range cfg.Node.KnownPeers {
+		peer := record.EndpointRecord{
+			NodeID: configured.NodeID, NodeName: configured.NodeName, Address: configured.Address,
+			PublicKey: configured.PublicKey, IssuedAt: configured.IdentityIssuedAt,
+			ExpiresAt: configured.IdentityExpiresAt, Signature: configured.IdentitySignature,
+		}
+		if record.VerifyEndpointRecord(peer, time.Now()) == nil {
+			if err := registry.Import([]record.EndpointRecord{peer}, nil); err != nil {
+				return nil, err
+			}
+		}
+	}
+	nodes, _ := registry.Snapshot()
+	registryNodes = append(registryNodes, nodes...)
+	for _, peer := range nodes {
+		if record.VerifyEndpointRecord(peer, time.Now()) == nil {
+			client.RT.AddNode(dht.NodeInfoFromEndpointRecord(peer))
+		}
+	}
 
 	for _, addr := range config.ConfiguredPeerAddresses(cfg) {
 		if addr != "" {
 			client.RT.AddNode(proto.NodeInfo{ID: "seed:" + addr, Addr: addr})
 		}
 	}
-	if registry, err := discovery.NewRegistry(filepath.Join(cfg.Node.DataDir, "registry.json")); err == nil {
-		nodes, _ := registry.Snapshot()
-		registryNodes = append(registryNodes, nodes...)
-		for _, rec := range nodes {
-			if rec.NodeID != "" && rec.Address != "" {
-				client.RT.AddNode(proto.NodeInfo{ID: rec.NodeID, Addr: rec.Address})
-			}
-		}
+	guard, err := c.peerDialGuard(cfg, id, registry, client.RT)
+	if err != nil {
+		return nil, err
 	}
+	client.SetDialGuard(guard)
 	client.SetHiddenDescriptorPrivacy(dht.HiddenDescriptorPrivacyConfig{
 		TransportMode: cfg.Node.TransportMode,
 		RelayHopCount: 3,

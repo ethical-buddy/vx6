@@ -88,12 +88,12 @@ Important point:
 
 ## 6. Security layers
 
-The CLI dataplane is moving to two standard protection layers:
+The CLI dataplane target is:
 
-- IKEv2-managed IPsec ESP tunnel mode protects routed inner IP packets, including their transport headers, while they cross the tunnel.
-- QUIC with TLS 1.3 is the intended primary service transport; TCP with TLS 1.3 is the fallback. Both authenticate the expected peer and encrypt service data.
+- IKEv2 authenticates the expected peer using a verified DHT name-to-public-key membership proof and establishes an IPsec ESP tunnel.
+- ESP tunnel mode protects the IPv6 packets routed through it, including inner addresses, transport headers, and VX6 payload. Do not add a custom packet encryption layer by default.
 
-The layers have different jobs. IPsec protects packets on the network path; the service transport authenticates the VX6 peer and protects the service connection. Per-peer service authorization is a separate policy check and must happen before a backend connection is opened. These target properties are not all implemented yet; see [the current security status](security.md) and [the dataplane threat model](dataplane-threat-model.md).
+Peer authentication and service authorization are distinct: IKE verifies the peer key; VX6 must still authorize each service before opening its configured backend. These target properties are not implemented yet; see [the current security status](security.md) and [the dataplane threat model](dataplane-threat-model.md).
 
 Hidden services also use encrypted descriptors, blinded rotating lookup keys, and invite secrets. These mechanisms are separate from normal-mode endpoint identity and dataplane transport protection.
 
@@ -119,13 +119,12 @@ They do not change the protocol.
 
 The target direct-service flow is:
 
-1. The nodes establish an IKEv2-authenticated IPsec ESP tunnel using a maintained platform implementation.
-2. VX6 establishes a QUIC connection with TLS 1.3 mutual authentication and verifies the expected node identity.
-3. Each forwarded local TCP connection gets a bidirectional QUIC stream. A bounded encrypted request selects an opaque configured service identifier.
-4. The receiving node checks the authenticated peer's service permission before dialing only the configured local backend.
-5. TCP with TLS 1.3 provides a fallback when QUIC is unavailable. It uses the same peer identity and service authorization policy; security failures never trigger fallback.
+1. The nodes resolve an IPv6 endpoint and a verifiable membership proof binding the remote name to its full public key.
+2. IKEv2 mutually authenticates the expected keys and establishes an ESP tunnel using a maintained platform implementation.
+3. VX6 routes the peer traffic through the tunnel. Tunnel failure blocks that traffic; it never silently falls back to a clear connection.
+4. The receiving VX6 node authorizes the requested service before dialing only its configured local backend.
 
-The repository currently has a custom secure session and QUIC transport code, but QUIC is not yet the `auto` default, its current wrapper exposes one stream per connection, IKEv2/IPsec is not integrated, and service authorization needs work. The target architecture is a roadmap, not a claim about the current build. See [the dataplane threat model](dataplane-threat-model.md) for packet visibility, assumptions, and acceptance checks.
+The repository currently has a custom secure session and QUIC transport code, but no IKEv2/IPsec integration or verified fail-closed route policy. The DHT also lacks the membership quorum needed to act as a decentralized IKE trust anchor. Existing DHT descriptor epochs are not membership epochs. The target architecture is a roadmap, not a claim about the current build. See [the dataplane threat model](dataplane-threat-model.md) for assumptions and acceptance checks.
 
 The tunnel does not provide anonymity. The outer tunnel endpoint addresses, packet sizes, timing, and volume remain observable. Normal mode accepts endpoint identity exposure; hidden-mode identity protection is handled separately.
 

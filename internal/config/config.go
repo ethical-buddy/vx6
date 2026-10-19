@@ -54,9 +54,13 @@ type NodeConfig struct {
 }
 
 type KnownPeerEntry struct {
-	NodeID   string `json:"node_id,omitempty"`
-	NodeName string `json:"node_name,omitempty"`
-	Address  string `json:"address"`
+	NodeID            string `json:"node_id,omitempty"`
+	NodeName          string `json:"node_name,omitempty"`
+	Address           string `json:"address"`
+	PublicKey         string `json:"public_key,omitempty"`
+	IdentityIssuedAt  string `json:"identity_issued_at,omitempty"`
+	IdentityExpiresAt string `json:"identity_expires_at,omitempty"`
+	IdentitySignature string `json:"identity_signature,omitempty"`
 }
 
 type PeerEntry struct {
@@ -502,6 +506,10 @@ func normalizeKnownPeerEntry(entry KnownPeerEntry) (KnownPeerEntry, bool) {
 	entry.NodeID = strings.TrimSpace(entry.NodeID)
 	entry.NodeName = strings.TrimSpace(entry.NodeName)
 	entry.Address = strings.TrimSpace(entry.Address)
+	entry.PublicKey = strings.TrimSpace(entry.PublicKey)
+	entry.IdentityIssuedAt = strings.TrimSpace(entry.IdentityIssuedAt)
+	entry.IdentityExpiresAt = strings.TrimSpace(entry.IdentityExpiresAt)
+	entry.IdentitySignature = strings.TrimSpace(entry.IdentitySignature)
 	if entry.Address == "" {
 		return KnownPeerEntry{}, false
 	}
@@ -528,7 +536,19 @@ func upsertKnownPeerEntry(entries []KnownPeerEntry, entry KnownPeerEntry) []Know
 			if entry.NodeName != "" {
 				entries[i].NodeName = entry.NodeName
 			}
+			addressChanged := entries[i].Address != entry.Address
 			entries[i].Address = entry.Address
+			if entry.PublicKey != "" {
+				entries[i].PublicKey = entry.PublicKey
+				entries[i].IdentityIssuedAt = entry.IdentityIssuedAt
+				entries[i].IdentityExpiresAt = entry.IdentityExpiresAt
+				entries[i].IdentitySignature = entry.IdentitySignature
+			} else if addressChanged {
+				entries[i].PublicKey = ""
+				entries[i].IdentityIssuedAt = ""
+				entries[i].IdentityExpiresAt = ""
+				entries[i].IdentitySignature = ""
+			}
 			return entries
 		}
 	}
@@ -542,6 +562,10 @@ func mergeKnownPeerRecord(entries []KnownPeerEntry, rec record.EndpointRecord) (
 			updated.NodeID = rec.NodeID
 			updated.NodeName = rec.NodeName
 			updated.Address = rec.Address
+			updated.PublicKey = rec.PublicKey
+			updated.IdentityIssuedAt = rec.IssuedAt
+			updated.IdentityExpiresAt = rec.ExpiresAt
+			updated.IdentitySignature = rec.Signature
 			if updated == entries[i] {
 				return entries, false
 			}
@@ -549,7 +573,11 @@ func mergeKnownPeerRecord(entries []KnownPeerEntry, rec record.EndpointRecord) (
 			return entries, true
 		}
 	}
-	return entries, false
+	return append(entries, KnownPeerEntry{
+		NodeID: rec.NodeID, NodeName: rec.NodeName, Address: rec.Address,
+		PublicKey: rec.PublicKey, IdentityIssuedAt: rec.IssuedAt,
+		IdentityExpiresAt: rec.ExpiresAt, IdentitySignature: rec.Signature,
+	}), true
 }
 
 func knownPeerEntriesMatch(a, b KnownPeerEntry) bool {

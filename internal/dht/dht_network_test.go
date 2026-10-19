@@ -15,15 +15,27 @@ import (
 	"github.com/vx6/vx6/internal/record"
 )
 
+func newTestServer(nodeID string) *Server {
+	server := NewServer(nodeID)
+	server.SetDialGuard(func(context.Context, string) error { return nil })
+	return server
+}
+
+func newTestServerWithIdentity(id identity.Identity) *Server {
+	server := NewServerWithIdentity(id)
+	server.SetDialGuard(func(context.Context, string) error { return nil })
+	return server
+}
+
 func TestRecursiveFindValueAcrossPeers(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client := NewServer("client-node")
-	bob := NewServer("bob-node")
-	charlie := NewServer("charlie-node")
+	client := newTestServer("client-node")
+	bob := newTestServer("bob-node")
+	charlie := newTestServer("charlie-node")
 
 	bobAddr := startDHTListener(t, ctx, bob)
 	charlieAddr := startDHTListener(t, ctx, charlie)
@@ -69,7 +81,7 @@ func TestStoreReplicatesAcrossBoundedPeers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate owner identity: %v", err)
 	}
-	owner := NewServerWithIdentity(ownerID)
+	owner := newTestServerWithIdentity(ownerID)
 
 	type target struct {
 		server *Server
@@ -77,7 +89,7 @@ func TestStoreReplicatesAcrossBoundedPeers(t *testing.T) {
 	}
 	targets := make([]target, 0, 8)
 	for i := 0; i < 8; i++ {
-		srv := NewServer(fmt.Sprintf("replica-%02d", i))
+		srv := newTestServer(fmt.Sprintf("replica-%02d", i))
 		addr := startDHTListener(t, ctx, srv)
 		targets = append(targets, target{server: srv, addr: addr})
 		owner.RT.AddNode(proto.NodeInfo{ID: fmt.Sprintf("replica-node-%02d", i), Addr: addr})
@@ -117,7 +129,7 @@ func TestMaintainReplicasRepairsShortfallUsingBackupNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate owner identity: %v", err)
 	}
-	owner := NewServerWithIdentity(ownerID)
+	owner := newTestServerWithIdentity(ownerID)
 	key := ServiceKey("owner.echo")
 
 	planned := NewRoutingTable(ownerID.NodeID)
@@ -146,7 +158,7 @@ func TestMaintainReplicasRepairsShortfallUsingBackupNodes(t *testing.T) {
 		addr := reserveClosedTCP6Addr(t)
 		var srv *Server
 		if _, dead := deadIDs[node.ID]; !dead {
-			srv = NewServer(node.ID)
+			srv = newTestServer(node.ID)
 			addr = startDHTListener(t, ctx, srv)
 			liveTargets[node.ID] = srv
 		}
@@ -190,7 +202,7 @@ func TestMaintainReplicasSeedsNewPreferredHoldersAfterRoutingChange(t *testing.T
 	if err != nil {
 		t.Fatalf("generate owner identity: %v", err)
 	}
-	owner := NewServerWithIdentity(ownerID)
+	owner := newTestServerWithIdentity(ownerID)
 	key := ServiceKey("owner.api")
 
 	type target struct {
@@ -202,7 +214,7 @@ func TestMaintainReplicasSeedsNewPreferredHoldersAfterRoutingChange(t *testing.T
 	baseNodes := make([]proto.NodeInfo, 0, 8)
 	for i := 0; i < 8; i++ {
 		id := fmt.Sprintf("base-node-%02d", i)
-		srv := NewServer(id)
+		srv := newTestServer(id)
 		addr := startDHTListener(t, ctx, srv)
 		node := proto.NodeInfo{ID: id, Addr: addr}
 		baseNodes = append(baseNodes, node)
@@ -221,7 +233,7 @@ func TestMaintainReplicasSeedsNewPreferredHoldersAfterRoutingChange(t *testing.T
 		t.Fatalf("expected to find 2 new preferred nodes, got %d", len(newNodes))
 	}
 	for _, node := range newNodes {
-		srv := NewServer(node.ID)
+		srv := newTestServer(node.ID)
 		addr := startDHTListener(t, ctx, srv)
 		node.Addr = addr
 		targets[node.ID] = target{id: node.ID, server: srv, addr: addr}
@@ -260,7 +272,7 @@ func TestMaintainReplicasSeedsNewPreferredHoldersAfterRoutingChange(t *testing.T
 func TestReplicaSummaryTracksRefreshHealth(t *testing.T) {
 	t.Parallel()
 
-	server := NewServer("self")
+	server := newTestServer("self")
 	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
 
 	server.RecordReplicaObservation(ReplicaObservation{
@@ -319,7 +331,7 @@ func TestAdmitStoreValueRejectsUnsignedTrustedKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate identity: %v", err)
 	}
-	server := NewServerWithIdentity(id)
+	server := newTestServerWithIdentity(id)
 	rec := mustServiceRecordForIdentity(t, id, "owner", "api", "[2001:db8::61]:4242", false, "", now)
 	if err := server.admitStoreValue("[2001:db8::10]:4242", ServiceKey("owner.api"), mustJSON(t, rec), now); err == nil {
 		t.Fatal("expected unsigned trusted store to be rejected")
@@ -338,7 +350,7 @@ func TestAdmitStoreValueRejectsNonAuthoritativePublisher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate republisher identity: %v", err)
 	}
-	server := NewServerWithIdentity(ownerID)
+	server := newTestServerWithIdentity(ownerID)
 	rec := mustServiceRecordForIdentity(t, ownerID, "owner", "api", "[2001:db8::61]:4242", false, "", now)
 	payload := mustJSON(t, rec)
 
@@ -385,7 +397,7 @@ func TestPrivateCatalogRoundTripAndLookup(t *testing.T) {
 		t.Fatalf("unexpected private catalog contents %+v", decoded)
 	}
 
-	server := NewServerWithIdentity(id)
+	server := newTestServerWithIdentity(id)
 	wrapped := mustSignedValue(t, id, PrivateCatalogKey("owner"), string(data), now)
 	if err := server.Store(context.Background(), PrivateCatalogKey("owner"), string(data)); err != nil {
 		t.Fatalf("store private catalog: %v", err)
@@ -453,10 +465,10 @@ func TestRecursiveFindValueFiltersPoisonedValueAndUsesConfirmedRecord(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client := NewServer("client-node")
-	poison := NewServer("poison-node")
-	goodA := NewServer("good-a")
-	goodB := NewServer("good-b")
+	client := newTestServer("client-node")
+	poison := newTestServer("poison-node")
+	goodA := newTestServer("good-a")
+	goodB := newTestServer("good-b")
 
 	poisonAddr := startDHTListener(t, ctx, poison)
 	goodAAddr := startDHTListener(t, ctx, goodA)
@@ -496,8 +508,8 @@ func TestRecursiveFindValueRequiresMultiSourceConfirmation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client := NewServer("client-node")
-	good := NewServer("good-node")
+	client := newTestServer("client-node")
+	good := newTestServer("good-node")
 
 	goodAddr := startDHTListener(t, ctx, good)
 	client.RT.AddNode(proto.NodeInfo{ID: "good-node", Addr: goodAddr})
@@ -522,9 +534,9 @@ func TestRecursiveFindValueRejectsConflictingVerifiedValues(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client := NewServer("client-node")
-	left := NewServer("left-node")
-	right := NewServer("right-node")
+	client := newTestServer("client-node")
+	left := newTestServer("left-node")
+	right := newTestServer("right-node")
 
 	leftAddr := startDHTListener(t, ctx, left)
 	rightAddr := startDHTListener(t, ctx, right)
@@ -560,7 +572,7 @@ func TestStoreTracksNewestVersionAndPreviousHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate identity: %v", err)
 	}
-	server := NewServerWithIdentity(id)
+	server := newTestServerWithIdentity(id)
 
 	older := mustServiceRecordForIdentity(t, id, "owner", "api", "[2001:db8::61]:4242", false, "", now)
 	newer := mustServiceRecordForIdentity(t, id, "owner", "api", "[2001:db8::62]:4242", false, "", now.Add(time.Minute))
@@ -597,7 +609,7 @@ func TestStoreRejectsConflictingVerifiedFamilyAndTracksConflict(t *testing.T) {
 		t.Fatalf("generate second identity: %v", err)
 	}
 
-	server := NewServerWithIdentity(firstID)
+	server := newTestServerWithIdentity(firstID)
 	first := mustSignedValue(t, firstID, NodeNameKey("owner"), mustJSON(t, mustEndpointRecordForIdentity(t, firstID, "owner", "[2001:db8::71]:4242", now)), now)
 	second := mustSignedValue(t, secondID, NodeNameKey("owner"), mustJSON(t, mustEndpointRecordForIdentity(t, secondID, "owner", "[2001:db8::72]:4242", now.Add(time.Second))), now.Add(time.Second))
 
@@ -620,9 +632,9 @@ func TestRecursiveFindValueDetailedReportsConflictCandidates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client := NewServer("client-node")
-	left := NewServer("left-node")
-	right := NewServer("right-node")
+	client := newTestServer("client-node")
+	left := newTestServer("left-node")
+	right := newTestServer("right-node")
 
 	leftAddr := startDHTListener(t, ctx, left)
 	rightAddr := startDHTListener(t, ctx, right)
@@ -836,7 +848,7 @@ func TestResolveHiddenServiceFallsBackToShortLivedCache(t *testing.T) {
 
 	rec := mustServiceRecordForIdentity(t, id, "owner", "admin", "", true, "ghost", now)
 	invite := ComposeHiddenLookupInvite("ghost", "super-secret-hidden-token")
-	client := NewServer("client")
+	client := newTestServer("client")
 	client.storeHiddenServiceCache(invite, HiddenServiceKeyAt(invite, now), rec, now)
 
 	resolved, err := client.ResolveHiddenService(context.Background(), invite, now.Add(40*time.Second))
@@ -851,7 +863,7 @@ func TestResolveHiddenServiceFallsBackToShortLivedCache(t *testing.T) {
 func TestHiddenDescriptorLookupRateLimit(t *testing.T) {
 	t.Parallel()
 
-	server := NewServer("ratelimit")
+	server := newTestServer("ratelimit")
 	now := time.Now()
 	for i := 0; i < hiddenDescriptorLookupRateLimit; i++ {
 		if !server.allowHiddenDescriptorRequest("[2001:db8::1]:4242", "find_value", now) {

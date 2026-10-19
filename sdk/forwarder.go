@@ -84,14 +84,18 @@ func (c *Client) StartForwarder(ctx context.Context, opts ConnectOptions, cb For
 	if err != nil {
 		return nil, err
 	}
+	registry, err := discovery.NewRegistry(filepath.Join(cfg.Node.DataDir, "registry.json"))
+	if err != nil {
+		return nil, err
+	}
+	guardedCtx, err := c.guardedPeerContext(ctx, cfg, id, registry)
+	if err != nil {
+		return nil, err
+	}
 
 	dialer := func(rctx context.Context) (net.Conn, error) {
 		if serviceRec.IsHidden {
-			reg, err := discovery.NewRegistry(filepath.Join(cfg.Node.DataDir, "registry.json"))
-			if err != nil {
-				return nil, err
-			}
-			conn, err := hidden.DialHiddenServiceWithOptions(rctx, serviceRec, reg, hidden.DialOptions{
+			conn, err := hidden.DialHiddenServiceWithOptions(rctx, serviceRec, registry, hidden.DialOptions{
 				SelfAddr:      cfg.Node.AdvertiseAddr,
 				Identity:      id,
 				TransportMode: cfg.Node.TransportMode,
@@ -102,11 +106,7 @@ func (c *Client) StartForwarder(ctx context.Context, opts ConnectOptions, cb For
 			return conn, nil
 		}
 		if opts.Proxy {
-			reg, err := discovery.NewRegistry(filepath.Join(cfg.Node.DataDir, "registry.json"))
-			if err != nil {
-				return nil, err
-			}
-			peers, _ := reg.Snapshot()
+			peers, _ := registry.Snapshot()
 			conn, err := onion.BuildAutomatedCircuit(rctx, serviceRec, peers, onion.ClientOptions{
 				Identity:      id,
 				TransportMode: cfg.Node.TransportMode,
@@ -119,7 +119,7 @@ func (c *Client) StartForwarder(ctx context.Context, opts ConnectOptions, cb For
 		return vxtransport.DialContext(rctx, cfg.Node.TransportMode, serviceRec.Address)
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(guardedCtx)
 	done := make(chan struct{})
 	if cb.OnStarted != nil {
 		cb.OnStarted(opts.Listen, opts.Service)

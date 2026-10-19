@@ -22,6 +22,7 @@ import (
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/hidden"
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/ipsec"
 	"github.com/vx6/vx6/internal/netutil"
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
@@ -54,6 +55,12 @@ const (
 
 type ServiceRefresher func() map[string]string
 
+type PeerTunnel interface {
+	PreparePeer(context.Context, record.EndpointRecord) error
+	EnsurePeer(context.Context, record.EndpointRecord) error
+	AcceptPeer(context.Context, string) bool
+}
+
 type Config struct {
 	Name                 string
 	NodeID               string
@@ -77,6 +84,7 @@ type Config struct {
 	Identity             identity.Identity
 	Registry             *discovery.Registry
 	DHT                  *dht.Server
+	IPsecTunnel          PeerTunnel
 	Reload               chan struct{}
 }
 
@@ -102,6 +110,42 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	if err := os.MkdirAll(cfg.ReceiveDir, 0o755); err != nil {
 		return fmt.Errorf("create receive directory: %w", err)
+	}
+	var peerTunnel PeerTunnel = cfg.IPsecTunnel
+	if peerTunnel == nil {
+		client, err := ipsec.NewClient(ipsec.DefaultSocket(), cfg.AdvertiseAddr, cfg.Identity)
+		if err != nil {
+			return fmt.Errorf("initialize Linux IPsec service client: %w", err)
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := client.Check(checkCtx); err != nil {
+			cancel()
+			return fmt.Errorf("Linux IPsec control service is unavailable: %w", err)
+		}
+		cancel()
+		peerTunnel = client
+	}
+	guard := func(dialCtx context.Context, addr string) error {
+		var peer record.EndpointRecord
+		for _, candidate := range registryRecords(cfg.Registry, cfg.DHT) {
+			if candidate.Address == addr {
+				peer = candidate
+				break
+			}
+		}
+		if peer.NodeID == "" {
+			return fmt.Errorf("no verified signed DHT identity for endpoint")
+		}
+		return peerTunnel.EnsurePeer(dialCtx, peer)
+	}
+	ctx = vxtransport.WithDialGuard(ctx, guard)
+	for _, peer := range registryRecords(cfg.Registry, cfg.DHT) {
+		if peer.NodeID == cfg.NodeID {
+			continue
+		}
+		if err := peerTunnel.PreparePeer(ctx, peer); err != nil {
+			return fmt.Errorf("prepare IPsec peer %s: %w", peer.NodeID, err)
+		}
 	}
 	if len(cfg.Services) == 0 && cfg.RefreshServices != nil {
 		cfg.Services = cfg.RefreshServices()
@@ -139,6 +183,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer listener.Close()
+	go maintainIPsecPeers(ctx, log, cfg, peerTunnel)
 	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
 	if cfg.ControlInfoPath != "" {
 		controlServer, err := runtimectl.Start(cfg.ControlInfoPath, os.Getpid(), func() error {
@@ -236,6 +281,10 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				return nil
 			}
 			return fmt.Errorf("accept connection: %w", err)
+		}
+		if !peerTunnel.AcceptPeer(ctx, conn.RemoteAddr().String()) {
+			_ = conn.Close()
+			continue
 		}
 
 		select {
@@ -431,14 +480,24 @@ func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
 			}
 			var info proto.NodeInfo
 			if err := json.Unmarshal(buf[:n], &info); err == nil && info.ID != cfg.NodeID {
-				rec := record.EndpointRecord{NodeID: info.ID, NodeName: info.Name, Address: info.Addr}
-				_ = cfg.Registry.Import([]record.EndpointRecord{rec}, nil)
+				rec := record.EndpointRecord{
+					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
+					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
+					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
+				}
+				if dht.VerifyNodeInfo(info, time.Now()) == nil {
+					_ = cfg.Registry.Import([]record.EndpointRecord{rec}, nil)
+				}
 			}
 		}
 	}()
 
 	ticker := time.NewTicker(15 * time.Second)
-	data, _ := json.Marshal(proto.NodeInfo{ID: cfg.NodeID, Name: cfg.Name, Addr: cfg.AdvertiseAddr})
+	localRecord, err := record.NewEndpointRecord(cfg.Identity, cfg.Name, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
+	if err != nil {
+		return
+	}
+	data, _ := json.Marshal(dht.NodeInfoFromEndpointRecord(localRecord))
 	for {
 		select {
 		case <-ctx.Done():
@@ -659,7 +718,61 @@ func seedDHTRouting(server *dht.Server, seedAddrs []string, records []record.End
 		if rec.NodeID == "" || rec.Address == "" {
 			continue
 		}
-		server.RT.AddNode(proto.NodeInfo{ID: rec.NodeID, Addr: rec.Address})
+		server.RT.AddNode(dht.NodeInfoFromEndpointRecord(rec))
+	}
+}
+
+func registryRecords(registry *discovery.Registry, server *dht.Server) []record.EndpointRecord {
+	byID := make(map[string]record.EndpointRecord)
+	if registry != nil {
+		nodes, _ := registry.Snapshot()
+		for _, rec := range nodes {
+			if record.VerifyEndpointRecord(rec, time.Now()) == nil {
+				byID[rec.NodeID] = rec
+			}
+		}
+	}
+	if server != nil && server.RT != nil {
+		for _, info := range server.RT.Nodes() {
+			if dht.VerifyNodeInfo(info, time.Now()) != nil {
+				continue
+			}
+			rec := record.EndpointRecord{
+				NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
+				PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
+				ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
+			}
+			byID[rec.NodeID] = rec
+		}
+	}
+	out := make([]record.EndpointRecord, 0, len(byID))
+	for _, rec := range byID {
+		out = append(out, rec)
+	}
+	return out
+}
+
+func maintainIPsecPeers(ctx context.Context, log io.Writer, cfg Config, manager PeerTunnel) {
+	prepare := func() {
+		for _, peer := range registryRecords(cfg.Registry, cfg.DHT) {
+			if peer.NodeID == cfg.NodeID {
+				continue
+			}
+			if err := manager.PreparePeer(ctx, peer); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(log, "[IPSEC] prepare peer %s failed: %v\n", peer.NodeID, err)
+			}
+		}
+	}
+	prepare()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prepare()
+		}
 	}
 }
 

@@ -24,22 +24,39 @@ import (
 )
 
 type Server struct {
-	RT            *RoutingTable
-	Values        map[string]string // The decentralized database
-	publisher     identity.Identity
-	hidden        HiddenDescriptorPrivacyConfig
-	adaptive      AdaptiveConfig
-	versions      map[string]StoredValueState
-	replicas      map[string]ReplicaObservation
-	hiddenCache   map[string]cachedHiddenService
-	hiddenWarmers map[string]struct{}
-	hiddenTracked map[string]struct{}
-	hiddenCoverOn bool
-	hiddenRates   map[string]rateWindow
-	storeRates    map[string]rateWindow
-	lookupEWMA    float64
+	RT                *RoutingTable
+	dialGuard         vxtransport.DialGuard
+	Values            map[string]string // The decentralized database
+	publisher         identity.Identity
+	hidden            HiddenDescriptorPrivacyConfig
+	adaptive          AdaptiveConfig
+	versions          map[string]StoredValueState
+	replicas          map[string]ReplicaObservation
+	hiddenCache       map[string]cachedHiddenService
+	hiddenWarmers     map[string]struct{}
+	hiddenTracked     map[string]struct{}
+	hiddenCoverOn     bool
+	hiddenRates       map[string]rateWindow
+	storeRates        map[string]rateWindow
+	lookupEWMA        float64
 	hiddenAnomalyEWMA float64
-	mu            sync.RWMutex
+	mu                sync.RWMutex
+}
+
+func (s *Server) SetDialGuard(guard vxtransport.DialGuard) {
+	s.mu.Lock()
+	s.dialGuard = guard
+	s.mu.Unlock()
+}
+
+func (s *Server) guardedContext(ctx context.Context) context.Context {
+	s.mu.RLock()
+	guard := s.dialGuard
+	s.mu.RUnlock()
+	if guard == nil {
+		return ctx
+	}
+	return vxtransport.WithDialGuard(ctx, guard)
 }
 
 type lookupBranch struct {
@@ -794,6 +811,7 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 }
 
 func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
+	ctx = s.guardedContext(ctx)
 	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 

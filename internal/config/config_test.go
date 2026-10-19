@@ -318,4 +318,7 @@ func TestUpsertKnownPeerRecordRefreshesAddressByNodeIdentity(t *testing.T) {
 	if entry.NodeName != rec.NodeName {
 		t.Fatalf("expected known peer node name %q, got %q", rec.NodeName, entry.NodeName)
 	}
+	if entry.PublicKey != rec.PublicKey || entry.IdentityIssuedAt != rec.IssuedAt || entry.IdentityExpiresAt != rec.ExpiresAt || entry.IdentitySignature != rec.Signature {
+		t.Fatal("known peer config did not preserve the signed public-key identity")
+	}
 }

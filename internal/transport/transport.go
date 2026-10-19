@@ -5,10 +5,21 @@ package transport
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
-	"time"
 )
+
+type dialGuardKey struct{}
+
+// DialGuard authenticates and establishes the peer's IPsec SA before VX6 opens
+// an application socket. A guard is attached to a node's context so multiple
+// node instances in tests or embedded deployments remain isolated.
+type DialGuard func(context.Context, string) error
+
+func WithDialGuard(ctx context.Context, guard DialGuard) context.Context {
+	return context.WithValue(ctx, dialGuardKey{}, guard)
+}
 
 const (
 	ModeAuto = "auto"
@@ -32,7 +43,7 @@ func NormalizeMode(mode string) string {
 func EffectiveMode(mode string) string {
 	switch NormalizeMode(mode) {
 	case ModeQUIC:
-		return ModeQUIC          // ← now returns real QUIC, not TCP
+		return ModeQUIC // ← now returns real QUIC, not TCP
 	case ModeTCP, ModeAuto:
 		return ModeTCP
 	default:
@@ -41,6 +52,9 @@ func EffectiveMode(mode string) string {
 }
 
 func Listen(mode, addr string) (net.Listener, error) {
+	if err := validateIPv6Endpoint(addr); err != nil {
+		return nil, fmt.Errorf("listen requires an IPv6 endpoint: %w", err)
+	}
 	if EffectiveMode(mode) == ModeQUIC {
 		return quicListen(addr)
 	}
@@ -48,6 +62,16 @@ func Listen(mode, addr string) (net.Listener, error) {
 }
 
 func DialContext(ctx context.Context, mode, addr string) (net.Conn, error) {
+	if err := validateIPv6Endpoint(addr); err != nil {
+		return nil, fmt.Errorf("dial requires an IPv6 endpoint: %w", err)
+	}
+	guard, ok := ctx.Value(dialGuardKey{}).(DialGuard)
+	if !ok || guard == nil {
+		return nil, fmt.Errorf("refusing unguarded peer dial to %s", addr)
+	}
+	if err := guard(ctx, addr); err != nil {
+		return nil, fmt.Errorf("IPsec peer gate rejected %s: %w", addr, err)
+	}
 	if EffectiveMode(mode) == ModeQUIC {
 		return quicDial(ctx, addr)
 	}
@@ -55,10 +79,16 @@ func DialContext(ctx context.Context, mode, addr string) (net.Conn, error) {
 	return dialer.DialContext(ctx, "tcp", addr)
 }
 
-func DialTimeout(mode, addr string, timeout time.Duration) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return DialContext(ctx, mode, addr)
+func validateIPv6Endpoint(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint %q: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() != nil {
+		return fmt.Errorf("endpoint %q is not an IPv6 address", addr)
+	}
+	return nil
 }
 
 func ProbeContext(ctx context.Context, mode, addr string) bool {

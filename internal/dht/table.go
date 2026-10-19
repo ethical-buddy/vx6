@@ -112,6 +112,41 @@ func (rt *RoutingTable) ClosestNodes(targetID string, count int) []proto.NodeInf
 	return all
 }
 
+func (rt *RoutingTable) NodeByAddress(addr string) (proto.NodeInfo, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	for _, bucket := range rt.Buckets {
+		for _, entry := range bucket {
+			if entry.Node.Addr == addr {
+				return entry.Node, true
+			}
+		}
+	}
+	for _, bucket := range rt.Spare {
+		for _, node := range bucket {
+			if node.Addr == addr {
+				return node, true
+			}
+		}
+	}
+	return proto.NodeInfo{}, false
+}
+
+func (rt *RoutingTable) Nodes() []proto.NodeInfo {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	out := make([]proto.NodeInfo, 0)
+	for _, bucket := range rt.Buckets {
+		for _, entry := range bucket {
+			out = append(out, entry.Node)
+		}
+	}
+	for _, bucket := range rt.Spare {
+		out = append(out, bucket...)
+	}
+	return out
+}
+
 func (rt *RoutingTable) bucketIndex(nodeID string) int {
 	dist := rt.distance(rt.SelfID, nodeID)
 	bucketIdx := dist.BitLen() - 1

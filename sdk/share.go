@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/dht"
+	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
@@ -176,6 +177,14 @@ func (c *Client) SendFileWithProgress(ctx context.Context, peerAddr, filePath st
 		return err
 	}
 	id, err := idStore.Load()
+	if err != nil {
+		return err
+	}
+	registry, err := discovery.NewRegistry(filepath.Join(cfg.Node.DataDir, "registry.json"))
+	if err != nil {
+		return err
+	}
+	ctx, err = c.guardedPeerContext(ctx, cfg, id, registry)
 	if err != nil {
 		return err
 	}

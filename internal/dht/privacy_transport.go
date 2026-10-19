@@ -112,6 +112,7 @@ func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
 }
 
 func (s *Server) dialDHTConn(ctx context.Context, addr, key, action string) (net.Conn, error) {
+	ctx = s.guardedContext(ctx)
 	if conn, handled, err := s.dialHiddenDescriptorConn(ctx, addr, key, action); handled {
 		return conn, err
 	}

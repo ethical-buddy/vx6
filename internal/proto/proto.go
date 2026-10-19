@@ -34,21 +34,25 @@ type DHTResponse struct {
 }
 
 type NodeInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name,omitempty"`
-	Addr string `json:"addr"`
+	ID                string `json:"id"`
+	Name              string `json:"name,omitempty"`
+	Addr              string `json:"addr"`
+	PublicKey         string `json:"public_key,omitempty"`
+	IdentityIssuedAt  string `json:"identity_issued_at,omitempty"`
+	IdentityExpiresAt string `json:"identity_expires_at,omitempty"`
+	IdentitySignature string `json:"identity_signature,omitempty"`
 }
 
 type ExtendRequest struct {
-	NextHop    string `json:"next_hop"`    // The address of the next node to add to the chain
-	CircuitID  string `json:"circuit_id"`  // Unique ID for this specific tunnel
+	NextHop   string `json:"next_hop"`   // The address of the next node to add to the chain
+	CircuitID string `json:"circuit_id"` // Unique ID for this specific tunnel
 }
 
 type OnionHeader struct {
-	HopCount int      `json:"hop_count"` // Current hop (0-4)
+	HopCount int       `json:"hop_count"` // Current hop (0-4)
 	Hops     [5]string `json:"hops"`      // IPv6 addresses of the 5 nodes
-	FinalDst string   `json:"final_dst"` // The ultimate destination (e.g., 127.0.0.1:8000)
-	Payload  []byte   `json:"payload"`   // The actual encrypted data
+	FinalDst string    `json:"final_dst"` // The ultimate destination (e.g., 127.0.0.1:8000)
+	Payload  []byte    `json:"payload"`   // The actual encrypted data
 }
 
 func WriteHeader(w io.Writer, kind byte) error {

@@ -48,7 +48,7 @@ func BenchmarkStoreValidatedSignedEnvelopeServiceRecord(b *testing.B) {
 	}
 	payload := string(mustJSONBytes(b, rec))
 	key := ServiceKey("bench.api")
-	server := NewServer("bench-node")
+	server := newTestServer("bench-node")
 	signed := mustSignedBenchmarkValue(b, id, key, payload, now)
 
 	b.ReportAllocs()
@@ -65,10 +65,10 @@ func BenchmarkRecursiveFindValueDetailedConfirmed3Sources(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client := NewServer("client-node")
-	relayA := NewServer("relay-a")
-	relayB := NewServer("relay-b")
-	relayC := NewServer("relay-c")
+	client := newTestServer("client-node")
+	relayA := newTestServer("relay-a")
+	relayB := newTestServer("relay-b")
+	relayC := newTestServer("relay-c")
 
 	addrA := startDHTBenchmarkListener(b, ctx, relayA)
 	addrB := startDHTBenchmarkListener(b, ctx, relayB)

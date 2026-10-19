@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,7 +30,10 @@ func TestDialTimeoutAndProbeContext(t *testing.T) {
 		}
 	}()
 
-	conn, err := DialTimeout(ModeTCP, ln.Addr().String(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ctx = WithDialGuard(ctx, func(context.Context, string) error { return nil })
+	conn, err := DialContext(ctx, ModeTCP, ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial timeout: %v", err)
 	}
@@ -41,8 +45,6 @@ func TestDialTimeoutAndProbeContext(t *testing.T) {
 		t.Fatal("listener did not accept transport connection")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
 	if !ProbeContext(ctx, ModeTCP, ln.Addr().String()) {
 		t.Fatal("expected probe to succeed")
 	}
@@ -52,6 +54,50 @@ func TestDialTimeoutAndProbeContext(t *testing.T) {
 		t.Fatal("listener did not accept probe connection")
 	}
 }
+
+func TestTransportRejectsNonIPv6Endpoints(t *testing.T) {
+	t.Parallel()
+
+	if _, err := Listen(ModeTCP, "127.0.0.1:0"); err == nil {
+		t.Fatal("expected IPv4 listener to be rejected")
+	}
+	if _, err := Listen(ModeTCP, "localhost:4242"); err == nil {
+		t.Fatal("expected hostname listener to be rejected")
+	}
+	if _, err := DialContext(context.Background(), ModeTCP, "127.0.0.1:4242"); err == nil {
+		t.Fatal("expected IPv4 dial to be rejected")
+	}
+	if _, err := DialContext(context.Background(), ModeQUIC, "localhost:4242"); err == nil {
+		t.Fatal("expected hostname QUIC dial to be rejected")
+	}
+}
+
+func TestDialGuardRejectsBeforeOpeningSocket(t *testing.T) {
+	wantErr := fmt.Errorf("peer identity is not trusted")
+	ctx := WithDialGuard(context.Background(), func(context.Context, string) error {
+		return wantErr
+	})
+	conn, err := DialContext(ctx, ModeTCP, "[2001:db8::2]:4242")
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("opened a socket despite rejected peer gate")
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
+		t.Fatalf("DialContext error = %v, want guarded rejection", err)
+	}
+}
+
+func TestPeerDialRequiresGuard(t *testing.T) {
+	conn, err := DialContext(context.Background(), ModeTCP, "[2001:db8::2]:4242")
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("opened a socket without an IPsec peer guard")
+	}
+	if err == nil || !strings.Contains(err.Error(), "unguarded") {
+		t.Fatalf("DialContext error = %v, want unguarded peer rejection", err)
+	}
+}
+
 func TestQUICRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -87,6 +133,7 @@ func TestQUICRoundTrip(t *testing.T) {
 	// Client: dial, send, receive
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	ctx = WithDialGuard(ctx, func(context.Context, string) error { return nil })
 
 	conn, err := DialContext(ctx, ModeQUIC, ln.Addr().String())
 	if err != nil {
