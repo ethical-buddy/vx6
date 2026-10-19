@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vx6/vx6/internal/identity"
@@ -153,7 +154,7 @@ func Serve(ctx context.Context, socket, stateRoot string, allowedUIDs []uint32, 
 	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0o022 != 0 {
 		return errors.New("IPsec service socket parent must be a real directory")
 	}
-	parentStat, ok := parentInfo.Sys().(*unix.Stat_t)
+	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
 	if !ok || parentStat.Uid != 0 {
 		return errors.New("IPsec service socket parent must be owned by root")
 	}

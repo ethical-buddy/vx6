@@ -67,12 +67,12 @@ trap policy. Revocation remains in force after service restart. It must be
 explicitly lifted by an administrator; there is intentionally no automatic
 unrevoke on a refreshed DHT record.
 
-This is not yet a complete commercial installation or independently verified
-tunnel deployment. The repository has a systemd unit and example service config,
-but not a finished signed Linux package/installer that provisions the VX6 group,
-authorized UID, strongSwan VICI access, package upgrades/removal, or firewall
-policy lifecycle. Application-level listener rejection is not a substitute for
-firewall enforcement.
+This is not yet a complete commercial installation. The repository has systemd
+units and an example service config, but no finished signed Linux package or
+installer that provisions the VX6 group, authorized UID, strongSwan VICI access,
+package upgrades/removal, and firewall policy lifecycle. See the
+[packaging plan](packaging-plan.md). Application-level listener rejection is
+not a substitute for firewall enforcement.
 
 The listener check occurs after TCP/QUIC has reached VX6. It can prevent an
 unauthorized connection from reaching VX6 protocol handling, but it does not
@@ -105,20 +105,43 @@ user/group, write a root-owned non-writable configuration, and enable
 
 Unit tests verify endpoint-record pinning, generated tunnel selectors and
 proposals, private-key file permissions, installed-SA checks, fail-closed
-dial behavior, persisted revocation, and nftables rule generation. The swarm integration suite uses an explicit test tunnel
-provider; it validates application behavior, not real ESP encryption. A
-production gate still requires two IPv6 peers and should verify mutual IKE
-authentication, CHILD_SA state, XFRM counters, rejected wrong-key attempts,
-firewall behavior, tunnel-loss fail-closed behavior, and a packet capture
-showing ESP rather than VX6 TCP/QUIC payloads. No such two-peer wire test has
-been completed by the current repository tests.
+dial behavior, persisted local revocation, and nftables rule generation. The
+swarm integration suite uses an explicit test tunnel provider; it validates
+application behavior, not real ESP encryption.
 
-Run `scripts/test-ipsec-containers.sh` to install the real nftables rules in
-two separate Docker network namespaces and verify that a cleartext TCP
-connection to a VX6 listener is dropped. This checks Linux firewall hook
-behavior only; it does not launch strongSwan, establish IKE/ESP, test wrong-key
-authentication, or capture tunnel packets. Those remain required integration
-tests before describing the dataplane as verified.
+`tests/ipsec-e2e/run.sh` performs a real two-peer IPv6 container test. It places
+a router/sniffer between the nodes and captures from before IKE through ping,
+VX6 connection, and a Python HTTP service request. The successful run showed
+an established IKEv2 SA with Ed25519-authenticated peer identities,
+AES-GCM-128/PRF-SHA-256/Curve25519, an ESP AES-GCM-128 tunnel CHILD_SA, and
+increasing XFRM counters. The post-tunnel ping was not visible as clear ICMPv6;
+the HTTP service returned a unique test marker to the client, but that marker
+was absent from the transit capture. The capture contained ESP and IKE, and no
+clear peer-to-peer VX6 TCP/UDP traffic on the configured service port after
+tunnel establishment. A third-party clear TCP probe to that port received no
+response and was blocked. The intentionally pre-tunnel baseline ping was
+visible in clear ICMPv6, demonstrating the before/after distinction.
+
+The capture uses `tcpdump -i any`; Linux can show a packet at both ingress and
+egress, so reported totals are observations, not necessarily unique frames.
+This is passive capture plus an unauthenticated clear-port probe. It does not
+yet prove resistance to active packet modification/replay, rekey failure,
+tunnel loss/restart, or every route-leak scenario. Those cases are tracked in
+adversarial issue #50. DHT bootstrap/membership consensus is deliberately
+omitted: the test supplies signed peer endpoint records directly and verifies
+the pinned-key IKE path. DHT trust remains separate work.
+
+Run the complete routed capture test with:
+
+```sh
+bash tests/ipsec-e2e/run.sh
+```
+
+It requires Docker and Linux networking capabilities. It writes logs, capture,
+and a summary under a temporary directory and prints its path.
+`scripts/test-ipsec-e2e-containers.sh` is a compatibility wrapper.
+`scripts/test-ipsec-containers.sh` remains the narrower nftables-only test and
+does not establish IPsec.
 
 For an already provisioned Linux peer pair, run
 `sudo bash scripts/verify-ipsec-linux.sh <interface> <peer-ipv6> <vx6-port> -- <traffic-test-command>`.

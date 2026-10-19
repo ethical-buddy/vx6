@@ -24,6 +24,9 @@ Typical binaries:
 - GUI
 - runtime status and reload
 - systemd-based long-running node workflows
+- Linux IKEv2/IPsec peer tunnels using strongSwan and kernel XFRM, with the
+  privileged `vx6-ipsecd` service (experimental deployment; packaging is not
+  yet production-ready)
 
 ## Experimental Linux Feature
 
@@ -82,5 +85,8 @@ If you want a user-level long-running service, see:
 ## Notes
 
 - VX6 still expects IPv6-capable node endpoints
-- transport is TCP-only in the current release
-- Linux and Windows should interoperate when both branches are aligned to the same protocol release
+- service stream transport currently uses TCP; the active IPsec protection is
+  Linux-only
+- Windows and Android do not yet have equivalent VX6 tunnel integration
+- IPsec setup and packet-capture test: [IPsec guide](ipsec.md)
+- installation and multi-platform contribution direction: [packaging plan](packaging-plan.md)

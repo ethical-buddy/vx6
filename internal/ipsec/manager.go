@@ -186,7 +186,7 @@ func (m *Manager) RevokePeer(ctx context.Context, peer record.EndpointRecord) er
 		}
 	}
 	name := connectionName(nodeID)
-	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name, "--child", name)
+	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name)
 	if err != nil {
 		return fmt.Errorf("peer is firewall-blocked, but checking its IKE SA failed: %w", err)
 	}
@@ -222,7 +222,7 @@ func (m *Manager) EnsurePeer(ctx context.Context, peer record.EndpointRecord) er
 	if _, err := m.run(ctx, "swanctl", "--initiate", "--ike", name, "--child", name, "--timeout", "15"); err != nil {
 		return fmt.Errorf("IKEv2 negotiation failed for %s: %w", peer.NodeID, err)
 	}
-	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name, "--child", name)
+	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name)
 	if err != nil {
 		return fmt.Errorf("query IPsec SA for %s: %w", peer.NodeID, err)
 	}
@@ -274,7 +274,7 @@ func (m *Manager) AcceptPeer(ctx context.Context, remoteAddress string) bool {
 
 func (m *Manager) saInstalled(ctx context.Context, peer record.EndpointRecord) bool {
 	name := connectionName(peer.NodeID)
-	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name, "--child", name)
+	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name)
 	if err != nil || !childSAInstalled(string(out), name) {
 		return false
 	}
@@ -295,6 +295,11 @@ func (m *Manager) writeFiles(peer record.EndpointRecord) error {
 		return fmt.Errorf("encode local Ed25519 private key: %w", err)
 	}
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	localPublicDER, err := x509.MarshalPKIXPublicKey(m.identity.PublicKey)
+	if err != nil {
+		return fmt.Errorf("encode local Ed25519 public key: %w", err)
+	}
+	localPublicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: localPublicDER})
 	peerRaw, err := base64.StdEncoding.DecodeString(peer.PublicKey)
 	if err != nil || len(peerRaw) != ed25519.PublicKeySize {
 		return fmt.Errorf("invalid peer Ed25519 public key")
@@ -308,8 +313,9 @@ func (m *Manager) writeFiles(peer record.EndpointRecord) error {
 	files := map[string][]byte{
 		"swanctl.conf": []byte("include conf.d/*.conf\n"),
 		filepath.Join("private", m.identity.NodeID+".pem"): privatePEM,
+		filepath.Join("pubkey", m.identity.NodeID+".pem"):  localPublicPEM,
 		filepath.Join("pubkey", peer.NodeID+".pem"):        peerPEM,
-		filepath.Join("conf.d", name+".conf"):              []byte(connectionConfig(name, m.identity.NodeID, peer.NodeID, m.localIP.String(), peerRawAddress(peer.Address), peer.NodeID+".pem")),
+		filepath.Join("conf.d", name+".conf"):              []byte(connectionConfig(name, m.localIP.String(), peerRawAddress(peer.Address), filepath.Join(m.root, "pubkey", m.identity.NodeID+".pem"), filepath.Join(m.root, "pubkey", peer.NodeID+".pem"))),
 	}
 	for path, data := range files {
 		mode := os.FileMode(0o600)
@@ -323,7 +329,7 @@ func (m *Manager) writeFiles(peer record.EndpointRecord) error {
 	return nil
 }
 
-func connectionConfig(name, localID, remoteID, localIP, remoteIP, peerKeyFile string) string {
+func connectionConfig(name, localIP, remoteIP, localKeyFile, peerKeyFile string) string {
 	return fmt.Sprintf(`connections {
   %s {
     version = 2
@@ -333,11 +339,11 @@ func connectionConfig(name, localID, remoteID, localIP, remoteIP, peerKeyFile st
     mobike = no
     local {
       auth = pubkey
-      id = @%s
+      pubkeys = %s
     }
     remote {
       auth = pubkey
-      id = @%s
+      id = %%any
       pubkeys = %s
     }
     children {
@@ -353,7 +359,7 @@ func connectionConfig(name, localID, remoteID, localIP, remoteIP, peerKeyFile st
     }
   }
 }
-`, name, localIP, remoteIP, localID, remoteID, peerKeyFile, name, localIP, remoteIP)
+`, name, localIP, remoteIP, localKeyFile, peerKeyFile, name, localIP, remoteIP)
 }
 
 func peerRawAddress(address string) string {

@@ -31,7 +31,8 @@ It listens for:
 - hidden-service control and rendezvous traffic
 - file transfers
 
-The same runtime is used on Linux, Windows, and macOS.
+The Go runtime is portable, but platform integration and packaging are not yet
+feature-equivalent. The currently verified IKEv2/IPsec deployment is Linux-only.
 
 ## 3. Service Model
 
@@ -93,7 +94,11 @@ The CLI dataplane target is:
 - IKEv2 authenticates the expected peer using a verified DHT name-to-public-key membership proof and establishes an IPsec ESP tunnel.
 - ESP tunnel mode protects the IPv6 packets routed through it, including inner addresses, transport headers, and VX6 payload. Do not add a custom packet encryption layer by default.
 
-Peer authentication and service authorization are distinct: IKE verifies the peer key; VX6 must still authorize each service before opening its configured backend. These target properties are not implemented yet; see [the current security status](security.md) and [the dataplane threat model](dataplane-threat-model.md).
+Peer authentication and service authorization are distinct: IKE verifies the
+peer key; VX6 must still authorize each service before opening its configured
+backend. Linux IKEv2/IPsec is implemented, while decentralized membership
+proofs and complete per-service authorization are not. See [the current
+security status](security.md) and [the dataplane threat model](dataplane-threat-model.md).
 
 Hidden services also use encrypted descriptors, blinded rotating lookup keys, and invite secrets. These mechanisms are separate from normal-mode endpoint identity and dataplane transport protection.
 
@@ -124,7 +129,15 @@ The target direct-service flow is:
 3. VX6 routes the peer traffic through the tunnel. Tunnel failure blocks that traffic; it never silently falls back to a clear connection.
 4. The receiving VX6 node authorizes the requested service before dialing only its configured local backend.
 
-The repository currently has a custom secure session and QUIC transport code, but no IKEv2/IPsec integration or verified fail-closed route policy. The DHT also lacks the membership quorum needed to act as a decentralized IKE trust anchor. Existing DHT descriptor epochs are not membership epochs. The target architecture is a roadmap, not a claim about the current build. See [the dataplane threat model](dataplane-threat-model.md) for assumptions and acceptance checks.
+On Linux, the repository has a strongSwan-backed IKEv2/IPsec integration and a
+container packet-capture test for the ESP path. VX6 delegates privileged
+tunnel setup to `vx6-ipsecd`. The current trust input is a locally verified,
+signed endpoint record; the DHT does not yet provide the network-wide
+membership quorum needed to act as a decentralized trust anchor. Existing DHT
+descriptor epochs are not membership epochs. The Go application session
+protocol also remains in use and must be migrated under issue #44 rather than
+deleted prematurely. See [the dataplane threat model](dataplane-threat-model.md)
+for current guarantees and outstanding checks.
 
 The tunnel does not provide anonymity. The outer tunnel endpoint addresses, packet sizes, timing, and volume remain observable. Normal mode accepts endpoint identity exposure; hidden-mode identity protection is handled separately.
 

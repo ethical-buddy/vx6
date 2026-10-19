@@ -42,10 +42,13 @@ func TestPreparePeerWritesPinnedIPv6TunnelConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"version = 2", "auth = pubkey", "id = @" + remote.NodeID, "pubkeys = " + remote.NodeID + ".pem", "mode = tunnel", "local_ts = 2001:db8::1/128", "remote_ts = 2001:db8::2/128", "start_action = trap", "esp_proposals = aes128gcm16"} {
+	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "local_ts = 2001:db8::1/128", "remote_ts = 2001:db8::2/128", "start_action = trap", "esp_proposals = aes128gcm16"} {
 		if !strings.Contains(string(config), want) {
 			t.Errorf("generated connection config lacks %q", want)
 		}
+	}
+	if strings.Contains(string(config), "id = @") {
+		t.Fatal("generated IKE config must not use the VX6 node name as the raw-key IKE identity")
 	}
 	if strings.Contains(string(config), "service") || strings.Contains(string(config), "4242") {
 		t.Fatal("generated IPsec config unexpectedly exposes VX6 application details")

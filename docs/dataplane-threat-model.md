@@ -17,7 +17,12 @@ VX6 server: authenticated peer + deny-by-default service ACL
 Remote application service
 ```
 
-The target uses IPsec as the network packet-protection layer, not QUIC/TLS stacked on top by default. Existing TCP/QUIC and custom-session code remain until the IPsec path is integrated and tested for each caller. A DHT record is not automatically a membership proof: IKE may trust only a key whose name, full key, validity, and authorization are verified under the future DHT membership rules.
+The Linux implementation uses IPsec as the network packet-protection layer.
+The existing application session remains for callers that still depend on it;
+it is not a substitute for peer membership or service authorization. The
+current IKE identity is pinned from a locally verified signed endpoint record.
+A DHT record is not automatically a membership proof: network-wide membership
+rules are future work.
 
 ## Threats and required outcomes
 
@@ -56,14 +61,27 @@ An observer on the external path sees the outer IPv6 tunnel endpoints and traffi
 
 ## Current implementation snapshot
 
-The following are current gaps, not properties of the target design:
+Implemented and tested on Linux:
+
+- `vx6-ipsecd` uses strongSwan and kernel XFRM to establish IKEv2/ESP with
+  Ed25519 peer-key pinning and IPv6 `/128` tunnel selectors.
+- The local dial gate and nftables rules fail closed for the configured VX6
+  listener path; local peer revocation is persisted and terminates the local
+  association.
+- The routed two-peer container test observes ESP, increasing XFRM counters,
+  no service sentinel in the transit capture, and a blocked clear TCP probe.
+
+Remaining gaps and limitations:
 
 - `internal/secure/session.go` implements a custom X25519/Ed25519/HKDF/AES-GCM session protocol.
 - `internal/transport/quic.go` creates a throwaway self-signed certificate and skips ordinary QUIC TLS peer verification, relying on the custom session above it.
 - QUIC currently exposes one stream per connection; it does not yet provide the planned reusable per-peer multiplexed connection.
 - The transport abstraction currently selects TCP for `auto`; QUIC is not yet the default.
 - `internal/serviceproxy/proxy.go` does not enforce peer-to-service ACLs before backend dialing and does not consistently compare the authenticated remote identity with the configured expected owner.
-- No IKEv2/IPsec tunnel integration or verified fail-closed route policy is present in the CLI dataplane.
+- Active tamper/replay, rekey failure, tunnel-loss/restart, and comprehensive
+  route-leak tests are not yet covered by the container suite (#50).
+- DHT membership consensus, membership freshness, and distributed revocation
+  are not implemented; test peer records are supplied directly.
 - The DHT has no network-wide node-membership quorum or authorization epoch. Existing hidden-descriptor epochs rotate lookup keys and cannot be used as membership freshness proofs.
 - The current service proxy handles TCP streams. Real-time UDP/WebRTC forwarding needs a separate datagram design.
 

@@ -16,6 +16,8 @@ Start here and follow only the guide that matches your task.
 - [Current status](status.md)
 - [GUI and browser](GUI.md)
 - [Linux and systemd](LINUX.md), [systemd unit](systemd.md)
+- [IPsec deployment and validation](ipsec.md)
+- [Packaging and platform contribution plan](packaging-plan.md)
 
 ## Protocol references
 

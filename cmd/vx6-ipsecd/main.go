@@ -14,7 +14,6 @@ import (
 	"syscall"
 
 	"github.com/vx6/vx6/internal/ipsec"
-	"golang.org/x/sys/unix"
 )
 
 type serviceConfig struct {
@@ -44,7 +43,7 @@ func run(path string) error {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
 		return errors.New("service configuration must not be a symlink or writable by group/other")
 	}
-	stat, ok := info.Sys().(*unix.Stat_t)
+	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != 0 {
 		return errors.New("service configuration must be owned by root")
 	}

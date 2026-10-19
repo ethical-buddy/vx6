@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 usage() {
-  printf 'Usage: %s <interface> <peer-ipv6> <vx6-port> -- <traffic-test-command> [args...]\n' "$0" >&2
+printf 'Usage: %s <interface> <peer-ipv6> <vx6-port> -- <traffic-test-command> [args...]\n' "$0" >&2
   printf 'Example: sudo bash %s enp1s0 2001:db8::2 4242 -- vx6 send --peer peer-name --file test.bin\n' "$0" >&2
 }
 
@@ -26,11 +26,6 @@ command -v tcpdump >/dev/null
 [[ $peer == *:* ]] || { printf 'Peer must be an IPv6 literal.\n' >&2; exit 2; }
 ip link show dev "$iface" >/dev/null
 
-sa_output=$(swanctl --list-sas)
-grep -Eq 'INSTALLED, TUNNEL' <<<"$sa_output" || { printf 'No installed tunnel CHILD_SA found.\n' >&2; exit 1; }
-ip -6 xfrm state | grep -q 'proto esp' || { printf 'No IPv6 ESP XFRM state found.\n' >&2; exit 1; }
-ip -6 xfrm policy | grep -q 'dir out' || { printf 'No outbound IPv6 XFRM policy found.\n' >&2; exit 1; }
-
 capture=$(mktemp --suffix=.pcap)
 tcpdump_pid=
 cleanup() {
@@ -53,6 +48,11 @@ sleep 1
 kill "$tcpdump_pid" 2>/dev/null || true
 wait "$tcpdump_pid" 2>/dev/null || true
 tcpdump_pid=
+
+sa_output=$(swanctl --list-sas)
+grep -Eq 'INSTALLED, TUNNEL' <<<"$sa_output" || { printf 'No installed tunnel CHILD_SA found after workload.\n' >&2; exit 1; }
+ip -6 xfrm state | grep -q 'proto esp' || { printf 'No IPv6 ESP XFRM state found after workload.\n' >&2; exit 1; }
+ip -6 xfrm policy | grep -q 'dir out' || { printf 'No outbound IPv6 XFRM policy found after workload.\n' >&2; exit 1; }
 
 esp_count=$(tcpdump -nnr "$capture" "ip6 and host $peer and ip6 proto 50" 2>/dev/null | wc -l)
 clear_count=$(tcpdump -nnr "$capture" "ip6 and host $peer and (tcp port $port or udp port $port)" 2>/dev/null | wc -l)
