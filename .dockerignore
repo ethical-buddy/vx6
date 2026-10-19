@@ -1,0 +1,9 @@
+.git
+products
+docs
+vx6
+.venv
+node_modules
+.next
+dist
+build

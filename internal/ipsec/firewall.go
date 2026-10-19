@@ -127,7 +127,6 @@ func firewallRules(state firewallState) string {
 	b.WriteString("add table inet vx6\n")
 	b.WriteString("add chain inet vx6 input { type filter hook input priority -10; policy accept; }\n")
 	b.WriteString("add chain inet vx6 output { type filter hook output priority -10; policy accept; }\n")
-	b.WriteString("flush chain inet vx6 input\nflush chain inet vx6 output\n")
 	for _, port := range ports {
 		p := strconv.Itoa(int(port))
 		b.WriteString("add rule inet vx6 input tcp dport " + p + " meta ipsec exists accept\n")
@@ -162,7 +161,18 @@ func firewallRules(state firewallState) string {
 }
 
 func applyNFT(ctx context.Context, script string) error {
-	cmd := exec.CommandContext(ctx, "nft", "-exist", "-f", "-")
+	list := exec.CommandContext(ctx, "nft", "list", "tables", "inet")
+	output, err := list.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nft list tables: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.TrimSpace(line) == "table inet vx6" {
+			script = "delete table inet vx6\n" + script
+			break
+		}
+	}
+	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(script)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("nft: %w: %s", err, strings.TrimSpace(string(output)))
