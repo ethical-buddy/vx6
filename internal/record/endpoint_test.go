@@ -26,6 +26,43 @@ func TestEndpointRecordRoundTrip(t *testing.T) {
 	}
 }
 
+func TestVerifyEndpointReturnsBoundVerifiedRecord(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	rec, err := NewEndpointRecord(id, "alpha", "[2001:db8::1]:4242", time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	verified, err := VerifyEndpoint(rec, now)
+	if err != nil {
+		t.Fatalf("verify endpoint: %v", err)
+	}
+	if verified.Endpoint().NodeID != id.NodeID || !verified.PublicKey().Equal(id.PublicKey) {
+		t.Fatal("verified endpoint did not preserve the key-to-NodeID binding")
+	}
+
+	key := verified.PublicKey()
+	key[0] ^= 0xff
+	if !verified.PublicKey().Equal(id.PublicKey) {
+		t.Fatal("mutating the returned public key changed the verified value")
+	}
+
+	rec.Address = "[2001:db8::9]:4242"
+	if verified.Endpoint().Address != "[2001:db8::1]:4242" {
+		t.Fatal("mutating the input record changed the verified value")
+	}
+
+	if _, err := VerifyEndpoint(verified.Endpoint(), now.Add(2*time.Hour)); err == nil {
+		t.Fatal("verified an expired endpoint record")
+	}
+}
+
 func TestEndpointRecordExpiry(t *testing.T) {
 	t.Parallel()
 

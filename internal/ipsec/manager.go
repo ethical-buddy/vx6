@@ -8,7 +8,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -105,9 +104,11 @@ func (m *Manager) PreparePeer(ctx context.Context, peer record.EndpointRecord) e
 }
 
 func (m *Manager) preparePeer(ctx context.Context, peer record.EndpointRecord) error {
-	if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+	verifiedPeer, err := record.VerifyEndpoint(peer, time.Now())
+	if err != nil {
 		return fmt.Errorf("reject unverified IPsec peer: %w", err)
 	}
+	peer = verifiedPeer.Endpoint()
 	if !safeNodeID.MatchString(peer.NodeID) {
 		return fmt.Errorf("peer node ID contains unsupported characters")
 	}
@@ -133,7 +134,7 @@ func (m *Manager) preparePeer(ctx context.Context, peer record.EndpointRecord) e
 	if existing, ok := m.peers[peer.NodeID]; ok && existing.Signature == peer.Signature && existing.Address == peer.Address {
 		return nil
 	}
-	if err := m.writeFiles(peer); err != nil {
+	if err := m.writeFiles(verifiedPeer); err != nil {
 		return err
 	}
 	if _, err := m.run(ctx, "swanctl", "--load-creds", "--file", filepath.Join(m.root, "swanctl.conf")); err != nil {
@@ -153,9 +154,11 @@ func (m *Manager) preparePeer(ctx context.Context, peer record.EndpointRecord) e
 func (m *Manager) RevokePeer(ctx context.Context, peer record.EndpointRecord) error {
 	m.opMu.Lock()
 	defer m.opMu.Unlock()
-	if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+	verifiedPeer, err := record.VerifyEndpoint(peer, time.Now())
+	if err != nil {
 		return fmt.Errorf("cannot revoke unverified peer record: %w", err)
 	}
+	peer = verifiedPeer.Endpoint()
 	nodeID := peer.NodeID
 	if !safeNodeID.MatchString(nodeID) || nodeID == m.identity.NodeID {
 		return errors.New("invalid peer node ID")
@@ -180,25 +183,25 @@ func (m *Manager) RevokePeer(ctx context.Context, peer record.EndpointRecord) er
 	fw := m.firewall
 	m.mu.Unlock()
 
-	if fw != nil {
-		if err := fw.Revoke(ctx, nodeID, state.Address); err != nil {
-			return fmt.Errorf("persisted peer revocation, but firewall enforcement failed: %w", err)
-		}
-	}
 	name := connectionName(nodeID)
 	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name)
+	var revokeErr error
 	if err != nil {
-		return fmt.Errorf("peer is firewall-blocked, but checking its IKE SA failed: %w", err)
-	}
-	if strings.Contains(string(out), name) && (strings.Contains(string(out), "ESTABLISHED") || strings.Contains(string(out), "INSTALLED")) {
+		revokeErr = fmt.Errorf("check IKE SA during peer revocation: %w", err)
+	} else if strings.Contains(string(out), name) && (strings.Contains(string(out), "ESTABLISHED") || strings.Contains(string(out), "INSTALLED")) {
 		if _, err := m.run(ctx, "swanctl", "--terminate", "--ike", name, "--timeout", "5"); err != nil {
-			return fmt.Errorf("peer is firewall-blocked, but terminating its IKE SA failed: %w", err)
+			revokeErr = fmt.Errorf("terminate peer IKE SA: %w", err)
+		}
+	}
+	if fw != nil {
+		if err := fw.Revoke(ctx, nodeID, state.Address); err != nil {
+			revokeErr = errors.Join(revokeErr, fmt.Errorf("enforce peer revocation in firewall: %w", err))
 		}
 	}
 	if _, err := m.run(ctx, "swanctl", "--uninstall", "--ike", name, "--child", name); err != nil {
-		return fmt.Errorf("peer is firewall-blocked, but removing its trap policy failed: %w", err)
+		revokeErr = errors.Join(revokeErr, fmt.Errorf("remove revoked peer trap policy: %w", err))
 	}
-	return nil
+	return revokeErr
 }
 
 // EnsurePeer prepares and initiates a tunnel, then verifies that strongSwan
@@ -284,10 +287,15 @@ func (m *Manager) saInstalled(ctx context.Context, peer record.EndpointRecord) b
 	return true
 }
 
-func (m *Manager) writeFiles(peer record.EndpointRecord) error {
+func (m *Manager) writeFiles(verifiedPeer record.VerifiedEndpointRecord) error {
+	peer := verifiedPeer.Endpoint()
 	for _, dir := range []string{"conf.d", "private", "pubkey"} {
-		if err := os.MkdirAll(filepath.Join(m.root, dir), 0o700); err != nil {
+		dirPath := filepath.Join(m.root, dir)
+		if err := os.MkdirAll(dirPath, 0o700); err != nil {
 			return fmt.Errorf("create strongSwan %s directory: %w", dir, err)
+		}
+		if err := os.Chmod(dirPath, 0o700); err != nil {
+			return fmt.Errorf("restrict strongSwan %s directory: %w", dir, err)
 		}
 	}
 	privateDER, err := x509.MarshalPKCS8PrivateKey(ed25519.PrivateKey(m.identity.PrivateKey))
@@ -300,10 +308,7 @@ func (m *Manager) writeFiles(peer record.EndpointRecord) error {
 		return fmt.Errorf("encode local Ed25519 public key: %w", err)
 	}
 	localPublicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: localPublicDER})
-	peerRaw, err := base64.StdEncoding.DecodeString(peer.PublicKey)
-	if err != nil || len(peerRaw) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid peer Ed25519 public key")
-	}
+	peerRaw := verifiedPeer.PublicKey()
 	peerDER, err := x509.MarshalPKIXPublicKey(ed25519.PublicKey(peerRaw))
 	if err != nil {
 		return fmt.Errorf("encode peer Ed25519 public key: %w", err)

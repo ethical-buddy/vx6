@@ -10,15 +10,25 @@
 - `internal/secure/`, `internal/transport/`, `internal/serviceproxy/`, `internal/transfer/`: encrypted sessions, network transport, forwarding, and file transfer.
 - `internal/onion/`, `internal/hidden/`: relay circuits and hidden-service routing.
 - `internal/runtimectl/`: local status and reload control channel.
-- `sdk/`: supported public Go API. `sdk/chat/` contains chat client and crypto helpers.
+- `sdk/`: intended public Go API. It builds in-repository, but some exported
+  signatures still expose `internal/config` types; external consumer support
+  is tracked by issue #58. `sdk/chat/` contains chat client and crypto helpers.
+- `internal/ipsec/`: Linux strongSwan/XFRM peer tunnel manager, narrow Unix
+  socket client/server, and owned nftables policy.
+- `cmd/vx6-ipsecd/`: separate privileged service executable. It is not the
+  regular VX6 CLI and must be installed/configured by the system package.
 
 ## Optional products
 
-`products/` contains the Qt browser, mobile bridge, and companion applications. Each product has its own README and build instructions. Root `make build` builds only the core `vx6` executable.
+`products/` contains the Qt browser, mobile bridge, and companion applications.
+Each product has its own README and build instructions. Root `make build`
+produces `vx6` and `vx6-ipsecd`; `cmd/vx6-gui` and the Qt browser are separate
+optional applications.
 
 ## Supporting directories
 
 - `deployments/`: Linux service and package integration.
 - `scripts/`: build and maintenance helpers.
 - `docs/archive/`: proposals, exported reports, and historical/provenance files not required for ordinary development.
-- `docs/internal/`: internal planning or threat-model material, excluded from the public quick-start reading path.
+- `tests/ipsec-e2e/`: privileged IPv6 two-peer IKEv2/ESP packet-capture test.
+- `docs/README.md`: documentation directory map and recommended reading paths.

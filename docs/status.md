@@ -1,63 +1,37 @@
 # Current Status
 
-VX6 is usable now for controlled testing and temporary internal deployment.
+VX6 is usable for controlled testing. Do not treat the Linux IPsec support as a
+finished commercial installer or the decentralized identity system as a
+completed trust authority.
 
-## Working Today
+## Working Areas
 
-- TCP transport across the current release
-- signed discovery and signed service publication
-- direct service access to known VX6 addresses
-- public service lookup through the DHT
-- node-name clashes are detected and surfaced instead of being silently merged
-- init and rename now probe the network for name clashes before accepting a node name
-- private service catalogs for user-scoped visibility
-- hidden services with:
-  - encrypted descriptors
-  - blinded lookup keys
-  - invite secrets
-  - anonymous descriptor store and lookup paths
-- ASN-aware DHT diversity when a local ASN map is provided
-- conservative DHT store admission for trusted records
+- TCP service transport and localhost service forwarding
+- signed discovery, signed service publication, and DHT-backed lookup
+- private service catalogs and hidden-service descriptors/rendezvous
 - file transfer with local permission policy
-- runtime status and reload
-- `vx6-gui` over the same CLI/runtime surface
-- `products/browser/qt` as a separate Qt WebEngine frontend over the same VX6 binary
+- runtime status/reload and the `vx6-gui` frontend
+- Linux IKEv2/IPsec integration through strongSwan and kernel XFRM
+- a routed IPv6 two-peer container capture for ESP/service confidentiality
 
-## Linux Position
+## Platform Scope
 
-`main` is the Linux-first release branch.
+Linux is the reference platform for the IPsec implementation. Windows/macOS
+Go builds do not imply equivalent IPsec adapters, privilege boundaries,
+firewall behavior, installers, or validation. Android needs a separate native
+VPN/IKEv2 and SDK integration. See the [platform packaging plan](packaging-plan.md).
 
-That means:
+## Remaining Security and Product Work
 
-- Linux is the primary reference environment
-- systemd documentation exists
-- Linux runtime behavior is the baseline used to shape the protocol branch
-- eBPF/XDP controls exist here, but they are still experimental
+- adversarial IPsec tests for wrong peers, replay/tamper, rekey, and tunnel loss
+- comprehensive fail-closed route and restart/cleanup verification
+- DHT-backed membership and credential lifecycle; DHT is not yet the IKE trust
+  authority
+- deny-by-default service authorization and standard authenticated transport
+  migration
+- production Linux package and first-install/upgrade/removal lifecycle
+- public SDK types suitable for external Go consumers
+- Android integration and platform test matrix
+- QUIC, UDP/WebRTC, and acceleration work remain separate and incomplete
 
-## Other Platforms
-
-- Windows uses the same protocol and feature behavior through the shared core and Windows runtime adapters
-- macOS packaging and runtime polish are still behind Linux
-
-## Still In Progress
-
-- seamless hidden mid-stream failover
-- stronger DHT hardening under adversarial WAN and churn
-- real QUIC transport
-- real eBPF/XDP fast path for the current encrypted relay plane
-- polished Windows and macOS packaging and service lifecycle work
-- richer ASN map tooling and operator data sources
-- a fuller browser product layered on top of the new Qt browser shell
-
-## Honest Summary
-
-VX6 is no longer just an architecture sketch.
-
-It already has:
-
-- functioning service discovery
-- functioning encrypted sessions
-- functioning DHT-backed lookup
-- functioning hidden services
-
-The biggest remaining work is hardening, failover, packaging, and large-scale adversarial polish.
+For per-feature guarantees and limitations, start at [security.md](security.md).

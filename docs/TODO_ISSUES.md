@@ -1,40 +1,21 @@
-# VX6 Open Issues
+# Tracked Work
 
-This file is a short task list for follow-up PRs.
+GitHub issues are the source of truth for ownership, acceptance, and status.
+This page is only a short index; do not add a parallel untracked task list.
 
-## Protocol
-- DHT store admission is now conservative, with authoritative publisher checks for trusted records. Operator-configurable publish tokens and closer-to-key admission could still strengthen high-trust deployments.
-- DHT ASN diversity now works with offline maps, but we still need better operator tooling to generate and refresh those maps.
-- Hidden-service lookup still has timing and volume leakage. Add more cover traffic and more regular polling.
-- Hidden failover is improved, but an active stream still does not migrate perfectly when a relay dies. Add stronger reconnect and session handoff.
-- DHT cache and stored records are still mostly memory-backed. Add bounded disk-backed storage for scale.
-- Lookup and replication knobs are still only lightly tuned. Run churn and WAN tests for `alpha`, `beta`, replica count, and refresh intervals.
+## Current Dataplane Sequence
 
-## Tor-Grade Security
-- Add stronger traffic shaping for hidden services.
-- Add better guard relay selection rules so path overlap is lower.
-- Add more anti-Sybil checks for DHT writers and hidden-service relays.
-- Add adversarial tests for alias guessing, timing observation, and relay correlation.
-- Add a clearer threat model that states what VX6 protects and what it does not protect.
+The initial Linux IPsec baseline suite is complete in [#50](https://github.com/ethical-buddy/vx6/issues/50). The full adversarial matrix is separated into [#59](https://github.com/ethical-buddy/vx6/issues/59) and must follow the features it tests.
 
-## Cross-Platform Support
-- Keep the shared protocol code identical across Linux, Windows, macOS, and BSD.
-- Add OS-specific adapter files only for paths, signals, firewall, and service manager behavior.
-- Add macOS support files for launch/startup and firewall guidance.
-- Add BSD support files for service startup and firewall guidance.
-- Add a fuller browser product on top of `products/browser/qt` that talks to the same local VX6 runtime API on every OS.
+1. [#42 Peer trust and credential lifecycle](https://github.com/ethical-buddy/vx6/issues/42)
+2. [#43 Deny-by-default service authorization](https://github.com/ethical-buddy/vx6/issues/43)
+3. [#48 Bounded encrypted service OPEN](https://github.com/ethical-buddy/vx6/issues/48)
+4. [#44 Replace custom session protocol](https://github.com/ethical-buddy/vx6/issues/44)
+5. [#45 QUIC primary transport](https://github.com/ethical-buddy/vx6/issues/45) and [#46 TCP/TLS fallback](https://github.com/ethical-buddy/vx6/issues/46)
+6. [#59 Full adversarial dataplane matrix](https://github.com/ethical-buddy/vx6/issues/59)
+7. [#57 Linux packaging with strongSwan](https://github.com/ethical-buddy/vx6/issues/57)
+8. [#58 External Go SDK API](https://github.com/ethical-buddy/vx6/issues/58)
+9. [#52 Android platform integration](https://github.com/ethical-buddy/vx6/issues/52)
 
-## Windows
-- Add a proper Windows installer that can create firewall rules during install.
-- Add Authenticode signing for `vx6.exe`, `vx6-gui.exe`, and `vx6-browser.exe`.
-- Add Windows service support so VX6 can run in the background cleanly.
-- Add better Windows path handling for AppData, ProgramData, and service logs.
-- Add live Windows integration tests on a real Windows host.
-- Add a `vx6 doctor` command that reports firewall, advertise address, and peer sync health.
-
-## Small PR Slices
-- PR 1: DHT store admission refinements and tests.
-- PR 2: Hidden-service traffic shaping and tests.
-- PR 3: Windows installer and firewall setup.
-- PR 4: macOS/BSD adapter files.
-- PR 5: Browser frontend hardening and local API polish.
+Performance, UDP/WebRTC, eBPF, VPP/AF_XDP, and broader roadmap work are listed
+in [issue #56](https://github.com/ethical-buddy/vx6/issues/56) and linked issues.

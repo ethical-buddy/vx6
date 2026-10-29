@@ -2,20 +2,24 @@
 
 ## Requirements
 
-- Go 1.22 or newer if you are building from source
+- Go 1.24 or newer if you are building from source (see `go.mod`)
 - Qt 6 WebEngine if you are building the optional browser frontend from `products/browser/qt`
 - IPv6 enabled on the Linux machines that will run VX6
 - firewall rules that allow the VX6 listen port
 
 ## Build
 
-The simplest build path is:
+The core Linux build path is:
 
 ```bash
 make build
 ```
 
-That builds only the core `vx6` executable.
+This builds `vx6` and the separate privileged `vx6-ipsecd` helper. The helper
+is a distinct executable to keep IPsec/firewall administration out of the
+ordinary user-facing VX6 process. The optional desktop GUI has its own command
+and is built separately below. A package/installer that provisions the system
+service is still in progress; see the [packaging plan](packaging-plan.md).
 
 You can also build directly with Go:
 

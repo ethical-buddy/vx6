@@ -24,7 +24,7 @@ This is evidence for passive confidentiality on the tested IPv6 path, not a
 proof against every active MITM. The test does not inject modified or replayed
 packets, exercise rekey, or simulate tunnel loss/restart and route cleanup.
 An on-path attacker can still drop, delay, or flood traffic. These cases belong
-in adversarial issue #50. DHT-wide name/key uniqueness, admission consensus,
+in the follow-up adversarial issue #59. DHT-wide name/key uniqueness, admission consensus,
 membership freshness, and distributed revocation are also still outside this
 test and remain separate DHT/trust work.
 

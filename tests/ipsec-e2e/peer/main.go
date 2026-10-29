@@ -2,25 +2,100 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/ipsec"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/record"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 func main() {
+	if len(os.Args) == 3 && (os.Args[1] == "ensure-peer" || os.Args[1] == "prepare-peer" || os.Args[1] == "guarded-dial") {
+		if err := setupPeer(os.Args[1], os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func setupPeer(action, recordPath string) error {
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	idStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		return err
+	}
+	id, err := idStore.Load()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		return err
+	}
+	var peer record.EndpointRecord
+	if err := json.Unmarshal(data, &peer); err != nil {
+		return fmt.Errorf("decode expected peer record: %w", err)
+	}
+	if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+		return fmt.Errorf("verify expected peer record: %w", err)
+	}
+	if cfg.Node.AdvertiseAddr == "" {
+		return fmt.Errorf("test peer needs an explicit advertised IPv6 address")
+	}
+	tunnel, err := ipsec.NewClient(ipsec.DefaultSocket(), cfg.Node.AdvertiseAddr, id)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	if action == "ensure-peer" {
+		if err := tunnel.EnsurePeer(ctx, peer); err != nil {
+			return err
+		}
+	} else if action == "guarded-dial" {
+		guardedCtx := vxtransport.WithDialGuard(ctx, func(ctx context.Context, addr string) error {
+			if addr != peer.Address {
+				return fmt.Errorf("unexpected guarded endpoint %s", addr)
+			}
+			return tunnel.EnsurePeer(ctx, peer)
+		})
+		conn, err := vxtransport.DialContext(guardedCtx, vxtransport.ModeTCP, peer.Address)
+		if err == nil {
+			_ = conn.Close()
+			return fmt.Errorf("unexpectedly opened VX6 application socket to %s", peer.Address)
+		}
+		if !strings.Contains(err.Error(), "IPsec peer gate rejected") {
+			return fmt.Errorf("dial failed outside the IPsec peer gate: %w", err)
+		}
+		return err
+	} else if err := tunnel.PreparePeer(ctx, peer); err != nil {
+		return err
+	}
+	fmt.Printf("peer_%s\t%s\n", strings.TrimSuffix(action, "-peer"), peer.NodeID)
+	return nil
 }
 
 func run() error {

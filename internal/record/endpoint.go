@@ -25,6 +25,25 @@ type EndpointRecord struct {
 	Signature string `json:"signature"`
 }
 
+// VerifiedEndpointRecord is an endpoint record whose signature, key-to-NodeID
+// binding, and expiry have been checked. It does not prove DHT membership,
+// network-wide uniqueness, or that the record came from an honest DHT quorum.
+type VerifiedEndpointRecord struct {
+	record    EndpointRecord
+	publicKey ed25519.PublicKey
+}
+
+// Endpoint returns the signed endpoint fields that were verified.
+func (v VerifiedEndpointRecord) Endpoint() EndpointRecord {
+	return v.record
+}
+
+// PublicKey returns a copy of the key verified against the record signature
+// and NodeID.
+func (v VerifiedEndpointRecord) PublicKey() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), v.publicKey...)
+}
+
 func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.Duration, now time.Time) (EndpointRecord, error) {
 	if err := ValidateNodeName(nodeName); err != nil {
 		return EndpointRecord{}, err
@@ -54,54 +73,66 @@ func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.
 }
 
 func VerifyEndpointRecord(record EndpointRecord, now time.Time) error {
+	_, err := VerifyEndpoint(record, now)
+	return err
+}
+
+// VerifyEndpoint checks an endpoint record and returns a value suitable for
+// security-sensitive consumers such as the IPsec peer-key pinning path.
+// Verification proves only that the record is internally valid and signed
+// by the key it names; membership and uniqueness are separate trust decisions.
+func VerifyEndpoint(record EndpointRecord, now time.Time) (VerifiedEndpointRecord, error) {
 	if record.NodeID == "" || record.NodeName == "" || record.Address == "" {
-		return fmt.Errorf("record missing required fields")
+		return VerifiedEndpointRecord{}, fmt.Errorf("record missing required fields")
 	}
 	if err := ValidateNodeName(record.NodeName); err != nil {
-		return err
+		return VerifiedEndpointRecord{}, err
 	}
 	if err := transfer.ValidateIPv6Address(record.Address); err != nil {
-		return err
+		return VerifiedEndpointRecord{}, err
 	}
 
 	publicKey, err := base64.StdEncoding.DecodeString(record.PublicKey)
 	if err != nil {
-		return fmt.Errorf("decode public key: %w", err)
+		return VerifiedEndpointRecord{}, fmt.Errorf("decode public key: %w", err)
 	}
 	signature, err := base64.StdEncoding.DecodeString(record.Signature)
 	if err != nil {
-		return fmt.Errorf("decode signature: %w", err)
+		return VerifiedEndpointRecord{}, fmt.Errorf("decode signature: %w", err)
 	}
 	if len(publicKey) != ed25519.PublicKeySize {
-		return fmt.Errorf("record contains invalid public key")
+		return VerifiedEndpointRecord{}, fmt.Errorf("record contains invalid public key")
 	}
 	if len(signature) != ed25519.SignatureSize {
-		return fmt.Errorf("record contains invalid signature")
+		return VerifiedEndpointRecord{}, fmt.Errorf("record contains invalid signature")
 	}
 
 	issuedAt, err := time.Parse(time.RFC3339, record.IssuedAt)
 	if err != nil {
-		return fmt.Errorf("parse issued_at: %w", err)
+		return VerifiedEndpointRecord{}, fmt.Errorf("parse issued_at: %w", err)
 	}
 	expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
 	if err != nil {
-		return fmt.Errorf("parse expires_at: %w", err)
+		return VerifiedEndpointRecord{}, fmt.Errorf("parse expires_at: %w", err)
 	}
 	if !expiresAt.After(issuedAt) {
-		return fmt.Errorf("record expiry must be after issue time")
+		return VerifiedEndpointRecord{}, fmt.Errorf("record expiry must be after issue time")
 	}
 	if now.UTC().After(expiresAt) {
-		return fmt.Errorf("record has expired")
+		return VerifiedEndpointRecord{}, fmt.Errorf("record has expired")
 	}
 
 	if want := identity.NodeIDFromPublicKey(ed25519.PublicKey(publicKey)); want != record.NodeID {
-		return fmt.Errorf("record node id does not match public key")
+		return VerifiedEndpointRecord{}, fmt.Errorf("record node id does not match public key")
 	}
 	if !ed25519.Verify(ed25519.PublicKey(publicKey), signingPayload(record), signature) {
-		return fmt.Errorf("record signature verification failed")
+		return VerifiedEndpointRecord{}, fmt.Errorf("record signature verification failed")
 	}
 
-	return nil
+	return VerifiedEndpointRecord{
+		record:    record,
+		publicKey: append(ed25519.PublicKey(nil), publicKey...),
+	}, nil
 }
 
 func Fingerprint(record EndpointRecord) string {

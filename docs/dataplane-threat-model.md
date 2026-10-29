@@ -79,7 +79,7 @@ Remaining gaps and limitations:
 - The transport abstraction currently selects TCP for `auto`; QUIC is not yet the default.
 - `internal/serviceproxy/proxy.go` does not enforce peer-to-service ACLs before backend dialing and does not consistently compare the authenticated remote identity with the configured expected owner.
 - Active tamper/replay, rekey failure, tunnel-loss/restart, and comprehensive
-  route-leak tests are not yet covered by the container suite (#50).
+  route-leak tests are not yet covered by the container suite (#59).
 - DHT membership consensus, membership freshness, and distributed revocation
   are not implemented; test peer records are supplied directly.
 - The DHT has no network-wide node-membership quorum or authorization epoch. Existing hidden-descriptor epochs rotate lookup keys and cannot be used as membership freshness proofs.
@@ -112,7 +112,8 @@ Performance must be measured for QUIC/TLS, TCP/TLS, IPsec alone, and their inten
 | QUIC primary transport, connection reuse, and stream/resource isolation | [#45](https://github.com/ethical-buddy/vx6/issues/45) | Concurrent-stream, identity, cancellation, flood-limit, and reconnect integration tests. |
 | TCP/TLS fallback with equivalent authentication and authorization | [#46](https://github.com/ethical-buddy/vx6/issues/46) | Reachability failure may fall back; identity and authorization failures never do. |
 | Inner-header confidentiality and no clear-route leakage when a tunnel is required | [#47](https://github.com/ethical-buddy/vx6/issues/47) | External packet capture hides inner IP/transport headers; tunnel failure cannot leak to the ordinary route. |
-| Combined MITM, replay, malformed-input, denial, and fail-closed coverage | [#50](https://github.com/ethical-buddy/vx6/issues/50) | CI runs portable adversarial tests and a documented privileged IPsec integration job. |
+| Baseline IPv6 IPsec capture and clear-probe tests | [#50](https://github.com/ethical-buddy/vx6/issues/50) | Two-peer IKE/ESP capture, service sentinel, protected ping, and clear TCP probe. |
+| Remaining MITM, replay, malformed-input, denial, and fail-closed matrix | [#59](https://github.com/ethical-buddy/vx6/issues/59) | Feature-gated portable and privileged integration coverage. |
 | Overhead and latency remain measured rather than assumed | [#51](https://github.com/ethical-buddy/vx6/issues/51) | Reproducible benchmarks report throughput, p95/p99 latency, CPU, memory, jitter, and loss. |
 | UDP/WebRTC identity, datagram handling, and tunnel-path protection | [#49](https://github.com/ethical-buddy/vx6/issues/49) | Datagram loss/reorder tests, signaling fingerprint checks, and packet-capture validation. |
 

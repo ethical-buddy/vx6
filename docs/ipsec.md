@@ -13,10 +13,21 @@ a verified peer with an installed CHILD_SA.
 
 The local identity key is sent to the root-owned IPsec service through the
 authorized local Unix socket and written as PKCS#8 PEM with mode `0600` under
-`<service-state>/<uid>/<node-id>/swanctl/private`. Peer public keys and
-generated connections are stored beside it. The regular VX6 process neither
-stores an IPsec copy of the key nor launches `swanctl`. VX6 does not generate a
-new cryptographic identity or CA.
+`<service-state>/<uid>/<node-id>/swanctl/private`. The private-key directory is
+restricted to mode `0700`; peer public keys and generated connections are
+stored in separately restricted directories. On Unix-like systems, the user
+identity store is a regular owner-only file and is atomically replaced on
+write. The regular VX6 process neither stores an IPsec copy of the key nor
+launches `swanctl`. VX6 does not generate a new cryptographic identity or CA.
+
+The signed endpoint record binds node ID, name, IPv6 address, and full Ed25519
+public key. Record verification checks the signature, validity interval, and
+that the node ID is derived from that key. The IPsec manager pins that verified
+key for IKE authentication; a peer-supplied name or address alone is not a
+trust anchor. This proves possession of the key named in the record, not that
+the DHT has globally established the record's uniqueness. DHT membership
+consensus, freshness, and distributed revocation are separate work tracked in
+#60.
 
 ## Bootstrap
 
@@ -35,7 +46,8 @@ vx6 identity export-endpoint --addr '[2001:db8::10]:4242' --out endpoint.json
 ```
 
 The record's name, node ID, public key, address, validity interval, and
-signature must be checked against the network's DHT identity/uniqueness process.
+signature must be verified. The current implementation does not establish
+network-wide DHT identity uniqueness; see #60.
 Address-only peers remain accepted in config for compatibility, but fail closed
 when used as a tunnel peer.
 
@@ -66,6 +78,15 @@ endpoint in nftables, terminates its current IKE SA, and removes the CHILD_SA
 trap policy. Revocation remains in force after service restart. It must be
 explicitly lifted by an administrator; there is intentionally no automatic
 unrevoke on a refreshed DHT record.
+
+Node IDs are derived from identity public keys. Key replacement therefore
+creates a new node ID, not a transparent rotation. Until DHT supports a signed
+identity-transition proof, planned replacement means enrolling a new node
+identity and updating peer trust, then locally revoking the old ID. If the old
+key is lost or compromised, network-wide recovery cannot be proven by that key
+and depends on the future DHT membership/revocation design in #60. An expired
+endpoint record must be refreshed and verified before it can be used for new
+peer setup.
 
 This is not yet a complete commercial installation. The repository has systemd
 units and an example service config, but no finished signed Linux package or
@@ -127,7 +148,7 @@ egress, so reported totals are observations, not necessarily unique frames.
 This is passive capture plus an unauthenticated clear-port probe. It does not
 yet prove resistance to active packet modification/replay, rekey failure,
 tunnel loss/restart, or every route-leak scenario. Those cases are tracked in
-adversarial issue #50. DHT bootstrap/membership consensus is deliberately
+follow-up adversarial issue #59. DHT bootstrap/membership consensus is deliberately
 omitted: the test supplies signed peer endpoint records directly and verifies
 the pinned-key IKE path. DHT trust remains separate work.
 

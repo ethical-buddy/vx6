@@ -78,6 +78,16 @@ func (s *Store) Path() string {
 }
 
 func (s *Store) Load() (Identity, error) {
+	info, err := os.Lstat(s.path)
+	if err != nil {
+		return Identity{}, fmt.Errorf("stat identity file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return Identity{}, fmt.Errorf("identity path is not a regular file")
+	}
+	if err := validateIdentityFileMode(s.path, info.Mode()); err != nil {
+		return Identity{}, err
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		return Identity{}, fmt.Errorf("read identity: %w", err)
@@ -131,11 +141,7 @@ func (s *Store) Save(id Identity) error {
 	}
 	data = append(data, '\n')
 
-	if err := os.WriteFile(s.path, data, 0o600); err != nil {
-		return fmt.Errorf("write identity: %w", err)
-	}
-
-	return nil
+	return writeIdentityAtomic(s.path, data)
 }
 
 func (s *Store) Ensure() (Identity, bool, error) {

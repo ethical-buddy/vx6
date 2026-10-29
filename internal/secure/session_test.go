@@ -3,6 +3,7 @@ package secure
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -48,7 +49,7 @@ func TestSessionRoundTrip(t *testing.T) {
 		buf := make([]byte, 5)
 		_, err = io.ReadFull(c, buf)
 		if err == nil && string(buf) != "hello" {
-			t.Fatalf("unexpected payload %q", string(buf))
+			err = fmt.Errorf("unexpected payload %q", string(buf))
 		}
 		errCh <- err
 	}()

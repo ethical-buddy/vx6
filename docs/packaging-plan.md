@@ -118,7 +118,7 @@ support matrix from CI results, not intentions.
 
 ## Order and ownership
 
-Start with #50 adversarial dataplane tests and #55 deployment/operations docs;
+Continue with #59 adversarial dataplane tests and #55 deployment/operations docs;
 then implement the Linux first-install package in [#57](https://github.com/ethical-buddy/vx6/issues/57). In parallel, contributors can
 prepare independent package recipes against the shared install contract, but
 merge only after Linux behavior and lifecycle tests are stable. Keep #42

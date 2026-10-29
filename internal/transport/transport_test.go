@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -73,17 +74,36 @@ func TestTransportRejectsNonIPv6Endpoints(t *testing.T) {
 }
 
 func TestDialGuardRejectsBeforeOpeningSocket(t *testing.T) {
+	listener, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			_ = conn.Close()
+			accepted <- struct{}{}
+		}
+	}()
+
 	wantErr := fmt.Errorf("peer identity is not trusted")
 	ctx := WithDialGuard(context.Background(), func(context.Context, string) error {
 		return wantErr
 	})
-	conn, err := DialContext(ctx, ModeTCP, "[2001:db8::2]:4242")
+	conn, err := DialContext(ctx, ModeTCP, listener.Addr().String())
 	if conn != nil {
 		_ = conn.Close()
 		t.Fatal("opened a socket despite rejected peer gate")
 	}
 	if err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
 		t.Fatalf("DialContext error = %v, want guarded rejection", err)
+	}
+	select {
+	case <-accepted:
+		t.Fatal("listener accepted a connection despite rejected peer gate")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

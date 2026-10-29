@@ -43,7 +43,10 @@ Or use the Makefile:
 make build
 ```
 
-`make build` builds only `vx6`. The optional GUI, browser, and companion apps have separate instructions under `products/`.
+`make build` builds `vx6` and the separate privileged `vx6-ipsecd` Linux
+helper. The optional GUI, browser, and companion apps have separate build
+instructions under `products/`. See the [documentation map](docs/README.md)
+for the current platform and security boundaries.
 
 ## First node
 
