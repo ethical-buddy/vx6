@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+if [[ ${VX6_E2E_CHILD_RUN:-0} != 1 && ${VX6_E2E_WRONG_KEY_ONLY:-0} != 1 && ${VX6_E2E_SKIP_WRONG_KEY:-0} != 1 ]]; then
+  suite_id="$(date +%Y%m%d-%H%M%S)-$$"
+  suite_results=${VX6_E2E_RESULTS_DIR:-"/tmp/vx6-ipsec-e2e-suite-$suite_id"}
+  mkdir -p "$suite_results"
+  printf 'Running wrong-key validation and positive-control validation in separate fresh topologies.\n'
+  env VX6_E2E_CHILD_RUN=1 VX6_E2E_WRONG_KEY_ONLY=1 VX6_E2E_RESULTS_DIR="$suite_results/wrong-key" bash "$0"
+  env VX6_E2E_CHILD_RUN=1 VX6_E2E_SKIP_WRONG_KEY=1 VX6_E2E_RESULTS_DIR="$suite_results/positive-control" bash "$0"
+  printf 'Combined suite results: %s\n' "$suite_results"
+  exit 0
+fi
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 image=vx6-ipsec-e2e:local
 run_id="$(date +%Y%m%d-%H%M%S)-$$"
