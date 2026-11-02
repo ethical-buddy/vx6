@@ -164,6 +164,7 @@ func (r *Registry) handlePublishService(conn net.Conn, rec record.ServiceRecord)
 }
 
 func (r *Registry) handleResolveService(conn net.Conn, service string) error {
+	service = record.CanonicalServiceLookupKey(service)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -184,6 +185,13 @@ func (r *Registry) handleSnapshot(conn net.Conn) error {
 }
 
 func (r *Registry) resolve(name, nodeID string) (record.EndpointRecord, error) {
+	if name != "" {
+		canonical, err := record.NormalizeNodeName(name)
+		if err != nil {
+			return record.EndpointRecord{}, err
+		}
+		name = canonical
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -239,6 +247,7 @@ func (r *Registry) ResolveLocal(name, nodeID string) (record.EndpointRecord, err
 }
 
 func (r *Registry) ResolveServiceLocal(fullName string) (record.ServiceRecord, error) {
+	fullName = record.CanonicalServiceLookupKey(fullName)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -408,6 +417,13 @@ func PublishService(ctx context.Context, address string, rec record.ServiceRecor
 }
 
 func Resolve(ctx context.Context, address, name, nodeID string) (record.EndpointRecord, error) {
+	if name != "" {
+		canonical, err := record.NormalizeNodeName(name)
+		if err != nil {
+			return record.EndpointRecord{}, err
+		}
+		name = canonical
+	}
 	resp, err := roundTrip(ctx, address, request{
 		Action: "resolve",
 		Name:   name,
@@ -426,6 +442,7 @@ func Resolve(ctx context.Context, address, name, nodeID string) (record.Endpoint
 }
 
 func ResolveService(ctx context.Context, address, service string) (record.ServiceRecord, error) {
+	service = record.CanonicalServiceLookupKey(service)
 	resp, err := roundTrip(ctx, address, request{
 		Action:  "resolve_service",
 		Service: service,

@@ -1,8 +1,8 @@
 # Current Status
 
-VX6 is usable for controlled testing. Do not treat the Linux IPsec support as a
-finished commercial installer or the decentralized identity system as a
-completed trust authority.
+VX6 is usable for controlled testing. Do not treat Linux IPsec as a finished
+commercial installer or the decentralized identity system as a global name
+authority.
 
 ## Working Areas
 
@@ -25,13 +25,19 @@ VPN/IKEv2 and SDK integration. See the [platform packaging plan](packaging-plan.
 
 - adversarial IPsec tests for wrong peers, replay/tamper, rekey, and tunnel loss
 - comprehensive fail-closed route and restart/cleanup verification
-- DHT-backed membership and credential lifecycle; DHT is not yet the IKE trust
-  authority
-- deny-by-default service authorization and standard authenticated transport
-  migration
+- peer-local DHT identity/name conflict and credential lifecycle; there is no
+  planned committee or global consensus service, and a local lookup is not
+  proof that a name is globally unique
+- signed metadata, routing-table maintenance, independent bootstrap/liveness,
+  and adversarial churn/eclipse simulation (#60, #62-#65)
+- deny-by-default service authorization and proof that every service path uses
+  its required IPsec protection
 - production Linux package and first-install/upgrade/removal lifecycle
 - public SDK types suitable for external Go consumers
 - Android integration and platform test matrix
-- QUIC, UDP/WebRTC, and acceleration work remain separate and incomplete
+- a VX6-owned Linux IKE controller is research/prototype work; strongSwan and
+  XFRM are the current tested implementation (#51, #57)
+- QUIC is optional inside ESP, not the default security layer or a clear-path
+  fallback; UDP/WebRTC and acceleration remain separate and incomplete
 
 For per-feature guarantees and limitations, start at [security.md](security.md).

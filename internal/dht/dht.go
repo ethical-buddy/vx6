@@ -66,7 +66,7 @@ type lookupBranch struct {
 }
 
 const (
-	defaultLookupAlpha               = 3
+	defaultLookupAlpha               = 4
 	defaultLookupQueryBudget         = 12
 	defaultReplicationFactor         = 5
 	lookupAlpha                      = defaultLookupAlpha
@@ -120,7 +120,12 @@ type ReplicationReport struct {
 }
 
 func NodeNameKey(name string) string {
-	return "node/name/" + name
+	canonical, err := record.NormalizeNodeName(name)
+	if err != nil {
+		canonical = strings.ToUpper(name)
+	}
+	sum := sha256.Sum256([]byte("vx6/node-name/v1\x00" + canonical))
+	return "node/name/" + fmt.Sprintf("%x", sum[:])
 }
 
 func NodeIDKey(nodeID string) string {
@@ -128,6 +133,11 @@ func NodeIDKey(nodeID string) string {
 }
 
 func ServiceKey(fullName string) string {
+	if nodeName, serviceName, ok := strings.Cut(fullName, "."); ok {
+		if canonical, err := record.NormalizeNodeName(nodeName); err == nil {
+			return "service/" + canonical + "." + serviceName
+		}
+	}
 	return "service/" + fullName
 }
 
@@ -305,7 +315,10 @@ func (s *Server) LookupState(key string) (StoredValueState, bool) {
 
 // HandleDHT processes an incoming DHT request from a peer.
 func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequest) error {
-	resp := proto.DHTResponse{}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	resp := proto.DHTResponse{Type: req.Type}
 	if stringsHasHiddenDescriptorKey(req.Target) {
 		if !s.allowHiddenDescriptorRequest(conn.RemoteAddr().String(), req.Action, time.Now()) {
 			payload, _ := json.Marshal(resp)
@@ -683,7 +696,10 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	req := proto.DHTRequest{Action: "store", Target: key, Data: value}
+	req := proto.DHTRequest{Type: proto.DHTTypeFor("store", key), Action: "store", Target: key, Data: value}
+	if err := req.Validate(); err != nil {
+		return err
+	}
 	if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
 		return err
 	}
@@ -699,8 +715,18 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 	if kind != proto.KindDHT {
 		return fmt.Errorf("invalid response")
 	}
-	_, err = proto.ReadLengthPrefixed(conn, 1024*1024)
-	return err
+	resPayload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+	if err != nil {
+		return err
+	}
+	var resp proto.DHTResponse
+	if err := json.Unmarshal(resPayload, &resp); err != nil {
+		return err
+	}
+	if resp.Type != req.Type {
+		return fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	}
+	return nil
 }
 
 // RecursiveFindValue searches for a value in the network.
@@ -822,7 +848,10 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	req := proto.DHTRequest{Action: "find_node", Target: targetID}
+	req := proto.DHTRequest{Type: proto.DHTTypeFor("find_node", targetID), Action: "find_node", Target: targetID}
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
 	if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
 		return nil, err
 	}
@@ -844,6 +873,9 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 	if err := json.Unmarshal(resPayload, &resp); err != nil {
 		return nil, err
 	}
+	if resp.Type != req.Type {
+		return nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	}
 	return resp.Nodes, nil
 }
 
@@ -855,7 +887,10 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	req := proto.DHTRequest{Action: "find_value", Target: key}
+	req := proto.DHTRequest{Type: proto.DHTTypeFor("find_value", key), Action: "find_value", Target: key}
+	if err := req.Validate(); err != nil {
+		return "", nil, err
+	}
 	if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
 		return "", nil, err
 	}
@@ -876,6 +911,9 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 	var resp proto.DHTResponse
 	if err := json.Unmarshal(resPayload, &resp); err != nil {
 		return "", nil, err
+	}
+	if resp.Type != req.Type {
+		return "", nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
 	}
 	return resp.Value, resp.Nodes, nil
 }

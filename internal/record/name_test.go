@@ -10,14 +10,16 @@ func TestValidateNodeName(t *testing.T) {
 		value   string
 		wantErr bool
 	}{
-		{name: "valid simple", value: "alpha"},
-		{name: "valid hyphen", value: "alpha-01"},
+		{name: "valid simple", value: "ALPHA"},
+		{name: "valid hyphen", value: "ALPHA-01"},
+		{name: "minimum length", value: "A1B"},
+		{name: "maximum length", value: "ABCDEFGHIJKLMNOP"},
 		{name: "empty rejected", value: "", wantErr: true},
-		{name: "uppercase rejected", value: "Alpha", wantErr: true},
-		{name: "too long rejected", value: "abcdefghijklmnop", wantErr: true},
-		{name: "leading hyphen rejected", value: "-alpha", wantErr: true},
-		{name: "trailing hyphen rejected", value: "alpha-", wantErr: true},
-		{name: "underscore rejected", value: "alpha_beta", wantErr: true},
+		{name: "too short rejected", value: "AB", wantErr: true},
+		{name: "too long rejected", value: "ABCDEFGHIJKLMNOPQ", wantErr: true},
+		{name: "leading hyphen rejected", value: "-ALPHA", wantErr: true},
+		{name: "trailing hyphen rejected", value: "ALPHA-", wantErr: true},
+		{name: "underscore rejected", value: "ALPHA_BETA", wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -33,5 +35,21 @@ func TestValidateNodeName(t *testing.T) {
 				t.Fatalf("expected nil error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestNormalizeNodeNameUppercasesUserInput(t *testing.T) {
+	got, err := NormalizeNodeName("alpha-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ALPHA-42" {
+		t.Fatalf("normalized name = %q, want ALPHA-42", got)
+	}
+}
+
+func TestValidateCanonicalNodeNameRejectsLowercaseWireValue(t *testing.T) {
+	if err := ValidateCanonicalNodeName("alpha"); err == nil {
+		t.Fatal("accepted non-canonical lowercase wire name")
 	}
 }

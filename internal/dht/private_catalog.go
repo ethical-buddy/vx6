@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vx6/vx6/internal/identity"
@@ -23,11 +24,16 @@ type PrivateServiceCatalog struct {
 }
 
 func PrivateCatalogKey(nodeName string) string {
-	return "private-catalog/" + nodeName
+	canonical, err := record.NormalizeNodeName(nodeName)
+	if err != nil {
+		canonical = strings.ToUpper(nodeName)
+	}
+	return "private-catalog/" + canonical
 }
 
 func NewPrivateServiceCatalog(id identity.Identity, nodeName string, services []record.ServiceRecord, ttl time.Duration, now time.Time) (PrivateServiceCatalog, error) {
-	if err := record.ValidateNodeName(nodeName); err != nil {
+	canonicalName, err := record.NormalizeNodeName(nodeName)
+	if err != nil {
 		return PrivateServiceCatalog{}, err
 	}
 	if ttl <= 0 {
@@ -36,14 +42,14 @@ func NewPrivateServiceCatalog(id identity.Identity, nodeName string, services []
 	if err := id.Validate(); err != nil {
 		return PrivateServiceCatalog{}, err
 	}
-	normalized, err := normalizePrivateCatalogServices(nodeName, id.NodeID, services, now)
+	normalized, err := normalizePrivateCatalogServices(canonicalName, id.NodeID, services, now)
 	if err != nil {
 		return PrivateServiceCatalog{}, err
 	}
 
 	catalog := PrivateServiceCatalog{
 		NodeID:    id.NodeID,
-		NodeName:  nodeName,
+		NodeName:  canonicalName,
 		PublicKey: base64.StdEncoding.EncodeToString(id.PublicKey),
 		Services:  normalized,
 		IssuedAt:  now.UTC().Format(time.RFC3339),
@@ -57,7 +63,7 @@ func VerifyPrivateServiceCatalog(catalog PrivateServiceCatalog, now time.Time) e
 	if catalog.NodeID == "" || catalog.NodeName == "" || catalog.PublicKey == "" || catalog.IssuedAt == "" || catalog.ExpiresAt == "" || catalog.Signature == "" {
 		return fmt.Errorf("private catalog missing required fields")
 	}
-	if err := record.ValidateNodeName(catalog.NodeName); err != nil {
+	if err := record.ValidateCanonicalNodeName(catalog.NodeName); err != nil {
 		return err
 	}
 	publicKey, err := base64.StdEncoding.DecodeString(catalog.PublicKey)

@@ -35,3 +35,19 @@ Instead:
 - lookups walk toward the key
 
 That is what makes the design scale better than a full global registry.
+
+Each node's routing table is a partial, changing view, not a synchronized copy
+of the network. XOR distance tells a node which of its known contacts are
+closer to a lookup key; it cannot reveal a closer peer it has never learned.
+Iterative lookups, signed records, table refresh, replacement contacts, and
+churn handling are therefore all required. Multiple responses can expose
+conflicts and reduce reliance on one responder, but do not create a global
+guarantee. If a bounded search finds no record, the correct result is “not
+found in the reachable search,” not proof of nonexistence.
+
+The planned routing lifecycle and test model are tracked in
+[#62](https://github.com/ethical-buddy/vx6/issues/62),
+[#64](https://github.com/ethical-buddy/vx6/issues/64), and
+[#65](https://github.com/ethical-buddy/vx6/issues/65). Metadata and signed
+record semantics are tracked separately in
+[#63](https://github.com/ethical-buddy/vx6/issues/63).

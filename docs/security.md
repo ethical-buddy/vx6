@@ -24,24 +24,27 @@ This is evidence for passive confidentiality on the tested IPv6 path, not a
 proof against every active MITM. The test does not inject modified or replayed
 packets, exercise rekey, or simulate tunnel loss/restart and route cleanup.
 An on-path attacker can still drop, delay, or flood traffic. These cases belong
-in the follow-up adversarial issue #59. DHT-wide name/key uniqueness, admission consensus,
-membership freshness, and distributed revocation are also still outside this
-test and remain separate DHT/trust work.
+in the follow-up adversarial issue #59. This test does not prove global
+name/key uniqueness or network-wide revocation. The target has no committee or
+global consensus authority: each node checks signed records, conflicts,
+expiry, and its own saved trust state. Nodes can still have different views.
 
-The endpoint record is locally verified and pinned for IKE. A DHT lookup by
-itself is not currently a quorum-backed membership proof. Do not interpret
-this as production-ready decentralized trust until the membership and
-credential lifecycle is specified and implemented.
+The endpoint record is locally verified and pinned for IKE. Its signature
+proves control of the signing key and integrity of the signed fields; DHT
+lookup alone does not prove global uniqueness or complete network membership.
+Production trust still needs the peer-local conflict, pinning, expiry, rotation,
+and revocation rules tracked in #60 and #63-#65.
 
 ## Application crypto
 
 The Go `internal/secure` protocol has **not** been removed. It is still used
 by service proxying, file transfer, SDK sharing, hidden rendezvous, and onion
 extension paths. IPsec protects packets on the peer-to-peer network path; it
-does not automatically replace each application's authenticated protocol or
-all non-IPsec paths. Do not delete this code as a cleanup: migrate each caller
-to a standard authenticated transport under issue #44, verify identity and
-fallback behavior, then remove the legacy protocol with compatibility tests.
+does not automatically replace application behavior or paths that do not
+traverse the configured SA. Do not delete this code as cleanup: inventory each
+caller and prove that mandatory ESP protects it. Issue #44 removes redundant
+custom session crypto only where that boundary is verified; it does not require
+adding QUIC/TLS as a second tunnel layer.
 
 VX6 must not introduce a new cipher, key exchange, or packet-encryption
 protocol. The current application session code composes standard Go crypto
@@ -58,6 +61,6 @@ SA. A local observer on either endpoint can inspect traffic after decapsulation.
 IPsec does not provide anonymity or hide endpoint identity in normal mode.
 
 Service authorization remains distinct from peer authentication. IKE proves
-control of the pinned peer key; it does not mean that peer may access every
+control of the locally expected peer key; it does not mean that peer may access every
 service. Per-service deny-by-default authorization and robust credential
 lifecycles remain open work. See the [dataplane threat model](dataplane-threat-model.md).

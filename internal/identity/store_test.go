@@ -1,10 +1,66 @@
 package identity
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestNodeIDUsesFullPublicKeyHash(t *testing.T) {
+	id, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256.Sum256(id.PublicKey)
+	want := "vx6_" + hex.EncodeToString(wantHash[:])
+	if id.NodeID != want {
+		t.Fatalf("NodeID = %q, want full SHA-256 ID %q", id.NodeID, want)
+	}
+}
+
+func TestStoreLoadMigratesLegacyTruncatedNodeID(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "identity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := id
+	legacy.NodeID = LegacyNodeIDFromPublicKey(id.PublicKey)
+	raw := fileFormat{
+		NodeID:     legacy.NodeID,
+		PublicKey:  base64.StdEncoding.EncodeToString(legacy.PublicKey),
+		PrivateKey: base64.StdEncoding.EncodeToString(legacy.PrivateKey),
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.NodeID != id.NodeID {
+		t.Fatalf("loaded NodeID = %q, want migrated %q", loaded.NodeID, id.NodeID)
+	}
+	loadedAgain, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedAgain.NodeID != id.NodeID {
+		t.Fatalf("persisted NodeID = %q, want %q", loadedAgain.NodeID, id.NodeID)
+	}
+}
 
 func TestStoreEnsureRoundTrip(t *testing.T) {
 	t.Parallel()

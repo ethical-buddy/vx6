@@ -63,7 +63,7 @@ func TestRecursiveFindValueAcrossPeers(t *testing.T) {
 	if err := json.Unmarshal([]byte(got.Value), &decoded); err != nil {
 		t.Fatalf("decode returned record: %v", err)
 	}
-	if decoded.ServiceName != "echo" || decoded.NodeName != "surya" {
+	if decoded.ServiceName != "echo" || decoded.NodeName != "SURYA" {
 		t.Fatalf("unexpected resolved record: %+v", decoded)
 	}
 	if !got.Verified || got.ExactMatchCount < 2 || got.TrustWeight < minTrustedConfirmationScore {

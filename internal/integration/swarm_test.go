@@ -103,7 +103,7 @@ func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 			return false
 		}
 		var got record.ServiceRecord
-		return json.Unmarshal([]byte(value), &got) == nil && got.ServiceName == "echo" && got.NodeName == owner.name
+		return json.Unmarshal([]byte(value), &got) == nil && got.ServiceName == "echo" && got.NodeName == strings.ToUpper(owner.name)
 	}, "service record in DHT")
 
 	var endpointRec record.EndpointRecord
@@ -115,7 +115,7 @@ func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 		if err := json.Unmarshal([]byte(endpointValue), &endpointRec); err != nil {
 			return false
 		}
-		return endpointRec.NodeName == owner.name && endpointRec.Address == owner.listenAddr
+		return endpointRec.NodeName == strings.ToUpper(owner.name) && endpointRec.Address == owner.listenAddr
 	}, "endpoint record in DHT")
 
 	directAddr := reserveTCPAddr(t, "127.0.0.1:0")
@@ -213,10 +213,10 @@ func TestSyncOnlyBootstrapClientLearnsAndUsesRemoteService(t *testing.T) {
 		seenOwner := false
 		seenBootstrap := false
 		for _, rec := range nodes {
-			if rec.NodeName == owner.name {
+			if rec.NodeName == strings.ToUpper(owner.name) {
 				seenOwner = true
 			}
-			if rec.NodeName == bootstrap.name {
+			if rec.NodeName == strings.ToUpper(bootstrap.name) {
 				seenBootstrap = true
 			}
 		}
@@ -308,7 +308,7 @@ func TestBootstrapLossStillAllowsRepublish(t *testing.T) {
 	waitForCondition(t, 10*time.Second, func() bool {
 		nodes, _ := ownerRestarted.registry.Snapshot()
 		for _, node := range nodes {
-			if node.NodeName != "owner" && node.NodeName != "bootstrap" && node.Address != "" {
+			if node.NodeName != "OWNER" && node.NodeName != "BOOTSTRAP" && node.Address != "" {
 				cachedPeer = node
 				return true
 			}
@@ -694,9 +694,9 @@ func TestPrivateServiceCatalogLookup(t *testing.T) {
 		privateSeen := false
 		for _, svc := range services {
 			switch record.FullServiceName(svc.NodeName, svc.ServiceName) {
-			case "owner.web":
+			case "OWNER.web":
 				publicSeen = true
-			case "owner.admin":
+			case "OWNER.admin":
 				privateSeen = true
 			}
 		}

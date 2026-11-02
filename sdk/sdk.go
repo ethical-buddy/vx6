@@ -69,9 +69,11 @@ func (c *Client) Init(ctx context.Context, opts InitOptions) (identity.Identity,
 	if strings.TrimSpace(opts.Name) == "" {
 		return identity.Identity{}, errors.New("init requires non-empty name")
 	}
-	if err := record.ValidateNodeName(opts.Name); err != nil {
+	canonicalName, err := record.NormalizeNodeName(opts.Name)
+	if err != nil {
 		return identity.Identity{}, err
 	}
+	opts.Name = canonicalName
 
 	listen := opts.ListenAddr
 	if listen == "" {

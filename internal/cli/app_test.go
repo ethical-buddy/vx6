@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
+	"github.com/vx6/vx6/internal/dht"
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/record"
@@ -117,7 +118,7 @@ func TestRunPeerRedactsStoredPeerAddresses(t *testing.T) {
 			t.Fatalf("run peer: %v", err)
 		}
 	})
-	if !strings.Contains(output, "alice") || !strings.Contains(output, "configured") {
+	if !strings.Contains(output, "ALICE") || !strings.Contains(output, "configured") {
 		t.Fatalf("unexpected peer output %q", output)
 	}
 	if strings.Contains(output, "[2001:db8::10]:4242") {
@@ -162,7 +163,7 @@ func TestSignedEndpointRecordCanBeExportedAndUsedAsBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	peers, _ := registry.Snapshot()
-	if len(peers) != 1 || peers[0].NodeName != "bootstrap" || peers[0].Address != cfg.Node.AdvertiseAddr {
+	if len(peers) != 1 || peers[0].NodeName != "BOOTSTRAP" || peers[0].Address != cfg.Node.AdvertiseAddr {
 		t.Fatalf("signed endpoint was not imported into local registry: %+v", peers)
 	}
 	updated, err := store.Load()
@@ -171,6 +172,92 @@ func TestSignedEndpointRecordCanBeExportedAndUsedAsBootstrap(t *testing.T) {
 	}
 	if len(updated.Node.KnownPeers) != 1 || updated.Node.KnownPeers[0].PublicKey != peers[0].PublicKey {
 		t.Fatalf("signed public key was not persisted in known peers: %+v", updated.Node.KnownPeers)
+	}
+}
+
+func TestPeerPinCommandPersistsIdentityAndUnpinRemovesIt(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	t.Setenv("VX6_CONFIG_PATH", configPath)
+	store, err := config.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewEndpointRecord(id, "friend", "[2001:db8::20]:4242", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(root, "friend.json")
+	data, err := record.JSON(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPeer([]string{"pin", "--record", recordPath}); err != nil {
+		t.Fatalf("pin peer: %v", err)
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Node.PinnedPeers) != 1 || cfg.Node.PinnedPeers[0].NodeID != id.NodeID {
+		t.Fatalf("unexpected persisted pins: %+v", cfg.Node.PinnedPeers)
+	}
+	if err := runPeer([]string{"unpin", "--node-id", id.NodeID}); err != nil {
+		t.Fatalf("unpin peer: %v", err)
+	}
+	cfg, err = store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Node.PinnedPeers) != 0 {
+		t.Fatalf("pins remain after unpin: %+v", cfg.Node.PinnedPeers)
+	}
+}
+
+func TestVerifyPinnedEndpointRejectsDifferentIdentity(t *testing.T) {
+	t.Parallel()
+	trusted, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedRecord, err := record.NewEndpointRecord(trusted, "friend", "[2001:db8::20]:4242", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRecord, err := record.NewEndpointRecord(other, "friend", "[2001:db8::21]:4242", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := config.PinnedPeer{NodeID: trustedRecord.NodeID, NodeName: trustedRecord.NodeName, PublicKey: trustedRecord.PublicKey}
+	if _, err := verifyPinnedEndpoint(trustedRecord, pin, time.Now()); err != nil {
+		t.Fatalf("trusted endpoint rejected: %v", err)
+	}
+	if _, err := verifyPinnedEndpoint(otherRecord, pin, time.Now()); err == nil {
+		t.Fatal("different identity with same name was accepted")
+	}
+	if err := validatePinnedIdentity(config.File{Node: config.NodeConfig{PinnedPeers: []config.PinnedPeer{pin}}}, otherRecord); err == nil {
+		t.Fatal("dial guard accepted a different key claiming the pinned name")
+	}
+	if err := validatePinnedIdentity(config.File{Node: config.NodeConfig{PinnedPeers: []config.PinnedPeer{pin}}}, trustedRecord); err != nil {
+		t.Fatalf("dial guard rejected the pinned identity: %v", err)
+	}
+}
+
+func TestNodeNameCheckDoesNotCallSilenceAvailable(t *testing.T) {
+	status, candidates := nodeNameCheckOutcome(dht.LookupResult{}, errors.New("lookup timed out"), "vx6_local")
+	if status != "unconfirmed" || len(candidates) != 0 {
+		t.Fatalf("timeout outcome = %q, %#v; want unconfirmed with no candidates", status, candidates)
 	}
 }
 
@@ -307,10 +394,10 @@ func TestRunDebugRegistryRedactsDiscoveredAddresses(t *testing.T) {
 	if strings.Contains(output, "[2001:db8::10]:4242") || strings.Contains(output, "addr=") {
 		t.Fatalf("registry output leaked address: %q", output)
 	}
-	if !strings.Contains(output, "node\talice") || !strings.Contains(output, "endpoint=sealed") {
+	if !strings.Contains(output, "node\tALICE") || !strings.Contains(output, "endpoint=sealed") {
 		t.Fatalf("registry node output missing redacted summary: %q", output)
 	}
-	if !strings.Contains(output, "service\tkey=alice.ssh") {
+	if !strings.Contains(output, "service\tkey=ALICE.ssh") {
 		t.Fatalf("registry service output missing public summary: %q", output)
 	}
 	if strings.Contains(output, "ghost-admin") || strings.Contains(output, "hidden=true") {

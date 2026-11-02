@@ -112,6 +112,16 @@ func (s *Store) Load() (Identity, error) {
 		PublicKey:  ed25519.PublicKey(publicKey),
 		PrivateKey: ed25519.PrivateKey(privateKey),
 	}
+	if raw.NodeID == LegacyNodeIDFromPublicKey(id.PublicKey) {
+		id.NodeID = NodeIDFromPublicKey(id.PublicKey)
+		if err := id.Validate(); err != nil {
+			return Identity{}, err
+		}
+		if err := s.Save(id); err != nil {
+			return Identity{}, fmt.Errorf("migrate identity to full-length NodeID: %w", err)
+		}
+		return id, nil
+	}
 
 	if err := id.Validate(); err != nil {
 		return Identity{}, err
@@ -179,6 +189,11 @@ func Generate() (Identity, error) {
 }
 
 func NodeIDFromPublicKey(publicKey ed25519.PublicKey) string {
+	sum := sha256.Sum256(publicKey)
+	return "vx6_" + hex.EncodeToString(sum[:])
+}
+
+func LegacyNodeIDFromPublicKey(publicKey ed25519.PublicKey) string {
 	sum := sha256.Sum256(publicKey)
 	return "vx6_" + hex.EncodeToString(sum[:8])
 }

@@ -4,6 +4,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +13,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/transfer"
 	vxtransport "github.com/vx6/vx6/internal/transport"
@@ -47,10 +51,19 @@ type NodeConfig struct {
 	DownloadDir          string           `json:"download_dir"`
 	KnownPeerAddrs       []string         `json:"known_peer_addrs,omitempty"`
 	KnownPeers           []KnownPeerEntry `json:"known_peers,omitempty"`
+	PinnedPeers          []PinnedPeer     `json:"pinned_peers,omitempty"`
 	BootstrapAddrs       []string         `json:"bootstrap_addrs,omitempty"`
 	Bootstraps           []KnownPeerEntry `json:"bootstraps,omitempty"`
 	FileReceiveMode      string           `json:"file_receive_mode,omitempty"`
 	AllowedFileSenders   []string         `json:"allowed_file_senders,omitempty"`
+}
+
+// PinnedPeer is an explicit local trust decision binding a display name to a
+// cryptographic identity. Endpoint addresses remain in expiring signed records.
+type PinnedPeer struct {
+	NodeID    string `json:"node_id"`
+	NodeName  string `json:"node_name"`
+	PublicKey string `json:"public_key"`
 }
 
 type KnownPeerEntry struct {
@@ -144,11 +157,17 @@ func (s *Store) Load() (File, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return File{}, fmt.Errorf("decode config: %w", err)
 	}
+	if err := validatePinnedPeers(cfg.Node.PinnedPeers); err != nil {
+		return File{}, fmt.Errorf("validate pinned peers: %w", err)
+	}
 	normalize(&cfg)
 	return cfg, nil
 }
 
 func (s *Store) Save(cfg File) error {
+	if err := validatePinnedPeers(cfg.Node.PinnedPeers); err != nil {
+		return fmt.Errorf("validate pinned peers: %w", err)
+	}
 	normalize(&cfg)
 
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
@@ -173,14 +192,15 @@ func (s *Store) AddPeer(name, address string) error {
 	if err != nil {
 		return err
 	}
-	if err := record.ValidateNodeName(name); err != nil {
+	canonicalName, err := record.NormalizeNodeName(name)
+	if err != nil {
 		return err
 	}
 	if err := transfer.ValidateIPv6Address(address); err != nil {
 		return err
 	}
 
-	cfg.Peers[name] = PeerEntry{Address: address}
+	cfg.Peers[canonicalName] = PeerEntry{Address: address}
 	return s.Save(cfg)
 }
 
@@ -190,7 +210,11 @@ func (s *Store) ResolvePeer(name string) (PeerEntry, error) {
 		return PeerEntry{}, err
 	}
 
-	peer, ok := cfg.Peers[name]
+	canonicalName, normalizeErr := record.NormalizeNodeName(name)
+	if normalizeErr != nil {
+		return PeerEntry{}, normalizeErr
+	}
+	peer, ok := cfg.Peers[canonicalName]
 	if !ok {
 		return PeerEntry{}, fmt.Errorf("peer %q not found in %s", name, s.path)
 	}
@@ -272,6 +296,78 @@ func (s *Store) UpsertKnownPeerRecord(rec record.EndpointRecord) error {
 	return s.Save(cfg)
 }
 
+func (s *Store) PinPeer(rec record.EndpointRecord, now time.Time) error {
+	verified, err := record.VerifyEndpoint(rec, now)
+	if err != nil {
+		return fmt.Errorf("cannot pin invalid peer record: %w", err)
+	}
+	key := base64.StdEncoding.EncodeToString(verified.PublicKey())
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, pin := range cfg.Node.PinnedPeers {
+		if pin.NodeID == rec.NodeID {
+			if pin.PublicKey != key {
+				return fmt.Errorf("peer ID %s is already pinned to a different public key", rec.NodeID)
+			}
+			if pin.NodeName != rec.NodeName {
+				return fmt.Errorf("peer ID %s is pinned under name %s; refusing silent rename", rec.NodeID, pin.NodeName)
+			}
+			found = true
+			continue
+		}
+		if pin.NodeName == rec.NodeName {
+			return fmt.Errorf("name %s is already pinned to identity %s", rec.NodeName, pin.NodeID)
+		}
+	}
+	if !found {
+		cfg.Node.PinnedPeers = append(cfg.Node.PinnedPeers, PinnedPeer{NodeID: rec.NodeID, NodeName: rec.NodeName, PublicKey: key})
+	}
+	cfg.Node.KnownPeers, _ = mergeKnownPeerRecord(cfg.Node.KnownPeers, rec)
+	cfg.Node.KnownPeerAddrs = nil
+	cfg.Node.BootstrapAddrs = nil
+	cfg.Node.Bootstraps = nil
+	sort.Slice(cfg.Node.PinnedPeers, func(i, j int) bool { return cfg.Node.PinnedPeers[i].NodeName < cfg.Node.PinnedPeers[j].NodeName })
+	return s.Save(cfg)
+}
+
+func (s *Store) PinnedPeerByName(name string) (PinnedPeer, bool, error) {
+	canonical, err := record.NormalizeNodeName(name)
+	if err != nil {
+		return PinnedPeer{}, false, err
+	}
+	cfg, err := s.Load()
+	if err != nil {
+		return PinnedPeer{}, false, err
+	}
+	for _, pin := range cfg.Node.PinnedPeers {
+		if pin.NodeName == canonical {
+			return pin, true, nil
+		}
+	}
+	return PinnedPeer{}, false, nil
+}
+
+func (s *Store) UnpinPeer(nodeID string) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+	kept := cfg.Node.PinnedPeers[:0]
+	for _, pin := range cfg.Node.PinnedPeers {
+		if pin.NodeID != nodeID {
+			kept = append(kept, pin)
+		}
+	}
+	if len(kept) == len(cfg.Node.PinnedPeers) {
+		return fmt.Errorf("no pinned peer with node ID %s", nodeID)
+	}
+	cfg.Node.PinnedPeers = kept
+	return s.Save(cfg)
+}
+
 func (s *Store) AddService(name, target string, isHidden bool) error {
 	cfg, err := s.Load()
 	if err != nil {
@@ -346,6 +442,24 @@ func defaultFile() File {
 }
 
 func normalize(cfg *File) {
+	if canonical, err := record.NormalizeNodeName(cfg.Node.Name); err == nil {
+		cfg.Node.Name = canonical
+	}
+	if len(cfg.Peers) > 0 {
+		canonicalPeers := make(map[string]PeerEntry, len(cfg.Peers))
+		for name, peer := range cfg.Peers {
+			canonical, err := record.NormalizeNodeName(name)
+			if err != nil {
+				canonicalPeers[name] = peer
+				continue
+			}
+			if _, exists := canonicalPeers[canonical]; !exists {
+				canonicalPeers[canonical] = peer
+			}
+		}
+		cfg.Peers = canonicalPeers
+	}
+	sort.Slice(cfg.Node.PinnedPeers, func(i, j int) bool { return cfg.Node.PinnedPeers[i].NodeName < cfg.Node.PinnedPeers[j].NodeName })
 	if cfg.Node.ListenAddr == "" {
 		cfg.Node.ListenAddr = defaultListenAddress
 	}
@@ -413,6 +527,32 @@ func normalize(cfg *File) {
 		}
 		cfg.Services[name] = svc
 	}
+}
+
+func validatePinnedPeers(pins []PinnedPeer) error {
+	seenIDs := make(map[string]struct{}, len(pins))
+	seenNames := make(map[string]struct{}, len(pins))
+	for _, pin := range pins {
+		if err := record.ValidateCanonicalNodeName(pin.NodeName); err != nil {
+			return fmt.Errorf("invalid pinned peer name: %w", err)
+		}
+		publicKey, err := base64.StdEncoding.DecodeString(pin.PublicKey)
+		if err != nil || len(publicKey) != ed25519.PublicKeySize {
+			return fmt.Errorf("pinned peer %s has invalid Ed25519 public key", pin.NodeID)
+		}
+		if identity.NodeIDFromPublicKey(ed25519.PublicKey(publicKey)) != pin.NodeID {
+			return fmt.Errorf("pinned peer NodeID does not match its public key")
+		}
+		if _, ok := seenIDs[pin.NodeID]; ok {
+			return fmt.Errorf("duplicate pinned peer NodeID %s", pin.NodeID)
+		}
+		if _, ok := seenNames[pin.NodeName]; ok {
+			return fmt.Errorf("duplicate pinned peer name %s", pin.NodeName)
+		}
+		seenIDs[pin.NodeID] = struct{}{}
+		seenNames[pin.NodeName] = struct{}{}
+	}
+	return nil
 }
 
 func KnownPeerAddresses(node NodeConfig) []string {

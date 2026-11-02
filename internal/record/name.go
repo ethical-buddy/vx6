@@ -1,12 +1,38 @@
 package record
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
-const MaxNodeNameLength = 15
+const (
+	MinNodeNameLength = 3
+	MaxNodeNameLength = 16
+)
+
+func NormalizeNodeName(name string) (string, error) {
+	canonical := strings.ToUpper(name)
+	if err := validateCanonicalNodeName(canonical); err != nil {
+		return "", err
+	}
+	return canonical, nil
+}
 
 func ValidateNodeName(name string) error {
-	if name == "" {
-		return fmt.Errorf("node name cannot be empty")
+	_, err := NormalizeNodeName(name)
+	return err
+}
+
+func ValidateCanonicalNodeName(name string) error {
+	if name != strings.ToUpper(name) {
+		return fmt.Errorf("node name %q must be uppercase", name)
+	}
+	return validateCanonicalNodeName(name)
+}
+
+func validateCanonicalNodeName(name string) error {
+	if len(name) < MinNodeNameLength {
+		return fmt.Errorf("node name must contain at least %d characters", MinNodeNameLength)
 	}
 	if len(name) > MaxNodeNameLength {
 		return fmt.Errorf("node name %q exceeds %d characters", name, MaxNodeNameLength)
@@ -16,11 +42,11 @@ func ValidateNodeName(name string) error {
 	}
 	for _, r := range name {
 		switch {
-		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
 		case r >= '0' && r <= '9':
 		case r == '-':
 		default:
-			return fmt.Errorf("node name %q contains unsupported characters; use lowercase letters, digits, or hyphens", name)
+			return fmt.Errorf("node name %q contains unsupported characters; use uppercase letters, digits, or hyphens", name)
 		}
 	}
 	return nil
