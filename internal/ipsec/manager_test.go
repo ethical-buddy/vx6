@@ -49,7 +49,7 @@ func TestPreparePeerWritesPinnedIPv6TunnelConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "local_ts = 2001:db8::1/128", "remote_ts = 2001:db8::2/128", "start_action = trap", "esp_proposals = aes128gcm16"} {
+	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "local_ts = 2001:db8::1/128[tcp/4242], 2001:db8::1/128[udp/4242]", "remote_ts = 2001:db8::2/128[tcp/4242], 2001:db8::2/128[udp/4242]", "start_action = trap", "esp_proposals = aes128gcm16"} {
 		if !strings.Contains(string(config), want) {
 			t.Errorf("generated connection config lacks %q", want)
 		}
@@ -57,8 +57,8 @@ func TestPreparePeerWritesPinnedIPv6TunnelConfig(t *testing.T) {
 	if strings.Contains(string(config), "id = @") {
 		t.Fatal("generated IKE config must not use the VX6 node name as the raw-key IKE identity")
 	}
-	if strings.Contains(string(config), "service") || strings.Contains(string(config), "4242") {
-		t.Fatal("generated IPsec config unexpectedly exposes VX6 application details")
+	if strings.Contains(string(config), "service") || strings.Contains(string(config), "udp/4243") {
+		t.Fatal("generated IPsec config unexpectedly includes a VX6 service label or cleartext liveness port")
 	}
 	info, err := os.Stat(filepath.Join(root, "private", local.NodeID+".pem"))
 	if err != nil {
@@ -212,13 +212,13 @@ func TestEnsurePeerAcceptsOnlyInstalledChildSA(t *testing.T) {
 	if err := manager.EnsurePeer(context.Background(), peer); err != nil {
 		t.Fatalf("EnsurePeer rejected installed SA: %v", err)
 	}
-	if len(calls) != 4 || !strings.Contains(calls[2], "--initiate") || !strings.Contains(calls[3], "--list-sas") {
+	if len(calls) != 3 || strings.Contains(strings.Join(calls, " "), "--initiate") || !strings.Contains(calls[2], "--list-sas") {
 		t.Fatalf("unexpected ensure sequence: %v", calls)
 	}
 	if err := manager.EnsurePeer(context.Background(), peer); err != nil {
 		t.Fatalf("cached SA verification failed: %v", err)
 	}
-	if len(calls) != 4 {
+	if len(calls) != 3 {
 		t.Fatalf("cached SA caused redundant strongSwan calls: %v", calls)
 	}
 }

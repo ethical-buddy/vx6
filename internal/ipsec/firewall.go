@@ -19,8 +19,9 @@ import (
 )
 
 type firewallState struct {
-	Ports   []uint16            `json:"ports"`
-	Revoked map[string][]string `json:"revoked"`
+	Ports      []uint16            `json:"ports"`
+	ProbePorts []uint16            `json:"probe_ports,omitempty"`
+	Revoked    map[string][]string `json:"revoked"`
 }
 
 type firewallApply func(context.Context, string) error
@@ -78,6 +79,26 @@ func (f *Firewall) RegisterPort(ctx context.Context, port string) error {
 	return nil
 }
 
+func (f *Firewall) RegisterProbePort(ctx context.Context, port string) error {
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || value == 0 {
+		return errors.New("invalid VX6 liveness probe port")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, existing := range f.state.ProbePorts {
+		if existing == uint16(value) {
+			return nil
+		}
+	}
+	f.state.ProbePorts = append(f.state.ProbePorts, uint16(value))
+	if err := f.saveAndApply(ctx); err != nil {
+		f.state.ProbePorts = f.state.ProbePorts[:len(f.state.ProbePorts)-1]
+		return err
+	}
+	return nil
+}
+
 func (f *Firewall) Revoke(ctx context.Context, nodeID, address string) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -123,10 +144,17 @@ func (f *Firewall) saveAndApply(ctx context.Context) error {
 func firewallRules(state firewallState) string {
 	ports := append([]uint16(nil), state.Ports...)
 	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	probePorts := append([]uint16(nil), state.ProbePorts...)
+	sort.Slice(probePorts, func(i, j int) bool { return probePorts[i] < probePorts[j] })
 	var b strings.Builder
 	b.WriteString("add table inet vx6\n")
 	b.WriteString("add chain inet vx6 input { type filter hook input priority -10; policy accept; }\n")
 	b.WriteString("add chain inet vx6 output { type filter hook output priority -10; policy accept; }\n")
+	for _, port := range probePorts {
+		p := strconv.Itoa(int(port))
+		b.WriteString("add rule inet vx6 input udp dport " + p + " accept\n")
+		b.WriteString("add rule inet vx6 output udp dport " + p + " accept\n")
+	}
 	for _, port := range ports {
 		p := strconv.Itoa(int(port))
 		b.WriteString("add rule inet vx6 input tcp dport " + p + " meta ipsec exists accept\n")

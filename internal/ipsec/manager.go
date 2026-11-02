@@ -28,16 +28,17 @@ import (
 type commandRunner func(context.Context, string, ...string) ([]byte, error)
 
 type Manager struct {
-	identity identity.Identity
-	localIP  net.IP
-	root     string
-	run      commandRunner
-	mu       sync.Mutex
-	opMu     sync.Mutex
-	peers    map[string]record.EndpointRecord
-	verified map[string]time.Time
-	revoked  map[string]revokedPeer
-	firewall *Firewall
+	identity  identity.Identity
+	localIP   net.IP
+	localPort string
+	root      string
+	run       commandRunner
+	mu        sync.Mutex
+	opMu      sync.Mutex
+	peers     map[string]record.EndpointRecord
+	verified  map[string]time.Time
+	revoked   map[string]revokedPeer
+	firewall  *Firewall
 }
 
 type revokedPeer struct {
@@ -83,7 +84,8 @@ func newManager(root, localAddress string, id identity.Identity, run commandRunn
 	if root == "" {
 		return nil, fmt.Errorf("strongSwan runtime directory is required")
 	}
-	m := &Manager{identity: id, localIP: localIP, root: root, run: run, peers: make(map[string]record.EndpointRecord), verified: make(map[string]time.Time), revoked: make(map[string]revokedPeer)}
+	_, localPort, _ := net.SplitHostPort(localAddress)
+	m := &Manager{identity: id, localIP: localIP, localPort: localPort, root: root, run: run, peers: make(map[string]record.EndpointRecord), verified: make(map[string]time.Time), revoked: make(map[string]revokedPeer)}
 	if data, err := os.ReadFile(filepath.Join(root, "revoked-peers.json")); err == nil {
 		if err := json.Unmarshal(data, &m.revoked); err != nil {
 			return nil, fmt.Errorf("read revoked peer state: %w", err)
@@ -221,6 +223,9 @@ func (m *Manager) EnsurePeer(ctx context.Context, peer record.EndpointRecord) er
 	if m.saRecentlyVerified(peer.NodeID) {
 		return nil
 	}
+	if m.saInstalled(ctx, peer) {
+		return nil
+	}
 	name := connectionName(peer.NodeID)
 	if _, err := m.run(ctx, "swanctl", "--initiate", "--ike", name, "--child", name, "--timeout", "15"); err != nil {
 		return fmt.Errorf("IKEv2 negotiation failed for %s: %w", peer.NodeID, err)
@@ -320,7 +325,7 @@ func (m *Manager) writeFiles(verifiedPeer record.VerifiedEndpointRecord) error {
 		filepath.Join("private", m.identity.NodeID+".pem"): privatePEM,
 		filepath.Join("pubkey", m.identity.NodeID+".pem"):  localPublicPEM,
 		filepath.Join("pubkey", peer.NodeID+".pem"):        peerPEM,
-		filepath.Join("conf.d", name+".conf"):              []byte(connectionConfig(name, m.localIP.String(), peerRawAddress(peer.Address), filepath.Join(m.root, "pubkey", m.identity.NodeID+".pem"), filepath.Join(m.root, "pubkey", peer.NodeID+".pem"))),
+		filepath.Join("conf.d", name+".conf"):              []byte(connectionConfig(name, m.localIP.String(), m.localPort, peerRawAddress(peer.Address), peerPort(peer.Address), filepath.Join(m.root, "pubkey", m.identity.NodeID+".pem"), filepath.Join(m.root, "pubkey", peer.NodeID+".pem"))),
 	}
 	for path, data := range files {
 		mode := os.FileMode(0o600)
@@ -334,7 +339,7 @@ func (m *Manager) writeFiles(verifiedPeer record.VerifiedEndpointRecord) error {
 	return nil
 }
 
-func connectionConfig(name, localIP, remoteIP, localKeyFile, peerKeyFile string) string {
+func connectionConfig(name, localIP, localPort, remoteIP, remotePort, localKeyFile, peerKeyFile string) string {
 	return fmt.Sprintf(`connections {
   %s {
     version = 2
@@ -354,8 +359,8 @@ func connectionConfig(name, localIP, remoteIP, localKeyFile, peerKeyFile string)
     children {
       %s {
         mode = tunnel
-        local_ts = %s/128
-        remote_ts = %s/128
+        local_ts = %s/128[tcp/%s], %s/128[udp/%s]
+        remote_ts = %s/128[tcp/%s], %s/128[udp/%s]
         esp_proposals = aes128gcm16
         start_action = trap
         close_action = trap
@@ -364,12 +369,17 @@ func connectionConfig(name, localIP, remoteIP, localKeyFile, peerKeyFile string)
     }
   }
 }
-`, name, localIP, remoteIP, localKeyFile, peerKeyFile, name, localIP, remoteIP)
+`, name, localIP, remoteIP, localKeyFile, peerKeyFile, name, localIP, localPort, localIP, localPort, remoteIP, remotePort, remoteIP, remotePort)
 }
 
 func peerRawAddress(address string) string {
 	host, _, _ := net.SplitHostPort(address)
 	return host
+}
+
+func peerPort(address string) string {
+	_, port, _ := net.SplitHostPort(address)
+	return port
 }
 
 var safeNodeID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)

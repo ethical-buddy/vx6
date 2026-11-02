@@ -936,6 +936,8 @@ func (integrationIPsec) EnsurePeer(_ context.Context, peer record.EndpointRecord
 	return record.VerifyEndpointRecord(peer, time.Now())
 }
 
+func (integrationIPsec) RegisterProbePort(context.Context, string) error { return nil }
+
 func (integrationIPsec) AcceptPeer(context.Context, string) bool { return true }
 
 var signedTestEndpoints = struct {

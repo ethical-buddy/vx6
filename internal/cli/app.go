@@ -22,6 +22,7 @@ import (
 	"github.com/vx6/vx6/internal/hidden"
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/ipsec"
+	"github.com/vx6/vx6/internal/liveness"
 	"github.com/vx6/vx6/internal/netutil"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/onion"
@@ -2610,6 +2611,17 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 	if err != nil {
 		return nil, nil, err
 	}
+	probeCache := liveness.NewCache(20 * time.Second)
+	probeThenEnsure := func(ctx context.Context, peer record.EndpointRecord) error {
+		if !probeCache.IsAlive(peer.Address, time.Now()) {
+			if _, _, err := liveness.Probe(ctx, peer.Address, false, 500*time.Millisecond); err != nil {
+				probeCache.MarkFailed(peer.Address)
+				return fmt.Errorf("VX6 liveness probe failed before IKE: %w", err)
+			}
+			probeCache.MarkAlive(peer.Address, time.Now())
+		}
+		return client.EnsurePeer(ctx, peer)
+	}
 	guard := func(ctx context.Context, addr string) error {
 		if registry != nil {
 			nodes, _ := registry.Snapshot()
@@ -2618,7 +2630,7 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 					if err := validatePinnedIdentity(cfg, peer); err != nil {
 						return err
 					}
-					return client.EnsurePeer(ctx, peer)
+					return probeThenEnsure(ctx, peer)
 				}
 			}
 		}
@@ -2633,7 +2645,7 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 				if err := validatePinnedIdentity(cfg, peer); err != nil {
 					return err
 				}
-				return client.EnsurePeer(ctx, peer)
+				return probeThenEnsure(ctx, peer)
 			}
 		}
 		return fmt.Errorf("no verified signed peer identity for endpoint %s", addr)

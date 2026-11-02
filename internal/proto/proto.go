@@ -22,6 +22,7 @@ const (
 	KindExtend       byte = 6
 	KindRendezvous   byte = 7
 	KindDHT          byte = 8 // New: Distributed Hash Table
+	KindLiveness     byte = 9
 )
 
 type DHTRequest struct {

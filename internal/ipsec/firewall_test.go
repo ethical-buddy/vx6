@@ -29,6 +29,9 @@ func TestFirewallPersistsPortGuardAndRevokedPeer(t *testing.T) {
 	if err := fw.RegisterPort(context.Background(), "4242"); err != nil {
 		t.Fatal(err)
 	}
+	if err := fw.RegisterProbePort(context.Background(), "4243"); err != nil {
+		t.Fatal(err)
+	}
 	if err := fw.Revoke(context.Background(), "node-a", "[2001:db8::2]:4242"); err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +39,7 @@ func TestFirewallPersistsPortGuardAndRevokedPeer(t *testing.T) {
 	for _, want := range []string{
 		"meta ipsec exists accept", "rt ipsec exists accept", "tcp dport 4242 drop",
 		"udp dport 4242 drop", "ip6 saddr 2001:db8::2 udp dport 500 drop",
+		"udp dport 4243 accept",
 		"ip6 daddr 2001:db8::2 meta l4proto esp drop",
 	} {
 		if !strings.Contains(joined, want) {
@@ -57,7 +61,7 @@ func TestFirewallPersistsPortGuardAndRevokedPeer(t *testing.T) {
 	if err := fw2.Restore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(restored, "2001:db8::2") || !strings.Contains(restored, "4242") {
+	if !strings.Contains(restored, "2001:db8::2") || !strings.Contains(restored, "4242") || !strings.Contains(restored, "4243") {
 		t.Fatalf("firewall state did not restore port/revocation: %s", restored)
 	}
 }

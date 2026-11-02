@@ -23,6 +23,7 @@ import (
 	"github.com/vx6/vx6/internal/hidden"
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/ipsec"
+	"github.com/vx6/vx6/internal/liveness"
 	"github.com/vx6/vx6/internal/netutil"
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
@@ -58,6 +59,7 @@ type ServiceRefresher func() map[string]string
 type PeerTunnel interface {
 	PreparePeer(context.Context, record.EndpointRecord) error
 	EnsurePeer(context.Context, record.EndpointRecord) error
+	RegisterProbePort(context.Context, string) error
 	AcceptPeer(context.Context, string) bool
 }
 
@@ -86,6 +88,7 @@ type Config struct {
 	DHT                  *dht.Server
 	IPsecTunnel          PeerTunnel
 	Reload               chan struct{}
+	livenessCache        *liveness.Cache
 }
 
 func Run(ctx context.Context, log io.Writer, cfg Config) error {
@@ -94,6 +97,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	if cfg.NodeID == "" {
 		return errors.New("node id cannot be empty")
+	}
+	if cfg.livenessCache == nil {
+		cfg.livenessCache = liveness.NewCache(20 * time.Second)
 	}
 	if cfg.Registry == nil {
 		return errors.New("registry cannot be nil")
@@ -125,6 +131,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		cancel()
 		peerTunnel = client
 	}
+	cfg.IPsecTunnel = peerTunnel
 	guard := func(dialCtx context.Context, addr string) error {
 		var peer record.EndpointRecord
 		for _, candidate := range registryRecords(cfg.Registry, cfg.DHT) {
@@ -133,8 +140,24 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				break
 			}
 		}
+		if peer.NodeID == "" && cfg.DHT != nil && cfg.DHT.RT != nil {
+			if info, ok := cfg.DHT.RT.NodeByAddress(addr); ok && dht.VerifyNodeInfo(info, time.Now()) == nil {
+				peer = record.EndpointRecord{
+					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
+					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
+					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
+				}
+			}
+		}
 		if peer.NodeID == "" {
 			return fmt.Errorf("no verified signed DHT identity for endpoint")
+		}
+		if !cfg.livenessCache.IsAlive(addr, time.Now()) {
+			if _, _, err := liveness.Probe(dialCtx, addr, false, syncProbeTimeout); err != nil {
+				cfg.livenessCache.MarkFailed(addr)
+				return fmt.Errorf("VX6 liveness probe failed: %w", err)
+			}
+			cfg.livenessCache.MarkAlive(addr, time.Now())
 		}
 		return peerTunnel.EnsurePeer(dialCtx, peer)
 	}
@@ -183,6 +206,42 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer listener.Close()
+	if !cfg.HideEndpoint && cfg.AdvertiseAddr != "" {
+		probeListenAddr, err := livenessListenAddress(listener.Addr().String(), cfg.AdvertiseAddr)
+		if err != nil {
+			return fmt.Errorf("configure VX6 liveness endpoint: %w", err)
+		}
+		probeUDPAddr, err := net.ResolveUDPAddr("udp6", probeListenAddr)
+		if err != nil {
+			return fmt.Errorf("resolve VX6 liveness endpoint %s: %w", probeListenAddr, err)
+		}
+		probeConn, err := net.ListenUDP("udp6", probeUDPAddr)
+		if err != nil {
+			return fmt.Errorf("listen on VX6 liveness endpoint %s: %w", probeListenAddr, err)
+		}
+		defer probeConn.Close()
+		_, probePort, _ := net.SplitHostPort(probeListenAddr)
+		registerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err = peerTunnel.RegisterProbePort(registerCtx, probePort)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("register VX6 liveness firewall port: %w", err)
+		}
+		responder := liveness.NewResponder()
+		identityProvider := func() (record.EndpointRecord, error) {
+			return record.NewEndpointRecord(cfg.Identity, cfg.Name, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
+		}
+		acceptIdentity := func(ctx context.Context, caller record.EndpointRecord, _ net.IP) error {
+			// Preparing an IKE credential is not DHT admission. The peer becomes
+			// active only after authenticated DHT traffic succeeds.
+			return peerTunnel.PreparePeer(ctx, caller)
+		}
+		go func() {
+			if err := responder.Serve(ctx, probeConn, identityProvider, acceptIdentity); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(log, "VX6 liveness service stopped: %v\n", err)
+			}
+		}()
+	}
 	go maintainIPsecPeers(ctx, log, cfg, peerTunnel)
 	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
 	if cfg.ControlInfoPath != "" {
@@ -334,6 +393,11 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			relayGovernor.Update(liveCfg.RelayMode, liveCfg.RelayResourcePercent)
 
 			switch kind {
+			case proto.KindLiveness:
+				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
+				if err := liveness.HandleTunnelConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
+					fmt.Fprintf(log, "tunnel liveness request from %s failed: %v\n", conn.RemoteAddr().String(), err)
+				}
 			case proto.KindFileTransfer:
 
 				_ = conn.SetDeadline(time.Now().Add(handshakeDeadline))
@@ -463,7 +527,17 @@ func shouldRunPeerSyncTasks(cfg Config) bool {
 }
 
 func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
-	const multicastAddr = "[ff02::1]:4243"
+	const multicastAddr = "[ff02::1]:4245"
+	if cfg.AdvertiseAddr != "" {
+		probeAddr, err := liveness.ProbeAddress(cfg.AdvertiseAddr)
+		if err == nil {
+			_, probePort, _ := net.SplitHostPort(probeAddr)
+			_, multicastPort, _ := net.SplitHostPort(multicastAddr)
+			if probePort == multicastPort {
+				return
+			}
+		}
+	}
 	addr, _ := net.ResolveUDPAddr("udp6", multicastAddr)
 	conn, err := net.ListenMulticastUDP("udp6", nil, addr)
 	if err != nil {
@@ -508,8 +582,25 @@ func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
 	}
 }
 
+func livenessListenAddress(listenerAddress, advertisedAddress string) (string, error) {
+	probeAddress, err := liveness.ProbeAddress(advertisedAddress)
+	if err != nil {
+		return "", err
+	}
+	listenHost, _, err := net.SplitHostPort(listenerAddress)
+	if err != nil {
+		return "", fmt.Errorf("split listener address: %w", err)
+	}
+	_, probePort, err := net.SplitHostPort(probeAddress)
+	if err != nil {
+		return "", fmt.Errorf("split advertised probe address: %w", err)
+	}
+	return net.JoinHostPort(listenHost, probePort), nil
+}
+
 func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 	syncOnlyLogged := false
+	selfLookupDone := false
 
 	publishAndSync := func() {
 		liveCfg := runtimeConfig(cfg)
@@ -537,8 +628,16 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 		}
 
 		nodes, _ := liveCfg.Registry.Snapshot()
-		seedDHTRouting(liveCfg.DHT, liveCfg.PeerAddrs, nodes)
 		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), nodes)
+		if !selfLookupDone && liveCfg.DHT != nil && liveCfg.DHT.RT != nil && len(liveCfg.DHT.RT.Nodes()) > 0 {
+			lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			result, err := liveCfg.DHT.RecursiveFindValueDetailed(lookupCtx, dht.NodeIDKey(liveCfg.NodeID))
+			cancel()
+			if result.QueriedNodes > 0 {
+				selfLookupDone = true
+				fmt.Fprintf(log, "[DHT] Initial self-identity lookup queried %d peers; result=%v\n", result.QueriedNodes, err)
+			}
+		}
 
 		nodes, _ = liveCfg.Registry.Snapshot()
 		persistKnownPeerMetadata(liveCfg.ConfigPath, nodes)
@@ -703,19 +802,12 @@ func loadServiceEntries(configPath string) map[string]config.ServiceEntry {
 	return out
 }
 
-func seedDHTRouting(server *dht.Server, seedAddrs []string, records []record.EndpointRecord) {
+func seedDHTRouting(server *dht.Server, records []record.EndpointRecord) {
 	if server == nil {
 		return
 	}
-
-	for _, addr := range seedAddrs {
-		if addr == "" {
-			continue
-		}
-		server.RT.AddNode(proto.NodeInfo{ID: "seed:" + addr, Addr: addr})
-	}
 	for _, rec := range records {
-		if rec.NodeID == "" || rec.Address == "" {
+		if record.VerifyEndpointRecord(rec, time.Now()) != nil {
 			continue
 		}
 		server.RT.AddNode(dht.NodeInfoFromEndpointRecord(rec))
@@ -980,11 +1072,17 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.Endpoi
 		for _, result := range results {
 			synced[result.addr] = struct{}{}
 			if result.err != nil {
+				if cfg.DHT != nil && cfg.DHT.RT != nil && result.nodeID != "" {
+					cfg.DHT.RT.NoteFailure(result.nodeID)
+				}
 				continue
 			}
 			reachable[result.addr] = struct{}{}
+			if result.peer != nil {
+				_ = cfg.Registry.Import([]record.EndpointRecord{*result.peer}, nil)
+				seedDHTRouting(cfg.DHT, []record.EndpointRecord{*result.peer})
+			}
 			_ = cfg.Registry.Import(result.records, result.services)
-			seedDHTRouting(cfg.DHT, nil, result.records)
 			for _, nodeRec := range result.records {
 				if nodeRec.NodeID == cfg.NodeID {
 					continue
@@ -1009,6 +1107,8 @@ type syncResult struct {
 	addr     string
 	records  []record.EndpointRecord
 	services []record.ServiceRecord
+	peer     *record.EndpointRecord
+	nodeID   string
 	err      error
 }
 
@@ -1055,16 +1155,69 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.Endp
 	if addr == "" {
 		return result
 	}
-
-	if !probeSyncTarget(ctx, addr) {
-		fmt.Fprintf(log, "[SYNC] Skipping unreachable target: %s\n", addr)
-		result.err = fmt.Errorf("unreachable")
+	peer, known := endpointRecordByAddress(cfg, addr)
+	wantIdentity := !known
+	var identityRecord *record.EndpointRecord
+	var err error
+	if wantIdentity {
+		if rec == nil {
+			result.err = fmt.Errorf("first contact requires this node's signed endpoint identity")
+			return result
+		}
+		identityRecord, _, err = liveness.ExchangeIdentity(ctx, addr, *rec, syncProbeTimeout)
+	} else {
+		identityRecord, _, err = liveness.Probe(ctx, addr, false, syncProbeTimeout)
+	}
+	if err != nil {
+		fmt.Fprintf(log, "[SYNC] Skipping target without a VX6 PONG: %s: %v\n", addr, err)
+		result.err = fmt.Errorf("VX6 liveness probe failed: %w", err)
+		if known {
+			result.nodeID = peer.NodeID
+		}
+		return result
+	}
+	if !known {
+		if identityRecord == nil {
+			result.err = fmt.Errorf("peer answered liveness probe without an identity record")
+			return result
+		}
+		if err := record.VerifyEndpointRecord(*identityRecord, time.Now()); err != nil {
+			result.err = fmt.Errorf("peer supplied an invalid signed identity record: %w", err)
+			return result
+		}
+		if identityRecord.Address != addr {
+			result.err = fmt.Errorf("peer identity endpoint %s does not match contacted endpoint %s", identityRecord.Address, addr)
+			return result
+		}
+		peer = *identityRecord
+	}
+	result.nodeID = peer.NodeID
+	result.peer = &peer
+	if cfg.IPsecTunnel == nil {
+		result.err = fmt.Errorf("IPsec peer verifier is unavailable")
+		return result
+	}
+	if err := cfg.IPsecTunnel.EnsurePeer(ctx, peer); err != nil {
+		result.err = fmt.Errorf("IKE/IPsec peer authentication failed: %w", err)
+		return result
+	}
+	if cfg.livenessCache != nil {
+		cfg.livenessCache.MarkAlive(addr, time.Now())
+	}
+	protectedCtx := vxtransport.WithDialGuard(ctx, func(_ context.Context, target string) error {
+		if target != addr {
+			return fmt.Errorf("tunnel liveness context cannot dial unverified endpoint %s", target)
+		}
+		return nil
+	})
+	if err := liveness.TunnelPing(protectedCtx, cfg.TransportMode, addr, syncProbeTimeout); err != nil {
+		result.err = fmt.Errorf("authenticated IPsec tunnel health check failed: %w", err)
 		return result
 	}
 
 	fmt.Fprintf(log, "[SYNC] Connecting to target: %s\n", addr)
 	if rec != nil && !cfg.HideEndpoint {
-		publishCtx, cancel := withSyncTimeout(ctx)
+		publishCtx, cancel := withSyncTimeout(protectedCtx)
 		_, err := discovery.Publish(publishCtx, addr, *rec)
 		cancel()
 		if err != nil {
@@ -1072,7 +1225,7 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.Endp
 		}
 	}
 
-	snapshotCtx, cancel := withSyncTimeout(ctx)
+	snapshotCtx, cancel := withSyncTimeout(protectedCtx)
 	recs, svcs, err := discovery.Snapshot(snapshotCtx, addr)
 	cancel()
 	if err != nil {
@@ -1151,10 +1304,13 @@ func addSyncTarget(targets map[string]struct{}, selfAddr, addr string) {
 	targets[addr] = struct{}{}
 }
 
-func probeSyncTarget(ctx context.Context, addr string) bool {
-	dialCtx, cancel := context.WithTimeout(ctx, syncProbeTimeout)
-	defer cancel()
-	return vxtransport.ProbeContext(dialCtx, vxtransport.ModeTCP, addr)
+func endpointRecordByAddress(cfg Config, addr string) (record.EndpointRecord, bool) {
+	for _, candidate := range registryRecords(cfg.Registry, cfg.DHT) {
+		if candidate.Address == addr {
+			return candidate, true
+		}
+	}
+	return record.EndpointRecord{}, false
 }
 
 func withSyncTimeout(ctx context.Context) (context.Context, context.CancelFunc) {

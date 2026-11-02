@@ -37,6 +37,7 @@ type ipcRequest struct {
 	LocalAddress string                `json:"local_address"`
 	Peer         record.EndpointRecord `json:"peer,omitempty"`
 	Remote       string                `json:"remote,omitempty"`
+	ProbePort    string                `json:"probe_port,omitempty"`
 }
 
 type ipcResponse struct {
@@ -88,6 +89,11 @@ func (c *Client) RevokePeer(ctx context.Context, peer record.EndpointRecord) err
 func (c *Client) AcceptPeer(ctx context.Context, remote string) bool {
 	resp, err := c.call(ctx, ipcRequest{Action: "accept", Remote: remote})
 	return err == nil && resp.Allow
+}
+
+func (c *Client) RegisterProbePort(ctx context.Context, port string) error {
+	_, err := c.call(ctx, ipcRequest{Action: "register_probe_port", ProbePort: port})
+	return err
 }
 
 func (c *Client) Check(ctx context.Context) error {
@@ -293,6 +299,8 @@ func serveIPCConn(ctx context.Context, conn net.Conn, allowed map[uint32]struct{
 		response.OK = true
 		_ = json.NewEncoder(conn).Encode(response)
 		return
+	case "register_probe_port":
+		err = firewall.RegisterProbePort(requestCtx, req.ProbePort)
 	case "prepare":
 		err = manager.PreparePeer(requestCtx, req.Peer)
 	case "ensure":

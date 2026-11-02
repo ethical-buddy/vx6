@@ -28,6 +28,7 @@ type RoutingTable struct {
 	mu      sync.RWMutex
 	Buckets [256][]bucketEntry // Full bit length of SHA-256
 	Spare   [256][]proto.NodeInfo
+	Pending [256][]proto.NodeInfo
 }
 
 func NewRoutingTable(selfID string) *RoutingTable {
@@ -61,6 +62,69 @@ func (rt *RoutingTable) AddNode(node proto.NodeInfo) {
 	}
 
 	rt.rememberReplacementLocked(bucketIdx, node)
+}
+
+// AddCandidate keeps a signed referral out of the active routing table until
+// a query to that identity succeeds over the authenticated peer tunnel.
+func (rt *RoutingTable) AddCandidate(node proto.NodeInfo) {
+	if node.ID == "" || node.ID == rt.SelfID || node.Addr == "" {
+		return
+	}
+	bucketIdx := rt.bucketIndex(node.ID)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, bucket := range rt.Buckets {
+		for _, entry := range bucket {
+			if entry.Node.ID == node.ID {
+				return
+			}
+		}
+	}
+	for i, existing := range rt.Pending[bucketIdx] {
+		if existing.ID == node.ID {
+			rt.Pending[bucketIdx] = append(rt.Pending[bucketIdx][:i], rt.Pending[bucketIdx][i+1:]...)
+			break
+		}
+	}
+	rt.Pending[bucketIdx] = append(rt.Pending[bucketIdx], node)
+	if len(rt.Pending[bucketIdx]) > replacementCacheSize {
+		rt.Pending[bucketIdx] = rt.Pending[bucketIdx][1:]
+	}
+}
+
+func (rt *RoutingTable) PromoteCandidate(nodeID string) {
+	var found proto.NodeInfo
+	rt.mu.Lock()
+	for i := range rt.Pending {
+		for j, node := range rt.Pending[i] {
+			if node.ID != nodeID {
+				continue
+			}
+			found = node
+			rt.Pending[i] = append(rt.Pending[i][:j], rt.Pending[i][j+1:]...)
+			break
+		}
+		if found.ID != "" {
+			break
+		}
+	}
+	rt.mu.Unlock()
+	if found.ID != "" {
+		rt.AddNode(found)
+	}
+}
+
+func (rt *RoutingTable) DiscardCandidate(nodeID string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for i := range rt.Pending {
+		for j, node := range rt.Pending[i] {
+			if node.ID == nodeID {
+				rt.Pending[i] = append(rt.Pending[i][:j], rt.Pending[i][j+1:]...)
+				return
+			}
+		}
+	}
 }
 
 func (rt *RoutingTable) NoteFailure(nodeID string) bool {
@@ -128,6 +192,26 @@ func (rt *RoutingTable) NodeByAddress(addr string) (proto.NodeInfo, bool) {
 		for _, node := range bucket {
 			if node.Addr == addr {
 				return node, true
+			}
+		}
+	}
+	for _, bucket := range rt.Pending {
+		for _, node := range bucket {
+			if node.Addr == addr {
+				return node, true
+			}
+		}
+	}
+	return proto.NodeInfo{}, false
+}
+
+func (rt *RoutingTable) ActiveNode(nodeID string) (proto.NodeInfo, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	for _, bucket := range rt.Buckets {
+		for _, entry := range bucket {
+			if entry.Node.ID == nodeID {
+				return entry.Node, true
 			}
 		}
 	}

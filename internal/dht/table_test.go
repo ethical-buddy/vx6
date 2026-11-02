@@ -46,3 +46,22 @@ func TestRoutingTablePromotesReplacementAfterFailures(t *testing.T) {
 		t.Fatalf("expected replacement node %q to be promoted", replacement.ID)
 	}
 }
+
+func TestCandidatesStayOutOfActiveRoutingUntilPromoted(t *testing.T) {
+	rt := NewRoutingTable("self-node")
+	node := proto.NodeInfo{ID: "candidate", Addr: "[2001:db8::2]:4242"}
+	rt.AddCandidate(node)
+	if _, ok := rt.ActiveNode(node.ID); ok {
+		t.Fatal("candidate became active before verification")
+	}
+	if got := len(rt.Nodes()); got != 0 {
+		t.Fatalf("candidate appeared in active Nodes list: %d entries", got)
+	}
+	if got, ok := rt.NodeByAddress(node.Addr); !ok || got.ID != node.ID {
+		t.Fatal("candidate is not available for its verification query")
+	}
+	rt.PromoteCandidate(node.ID)
+	if _, ok := rt.ActiveNode(node.ID); !ok {
+		t.Fatal("verified candidate was not promoted")
+	}
+}

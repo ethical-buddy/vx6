@@ -381,16 +381,24 @@ func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]prot
 				continue
 			}
 			visited[node.ID] = true
+			if _, active := s.RT.ActiveNode(node.ID); !active {
+				if VerifyNodeInfo(node, time.Now()) != nil {
+					continue
+				}
+				s.RT.AddCandidate(node)
+			}
 
 			newNodes, err := s.QueryNode(ctx, node.Addr, targetID)
 			if err != nil {
 				s.RT.NoteFailure(node.ID)
+				s.RT.DiscardCandidate(node.ID)
 				continue
 			}
+			s.RT.PromoteCandidate(node.ID)
 			s.RT.AddNode(node)
 			for _, n := range newNodes {
-				if !visited[n.ID] {
-					s.RT.AddNode(n)
+				if !visited[n.ID] && VerifyNodeInfo(n, time.Now()) == nil {
+					s.RT.AddCandidate(n)
 					newCandidates = append(newCandidates, n)
 					foundNew = true
 				}
@@ -774,6 +782,13 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 			if !ok {
 				continue
 			}
+			if _, active := s.RT.ActiveNode(node.ID); !active {
+				if VerifyNodeInfo(node, time.Now()) != nil {
+					visited[node.ID] = true
+					continue
+				}
+				s.RT.AddCandidate(node)
+			}
 			visited[node.ID] = true
 			batch = append(batch, branchQuery{branchID: branch.id, node: node})
 			active = append(active, branch)
@@ -806,9 +821,11 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 			if result.err != nil {
 				s.noteLookupResult(false)
 				s.RT.NoteFailure(result.node.ID)
+				s.RT.DiscardCandidate(result.node.ID)
 				continue
 			}
 			s.noteLookupResult(true)
+			s.RT.PromoteCandidate(result.node.ID)
 			s.RT.AddNode(result.node)
 			if result.value != "" {
 				collector.Observe(sourceObservation{nodeID: result.node.ID, addr: result.node.Addr, trust: 1, branch: result.branchID}, result.value)
