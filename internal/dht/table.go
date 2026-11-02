@@ -156,6 +156,15 @@ func (rt *RoutingTable) NoteFailure(nodeID string) bool {
 
 // ClosestNodes returns the K closest nodes to the target ID
 func (rt *RoutingTable) ClosestNodes(targetID string, count int) []proto.NodeInfo {
+	return rt.closestNodes(targetID, count, false)
+}
+
+// ClosestNodesByNameHash ranks known peers by their cached name coordinate.
+func (rt *RoutingTable) ClosestNodesByNameHash(targetHash string, count int) []proto.NodeInfo {
+	return rt.closestNodes(targetHash, count, true)
+}
+
+func (rt *RoutingTable) closestNodes(target string, count int, byNameHash bool) []proto.NodeInfo {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
@@ -167,15 +176,41 @@ func (rt *RoutingTable) ClosestNodes(targetID string, count int) []proto.NodeInf
 	}
 
 	sort.Slice(all, func(i, j int) bool {
-		distI := rt.distance(all[i].ID, targetID)
-		distJ := rt.distance(all[j].ID, targetID)
-		return distI.Cmp(distJ) == -1
+		coordinateI := all[i].ID
+		coordinateJ := all[j].ID
+		if byNameHash {
+			coordinateI = all[i].NameHash
+			coordinateJ = all[j].NameHash
+			if coordinateI == "" {
+				coordinateI = NodeNameHash(all[i].Name)
+			}
+			if coordinateJ == "" {
+				coordinateJ = NodeNameHash(all[j].Name)
+			}
+		}
+		distI := rt.distance(coordinateI, target)
+		distJ := rt.distance(coordinateJ, target)
+		if comparison := distI.Cmp(distJ); comparison != 0 {
+			return comparison < 0
+		}
+		return all[i].ID < all[j].ID
 	})
 
 	if len(all) > count {
 		return all[:count]
 	}
 	return all
+}
+
+func (rt *RoutingTable) lookupDistance(node proto.NodeInfo, target string) *big.Int {
+	if strings.HasPrefix(target, "node/name/") {
+		coordinate := node.NameHash
+		if coordinate == "" {
+			coordinate = NodeNameHash(node.Name)
+		}
+		return rt.distance(coordinate, strings.TrimPrefix(target, "node/name/"))
+	}
+	return rt.distance(node.ID, target)
 }
 
 func (rt *RoutingTable) NodeByAddress(addr string) (proto.NodeInfo, bool) {

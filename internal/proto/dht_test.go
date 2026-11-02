@@ -12,20 +12,20 @@ func TestDHTRequestRequiresMatchingTypedPayload(t *testing.T) {
 			name: "valid name lookup",
 			req: DHTRequest{
 				Type: DHTTypeLookupName, Action: "find_value",
-				Target: "node/name/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Target: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			},
 		},
 		{
 			name: "wrong operation type",
 			req: DHTRequest{
 				Type: DHTTypeLookupKey, Action: "find_value",
-				Target: "node/name/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Target: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			},
 			bad: true,
 		},
 		{
 			name: "short name hash",
-			req:  DHTRequest{Type: DHTTypeLookupName, Action: "find_value", Target: "node/name/abcd"},
+			req:  DHTRequest{Type: DHTTypeLookupName, Action: "find_value", Target: "abcd"},
 			bad:  true,
 		},
 		{

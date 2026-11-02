@@ -89,6 +89,16 @@ type Config struct {
 	IPsecTunnel          PeerTunnel
 	Reload               chan struct{}
 	livenessCache        *liveness.Cache
+	recordState          *endpointRecordState
+}
+
+type endpointRecordState struct {
+	mu       sync.Mutex
+	config   string
+	sequence uint64
+	name     string
+	address  string
+	current  record.EndpointRecord
 }
 
 func Run(ctx context.Context, log io.Writer, cfg Config) error {
@@ -100,6 +110,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	if cfg.livenessCache == nil {
 		cfg.livenessCache = liveness.NewCache(20 * time.Second)
+	}
+	if cfg.recordState == nil {
+		cfg.recordState = newEndpointRecordState(cfg.ConfigPath)
 	}
 	if cfg.Registry == nil {
 		return errors.New("registry cannot be nil")
@@ -143,6 +156,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		if peer.NodeID == "" && cfg.DHT != nil && cfg.DHT.RT != nil {
 			if info, ok := cfg.DHT.RT.NodeByAddress(addr); ok && dht.VerifyNodeInfo(info, time.Now()) == nil {
 				peer = record.EndpointRecord{
+					Version: info.IdentityVersion, Sequence: info.IdentitySequence,
 					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
 					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
@@ -229,7 +243,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		}
 		responder := liveness.NewResponder()
 		identityProvider := func() (record.EndpointRecord, error) {
-			return record.NewEndpointRecord(cfg.Identity, cfg.Name, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
+			return cfg.recordState.Current(cfg.Identity, cfg.Name, cfg.AdvertiseAddr)
 		}
 		acceptIdentity := func(ctx context.Context, caller record.EndpointRecord, _ net.IP) error {
 			// Preparing an IKE credential is not DHT admission. The peer becomes
@@ -555,6 +569,7 @@ func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
 			var info proto.NodeInfo
 			if err := json.Unmarshal(buf[:n], &info); err == nil && info.ID != cfg.NodeID {
 				rec := record.EndpointRecord{
+					Version: info.IdentityVersion, Sequence: info.IdentitySequence,
 					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
 					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
@@ -567,7 +582,7 @@ func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
 	}()
 
 	ticker := time.NewTicker(15 * time.Second)
-	localRecord, err := record.NewEndpointRecord(cfg.Identity, cfg.Name, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
+	localRecord, err := cfg.recordState.Current(cfg.Identity, cfg.Name, cfg.AdvertiseAddr)
 	if err != nil {
 		return
 	}
@@ -598,6 +613,79 @@ func livenessListenAddress(listenerAddress, advertisedAddress string) (string, e
 	return net.JoinHostPort(listenHost, probePort), nil
 }
 
+func newEndpointRecordState(configPath string) *endpointRecordState {
+	state := &endpointRecordState{config: configPath}
+	if configPath == "" {
+		return state
+	}
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		return state
+	}
+	configured, err := store.Load()
+	if err != nil {
+		return state
+	}
+	state.sequence = configured.Node.RecordSequence
+	state.name = configured.Node.RecordName
+	state.address = configured.Node.RecordAddress
+	return state
+}
+
+func (s *endpointRecordState) Current(id identity.Identity, name, address string) (record.EndpointRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.current.NodeID == id.NodeID && s.name == name && s.address == address {
+		expiresAt, err := time.Parse(time.RFC3339, s.current.ExpiresAt)
+		if err == nil && now.Add(5*time.Minute).Before(expiresAt) {
+			return s.current, nil
+		}
+	}
+	if s.sequence == ^uint64(0) {
+		return record.EndpointRecord{}, fmt.Errorf("endpoint record sequence exhausted")
+	}
+	next := s.sequence + 1
+	if next == 0 {
+		next = 1
+	}
+	created, err := record.NewEndpointRecordV2(id, name, address, next, 20*time.Minute, now)
+	if err != nil {
+		return record.EndpointRecord{}, err
+	}
+	if s.config != "" {
+		store, err := config.NewStore(s.config)
+		if err != nil {
+			return record.EndpointRecord{}, err
+		}
+		configured, err := store.Load()
+		if err != nil {
+			return record.EndpointRecord{}, err
+		}
+		if configured.Node.RecordSequence >= next {
+			if configured.Node.RecordSequence == ^uint64(0) {
+				return record.EndpointRecord{}, fmt.Errorf("endpoint record sequence exhausted")
+			}
+			next = configured.Node.RecordSequence + 1
+			created, err = record.NewEndpointRecordV2(id, name, address, next, 20*time.Minute, now)
+			if err != nil {
+				return record.EndpointRecord{}, err
+			}
+		}
+		configured.Node.RecordSequence = next
+		configured.Node.RecordName = name
+		configured.Node.RecordAddress = address
+		if err := store.Save(configured); err != nil {
+			return record.EndpointRecord{}, err
+		}
+	}
+	s.sequence = next
+	s.name = name
+	s.address = address
+	s.current = created
+	return created, nil
+}
+
 func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 	syncOnlyLogged := false
 	selfLookupDone := false
@@ -610,7 +698,7 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 		)
 		if liveCfg.AdvertiseAddr != "" {
 			var err error
-			rec, err = record.NewEndpointRecord(liveCfg.Identity, liveCfg.Name, liveCfg.AdvertiseAddr, 20*time.Minute, time.Now())
+			rec, err = liveCfg.recordState.Current(liveCfg.Identity, liveCfg.Name, liveCfg.AdvertiseAddr)
 			if err != nil {
 				fmt.Fprintf(log, "[SYNC] Skipping endpoint publish for %s: %v\n", liveCfg.Name, err)
 			} else {
@@ -830,6 +918,7 @@ func registryRecords(registry *discovery.Registry, server *dht.Server) []record.
 				continue
 			}
 			rec := record.EndpointRecord{
+				Version: info.IdentityVersion, Sequence: info.IdentitySequence,
 				NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
 				PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 				ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,

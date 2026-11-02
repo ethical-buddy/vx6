@@ -114,9 +114,6 @@ func verifyEnvelope(key string, env SignedEnvelope, now time.Time) error {
 	if now.UTC().After(expiresAt) {
 		return fmt.Errorf("envelope has expired")
 	}
-	if env.Version != uint64(issuedAt.UTC().Unix()) {
-		return fmt.Errorf("envelope version %d does not match issued_at %s", env.Version, env.IssuedAt)
-	}
 	if !ed25519.Verify(ed25519.PublicKey(publicKey), envelopeSigningPayload(env), signature) {
 		return fmt.Errorf("envelope signature verification failed")
 	}

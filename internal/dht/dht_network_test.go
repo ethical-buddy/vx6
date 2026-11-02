@@ -71,6 +71,44 @@ func TestRecursiveFindValueAcrossPeers(t *testing.T) {
 	}
 }
 
+func TestNameLookupWireTargetIsBareHashAndResolvesSignedRecord(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	rec, err := record.NewEndpointRecordV2(ownerID, "ALPHA", "[2001:db8::10]:4242", 1, time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := mustJSON(t, rec)
+	key := NodeNameKey("ALPHA")
+	value := mustSignedValue(t, ownerID, key, raw, now)
+	peer := newTestServer("peer")
+	peer.StoreLocal(key, value)
+	addr := startDHTListener(t, ctx, peer)
+	client := newTestServer("client")
+
+	got, nodes, err := client.QueryValue(ctx, addr, key)
+	if err != nil {
+		t.Fatalf("query by name hash: %v", err)
+	}
+	if got != value {
+		t.Fatal("name lookup did not return the signed record stored under its internal key")
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("unexpected referrals from empty routing table: %+v", nodes)
+	}
+	typ, target := lookupRequestTarget(key)
+	if typ != proto.DHTTypeLookupName || target != NodeNameHash("ALPHA") {
+		t.Fatalf("wire name lookup = (%q, %q), want lookup_name and bare digest", typ, target)
+	}
+}
+
 func TestStoreReplicatesAcrossBoundedPeers(t *testing.T) {
 	t.Parallel()
 

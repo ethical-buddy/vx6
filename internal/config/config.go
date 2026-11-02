@@ -40,6 +40,9 @@ type File struct {
 
 type NodeConfig struct {
 	Name                 string           `json:"name"`
+	RecordSequence       uint64           `json:"record_sequence,omitempty"`
+	RecordName           string           `json:"record_name,omitempty"`
+	RecordAddress        string           `json:"record_address,omitempty"`
 	ListenAddr           string           `json:"listen_addr"`
 	AdvertiseAddr        string           `json:"advertise_addr"`
 	TransportMode        string           `json:"transport_mode,omitempty"`
@@ -70,6 +73,8 @@ type KnownPeerEntry struct {
 	NodeID            string `json:"node_id,omitempty"`
 	NodeName          string `json:"node_name,omitempty"`
 	Address           string `json:"address"`
+	RecordVersion     uint8  `json:"record_version,omitempty"`
+	RecordSequence    uint64 `json:"record_sequence,omitempty"`
 	PublicKey         string `json:"public_key,omitempty"`
 	IdentityIssuedAt  string `json:"identity_issued_at,omitempty"`
 	IdentityExpiresAt string `json:"identity_expires_at,omitempty"`
@@ -679,11 +684,15 @@ func upsertKnownPeerEntry(entries []KnownPeerEntry, entry KnownPeerEntry) []Know
 			addressChanged := entries[i].Address != entry.Address
 			entries[i].Address = entry.Address
 			if entry.PublicKey != "" {
+				entries[i].RecordVersion = entry.RecordVersion
+				entries[i].RecordSequence = entry.RecordSequence
 				entries[i].PublicKey = entry.PublicKey
 				entries[i].IdentityIssuedAt = entry.IdentityIssuedAt
 				entries[i].IdentityExpiresAt = entry.IdentityExpiresAt
 				entries[i].IdentitySignature = entry.IdentitySignature
 			} else if addressChanged {
+				entries[i].RecordVersion = 0
+				entries[i].RecordSequence = 0
 				entries[i].PublicKey = ""
 				entries[i].IdentityIssuedAt = ""
 				entries[i].IdentityExpiresAt = ""
@@ -702,6 +711,8 @@ func mergeKnownPeerRecord(entries []KnownPeerEntry, rec record.EndpointRecord) (
 			updated.NodeID = rec.NodeID
 			updated.NodeName = rec.NodeName
 			updated.Address = rec.Address
+			updated.RecordVersion = rec.Version
+			updated.RecordSequence = rec.Sequence
 			updated.PublicKey = rec.PublicKey
 			updated.IdentityIssuedAt = rec.IssuedAt
 			updated.IdentityExpiresAt = rec.ExpiresAt
@@ -715,6 +726,7 @@ func mergeKnownPeerRecord(entries []KnownPeerEntry, rec record.EndpointRecord) (
 	}
 	return append(entries, KnownPeerEntry{
 		NodeID: rec.NodeID, NodeName: rec.NodeName, Address: rec.Address,
+		RecordVersion: rec.Version, RecordSequence: rec.Sequence,
 		PublicKey: rec.PublicKey, IdentityIssuedAt: rec.IssuedAt,
 		IdentityExpiresAt: rec.ExpiresAt, IdentitySignature: rec.Signature,
 	}), true

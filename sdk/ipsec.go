@@ -45,6 +45,7 @@ func (c *Client) peerDialGuard(cfg config.File, id identity.Identity, registry *
 			info, ok := routing.NodeByAddress(address)
 			if ok && dht.VerifyNodeInfo(info, time.Now()) == nil {
 				peer := record.EndpointRecord{
+					Version: info.IdentityVersion, Sequence: info.IdentitySequence,
 					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
 					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,

@@ -80,25 +80,26 @@ func (r DHTRequest) Validate() error {
 	if len(r.Data) > 1024*1024 {
 		return fmt.Errorf("DHT request data is too large")
 	}
-	if r.Type != DHTTypeFor(r.Action, r.Target) {
-		return fmt.Errorf("DHT request type %q does not match action %q and target", r.Type, r.Action)
-	}
 	switch r.Type {
 	case DHTTypeLookupName:
-		if !isSHA256Hex(strings.TrimPrefix(r.Target, "node/name/")) {
+		if r.Action != "find_value" || !isSHA256Hex(r.Target) {
 			return fmt.Errorf("name lookup target must be a full SHA-256 digest")
 		}
 	case DHTTypeLookupKey:
-		if !strings.HasPrefix(r.Target, "node/id/vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "node/id/vx6_")) {
+		if r.Action != "find_value" || !strings.HasPrefix(r.Target, "vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
 			return fmt.Errorf("identity lookup target must contain a full NodeID")
 		}
 	case DHTTypeBootstrap:
-		if strings.HasPrefix(r.Target, "vx6_") && !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
+		if r.Action != "find_node" || !strings.HasPrefix(r.Target, "vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
 			return fmt.Errorf("bootstrap target NodeID must contain a full SHA-256 digest")
 		}
 	case DHTTypeUpdate, DHTTypeLookupSvc, DHTTypeLookupPriv, DHTTypeLookupHid, DHTTypeLookupOther:
 	default:
 		return fmt.Errorf("unsupported DHT request type %q", r.Type)
+	}
+	if r.Type != DHTTypeLookupName && r.Type != DHTTypeLookupKey && r.Type != DHTTypeBootstrap &&
+		r.Type != DHTTypeFor(r.Action, r.Target) {
+		return fmt.Errorf("DHT request type %q does not match action %q and target", r.Type, r.Action)
 	}
 	switch r.Action {
 	case "find_node", "find_value":
@@ -124,8 +125,11 @@ func isSHA256Hex(value string) bool {
 }
 
 type NodeInfo struct {
+	IdentityVersion   uint8  `json:"identity_version,omitempty"`
+	IdentitySequence  uint64 `json:"identity_sequence,omitempty"`
 	ID                string `json:"id"`
 	Name              string `json:"name,omitempty"`
+	NameHash          string `json:"name_hash,omitempty"`
 	Addr              string `json:"addr"`
 	PublicKey         string `json:"public_key,omitempty"`
 	IdentityIssuedAt  string `json:"identity_issued_at,omitempty"`

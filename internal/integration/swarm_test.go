@@ -1030,6 +1030,11 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		Peers:    map[string]config.PeerEntry{},
 		Services: map[string]config.ServiceEntry{},
 	}
+	if previous, loadErr := store.Load(); loadErr == nil {
+		cfgFile.Node.RecordSequence = previous.Node.RecordSequence
+		cfgFile.Node.RecordName = previous.Node.RecordName
+		cfgFile.Node.RecordAddress = previous.Node.RecordAddress
+	}
 	for serviceName, target := range opts.services {
 		cfgFile.Services[serviceName] = config.ServiceEntry{
 			Target:             target,

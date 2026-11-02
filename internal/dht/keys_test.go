@@ -1,10 +1,13 @@
 package dht
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"testing"
+
+	"github.com/vx6/vx6/internal/identity"
 )
 
 func TestNodeNameKeyUsesCanonicalDomainSeparatedFullHash(t *testing.T) {
@@ -21,7 +24,30 @@ func TestNodeNameKeyUsesCanonicalDomainSeparatedFullHash(t *testing.T) {
 	if upper != "node/name/"+hex.EncodeToString(want[:]) {
 		t.Fatalf("lookup key = %q, want full SHA-256 name key", upper)
 	}
+	if NodeNameHash("alpha-42") != hex.EncodeToString(want[:]) {
+		t.Fatalf("cached name hash = %q, want bare full SHA-256 digest", NodeNameHash("alpha-42"))
+	}
 	if got := routingIDBytes(upper); hex.EncodeToString(got) != hex.EncodeToString(want[:]) {
 		t.Fatalf("routing target does not use the name digest: %x", got)
+	}
+}
+
+func TestPublicKeyLookupKeyMatchesFullNodeIDHashAndDiffersFromNameKey(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey, err := NodePublicKeyKey(id.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byKey != NodeIDKey(id.NodeID) {
+		t.Fatalf("public-key lookup key %q != NodeID lookup key %q", byKey, NodeIDKey(id.NodeID))
+	}
+	if byKey == NodeNameKey("ALPHA") {
+		t.Fatal("identity and canonical-name lookup keys unexpectedly collide")
+	}
+	if _, err := NodePublicKeyKey(make([]byte, ed25519.PublicKeySize-1)); err == nil {
+		t.Fatal("accepted a truncated public key")
 	}
 }

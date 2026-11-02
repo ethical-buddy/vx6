@@ -25,20 +25,32 @@ const maxMessageSize = 64 * 1024
 
 const roundTripTimeout = 2 * time.Second
 
+const (
+	localAddressHistoryTTL = 30 * 24 * time.Hour
+	maxLocalAddressHistory = 3
+)
+
 type Registry struct {
-	mu            sync.RWMutex
-	path          string
-	byName        map[string]record.EndpointRecord
-	byNode        map[string]record.EndpointRecord
-	serviceByName map[string]record.ServiceRecord
+	mu             sync.RWMutex
+	path           string
+	byName         map[string]record.EndpointRecord
+	byNode         map[string]record.EndpointRecord
+	serviceByName  map[string]record.ServiceRecord
+	addressHistory map[string][]addressObservation
+}
+
+type addressObservation struct {
+	Address  string    `json:"address"`
+	Observed time.Time `json:"observed_at"`
 }
 
 func NewRegistry(path string) (*Registry, error) {
 	r := &Registry{
-		path:          path,
-		byName:        map[string]record.EndpointRecord{},
-		byNode:        map[string]record.EndpointRecord{},
-		serviceByName: map[string]record.ServiceRecord{},
+		path:           path,
+		byName:         map[string]record.EndpointRecord{},
+		byNode:         map[string]record.EndpointRecord{},
+		serviceByName:  map[string]record.ServiceRecord{},
+		addressHistory: map[string][]addressObservation{},
 	}
 	if path != "" {
 		if err := r.load(); err != nil {
@@ -58,12 +70,13 @@ type request struct {
 }
 
 type response struct {
-	OK             bool                    `json:"ok"`
-	Error          string                  `json:"error,omitempty"`
-	Record         record.EndpointRecord   `json:"record,omitempty"`
-	ServiceRecord  record.ServiceRecord    `json:"service_record,omitempty"`
-	Records        []record.EndpointRecord `json:"records,omitempty"`
-	ServiceRecords []record.ServiceRecord  `json:"service_records,omitempty"`
+	OK             bool                            `json:"ok"`
+	Error          string                          `json:"error,omitempty"`
+	Record         record.EndpointRecord           `json:"record,omitempty"`
+	ServiceRecord  record.ServiceRecord            `json:"service_record,omitempty"`
+	Records        []record.EndpointRecord         `json:"records,omitempty"`
+	ServiceRecords []record.ServiceRecord          `json:"service_records,omitempty"`
+	LocalHistory   map[string][]addressObservation `json:"local_history,omitempty"`
 }
 
 func (r *Registry) HandleConn(conn net.Conn) error {
@@ -103,15 +116,9 @@ func (r *Registry) handlePublish(conn net.Conn, rec record.EndpointRecord) error
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if existing, ok := r.byName[rec.NodeName]; ok && existing.NodeID != rec.NodeID {
-		return writeResponse(conn, response{Error: fmt.Sprintf("node name %q already belongs to %s", rec.NodeName, existing.NodeID)})
-	}
-
 	if existing, ok := r.byNode[rec.NodeID]; ok {
-		existingIssuedAt, _ := time.Parse(time.RFC3339, existing.IssuedAt)
-		newIssuedAt, _ := time.Parse(time.RFC3339, rec.IssuedAt)
-		if existingIssuedAt.After(newIssuedAt) {
-			return writeResponse(conn, response{Error: "new record is older than stored record"})
+		if !record.EndpointRecordNewer(rec, existing) && record.Fingerprint(rec) != record.Fingerprint(existing) {
+			return writeResponse(conn, response{Error: "new record does not advance the stored record sequence"})
 		}
 	}
 
@@ -200,7 +207,15 @@ func (r *Registry) resolve(name, nodeID string) (record.EndpointRecord, error) {
 
 	switch {
 	case name != "":
-		rec, ok = r.byName[name]
+		for _, candidate := range r.byNode {
+			if candidate.NodeName != name {
+				continue
+			}
+			if ok && rec.NodeID != candidate.NodeID {
+				return record.EndpointRecord{}, fmt.Errorf("node name %q has multiple identities; resolve by NodeID", name)
+			}
+			rec, ok = candidate, true
+		}
 	case nodeID != "":
 		rec, ok = r.byNode[nodeID]
 	default:
@@ -219,15 +234,15 @@ func (r *Registry) Snapshot() ([]record.EndpointRecord, []record.ServiceRecord) 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	names := make([]string, 0, len(r.byName))
-	for name := range r.byName {
-		names = append(names, name)
+	ids := make([]string, 0, len(r.byNode))
+	for id := range r.byNode {
+		ids = append(ids, id)
 	}
-	sort.Strings(names)
+	sort.Strings(ids)
 
-	out := make([]record.EndpointRecord, 0, len(names))
-	for _, name := range names {
-		out = append(out, r.byName[name])
+	out := make([]record.EndpointRecord, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, r.byNode[id])
 	}
 	serviceNames := make([]string, 0, len(r.serviceByName))
 	for name := range r.serviceByName {
@@ -272,9 +287,7 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 		}
 		existing, ok := r.byNode[rec.NodeID]
 		if ok {
-			oldIssuedAt, _ := time.Parse(time.RFC3339, existing.IssuedAt)
-			newIssuedAt, _ := time.Parse(time.RFC3339, rec.IssuedAt)
-			if !newIssuedAt.After(oldIssuedAt) {
+			if !record.EndpointRecordNewer(rec, existing) {
 				continue
 			}
 		}
@@ -321,6 +334,7 @@ func (r *Registry) load() error {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return fmt.Errorf("decode registry: %w", err)
 	}
+	r.addressHistory = cleanAddressHistory(snapshot.LocalHistory, time.Now())
 	for _, rec := range snapshot.Records {
 		if err := record.VerifyEndpointRecord(rec, time.Now()); err != nil {
 			continue
@@ -347,15 +361,15 @@ func (r *Registry) saveLocked() error {
 		return fmt.Errorf("create registry directory: %w", err)
 	}
 
-	names := make([]string, 0, len(r.byName))
-	for name := range r.byName {
-		names = append(names, name)
+	ids := make([]string, 0, len(r.byNode))
+	for id := range r.byNode {
+		ids = append(ids, id)
 	}
-	sort.Strings(names)
+	sort.Strings(ids)
 
-	records := make([]record.EndpointRecord, 0, len(names))
-	for _, name := range names {
-		records = append(records, r.byName[name])
+	records := make([]record.EndpointRecord, 0, len(ids))
+	for _, id := range ids {
+		records = append(records, r.byNode[id])
 	}
 
 	serviceNames := make([]string, 0, len(r.serviceByName))
@@ -368,7 +382,7 @@ func (r *Registry) saveLocked() error {
 		serviceRecords = append(serviceRecords, r.serviceByName[name])
 	}
 
-	data, err := json.MarshalIndent(response{Records: records, ServiceRecords: serviceRecords}, "", "  ")
+	data, err := json.MarshalIndent(response{Records: records, ServiceRecords: serviceRecords, LocalHistory: cleanAddressHistory(r.addressHistory, time.Now())}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode registry: %w", err)
 	}
@@ -381,11 +395,72 @@ func (r *Registry) saveLocked() error {
 }
 
 func (r *Registry) upsertEndpointLocked(rec record.EndpointRecord) {
-	if existing, ok := r.byNode[rec.NodeID]; ok && existing.NodeName != "" && existing.NodeName != rec.NodeName {
-		delete(r.byName, existing.NodeName)
+	if existing, ok := r.byNode[rec.NodeID]; ok {
+		if existing.Address != rec.Address {
+			r.rememberAddressLocked(rec.NodeID, existing.Address, time.Now())
+		}
+		if existing.NodeName != "" && existing.NodeName != rec.NodeName && r.byName[existing.NodeName].NodeID == rec.NodeID {
+			delete(r.byName, existing.NodeName)
+		}
 	}
 	r.byName[rec.NodeName] = rec
 	r.byNode[rec.NodeID] = rec
+}
+
+// HistoricalAddresses returns local-only old endpoint hints. A caller must
+// obtain a fresh signed record and authenticate the peer over IKE before use.
+func (r *Registry) HistoricalAddresses(nodeID string, now time.Time) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addressHistory = cleanAddressHistory(r.addressHistory, now)
+	history := r.addressHistory[nodeID]
+	out := make([]string, 0, len(history))
+	for _, item := range history {
+		out = append(out, item.Address)
+	}
+	return out
+}
+
+func (r *Registry) rememberAddressLocked(nodeID, address string, now time.Time) {
+	if address == "" {
+		return
+	}
+	history := cleanAddressHistory(map[string][]addressObservation{nodeID: r.addressHistory[nodeID]}, now)[nodeID]
+	for i, item := range history {
+		if item.Address == address {
+			history = append(history[:i], history[i+1:]...)
+			break
+		}
+	}
+	history = append([]addressObservation{{Address: address, Observed: now}}, history...)
+	if len(history) > maxLocalAddressHistory {
+		history = history[:maxLocalAddressHistory]
+	}
+	r.addressHistory[nodeID] = history
+}
+
+func cleanAddressHistory(input map[string][]addressObservation, now time.Time) map[string][]addressObservation {
+	out := make(map[string][]addressObservation, len(input))
+	for nodeID, entries := range input {
+		seen := make(map[string]struct{}, maxLocalAddressHistory)
+		for _, item := range entries {
+			if item.Address == "" || item.Observed.IsZero() || now.Sub(item.Observed) > localAddressHistoryTTL {
+				continue
+			}
+			if err := transfer.ValidateIPv6Address(item.Address); err != nil {
+				continue
+			}
+			if _, ok := seen[item.Address]; ok {
+				continue
+			}
+			seen[item.Address] = struct{}{}
+			out[nodeID] = append(out[nodeID], item)
+			if len(out[nodeID]) == maxLocalAddressHistory {
+				break
+			}
+		}
+	}
+	return out
 }
 
 func Publish(ctx context.Context, address string, rec record.EndpointRecord) (record.EndpointRecord, error) {

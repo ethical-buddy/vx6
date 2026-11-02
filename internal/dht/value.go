@@ -56,6 +56,7 @@ type validatedValue struct {
 	issuedAt               time.Time
 	expiresAt              time.Time
 	version                uint64
+	sequenceBased          bool
 	originNodeID           string
 	publisherNodeID        string
 	enveloped              bool
@@ -458,20 +459,22 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 		if NodeNameKey(rec.NodeName) != key {
 			return validatedValue{}, fmt.Errorf("endpoint record name %q does not match name lookup key", rec.NodeName)
 		}
-		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
+		issuedAt, expiresAt, _, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
 		if err != nil {
 			return validatedValue{}, err
 		}
+		version := record.EndpointRecordSequenceVersion(rec)
 		return validatedValue{
-			storedRaw:    raw,
-			raw:          raw,
-			verified:     true,
-			family:       "endpoint:" + rec.NodeID,
-			fingerprint:  record.Fingerprint(rec),
-			issuedAt:     issuedAt,
-			expiresAt:    expiresAt,
-			version:      version,
-			originNodeID: rec.NodeID,
+			storedRaw:     raw,
+			raw:           raw,
+			verified:      true,
+			family:        "endpoint:" + rec.NodeID,
+			fingerprint:   record.Fingerprint(rec),
+			issuedAt:      issuedAt,
+			expiresAt:     expiresAt,
+			version:       version,
+			sequenceBased: rec.Version >= 2,
+			originNodeID:  rec.NodeID,
 		}, nil
 	case strings.HasPrefix(key, "node/id/"):
 		want := strings.TrimPrefix(key, "node/id/")
@@ -485,20 +488,22 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 		if rec.NodeID != want {
 			return validatedValue{}, fmt.Errorf("endpoint record node id %q does not match key %q", rec.NodeID, want)
 		}
-		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
+		issuedAt, expiresAt, _, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
 		if err != nil {
 			return validatedValue{}, err
 		}
+		version := record.EndpointRecordSequenceVersion(rec)
 		return validatedValue{
-			storedRaw:    raw,
-			raw:          raw,
-			verified:     true,
-			family:       "endpoint:" + rec.NodeID,
-			fingerprint:  record.Fingerprint(rec),
-			issuedAt:     issuedAt,
-			expiresAt:    expiresAt,
-			version:      version,
-			originNodeID: rec.NodeID,
+			storedRaw:     raw,
+			raw:           raw,
+			verified:      true,
+			family:        "endpoint:" + rec.NodeID,
+			fingerprint:   record.Fingerprint(rec),
+			issuedAt:      issuedAt,
+			expiresAt:     expiresAt,
+			version:       version,
+			sequenceBased: rec.Version >= 2,
+			originNodeID:  rec.NodeID,
 		}, nil
 	case strings.HasPrefix(key, "service/"):
 		want := strings.TrimPrefix(key, "service/")
@@ -720,6 +725,9 @@ func isNewerValue(candidate, current validatedValue) bool {
 	}
 	if candidate.version < current.version {
 		return false
+	}
+	if candidate.sequenceBased && current.sequenceBased {
+		return candidate.fingerprint > current.fingerprint
 	}
 	if candidate.issuedAt.After(current.issuedAt) {
 		return true

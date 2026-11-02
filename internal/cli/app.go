@@ -944,7 +944,7 @@ func runPeer(args []string) error {
 		var peer record.EndpointRecord
 		for _, entry := range cfg.Node.KnownPeers {
 			if entry.NodeID == *nodeID {
-				peer = record.EndpointRecord{NodeID: entry.NodeID, NodeName: entry.NodeName, Address: entry.Address, PublicKey: entry.PublicKey, IssuedAt: entry.IdentityIssuedAt, ExpiresAt: entry.IdentityExpiresAt, Signature: entry.IdentitySignature}
+				peer = record.EndpointRecord{Version: entry.RecordVersion, Sequence: entry.RecordSequence, NodeID: entry.NodeID, NodeName: entry.NodeName, Address: entry.Address, PublicKey: entry.PublicKey, IssuedAt: entry.IdentityIssuedAt, ExpiresAt: entry.IdentityExpiresAt, Signature: entry.IdentitySignature}
 				break
 			}
 		}
@@ -2638,6 +2638,7 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 			info, ok := rt.NodeByAddress(addr)
 			if ok && dht.VerifyNodeInfo(info, time.Now()) == nil {
 				peer := record.EndpointRecord{
+					Version: info.IdentityVersion, Sequence: info.IdentitySequence,
 					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
 					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
@@ -2657,6 +2658,7 @@ func importConfiguredKnownPeers(cfg config.File, registry *discovery.Registry) e
 	records := make([]record.EndpointRecord, 0, len(cfg.Node.KnownPeers))
 	for _, peer := range cfg.Node.KnownPeers {
 		rec := record.EndpointRecord{
+			Version: peer.RecordVersion, Sequence: peer.RecordSequence,
 			NodeID: peer.NodeID, NodeName: peer.NodeName, Address: peer.Address,
 			PublicKey: peer.PublicKey, IssuedAt: peer.IdentityIssuedAt,
 			ExpiresAt: peer.IdentityExpiresAt, Signature: peer.IdentitySignature,

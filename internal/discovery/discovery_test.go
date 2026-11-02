@@ -267,6 +267,94 @@ func TestRegistryImportReplacesOlderEndpointAddress(t *testing.T) {
 	}
 }
 
+func TestRegistryKeepsThreeLocalHistoricalAddressesAndCurrentOnlyInSnapshot(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir() + "/registry.json"
+	reg, err := NewRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := 1; i <= 5; i++ {
+		address := "[2001:db8::" + string(rune('0'+i)) + "]:4242"
+		rec, err := record.NewEndpointRecordV2(id, "alpha", address, uint64(i), 24*time.Hour, now.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.Import([]record.EndpointRecord{rec}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	history := reg.HistoricalAddresses(id.NodeID, now.Add(6*time.Second))
+	if len(history) != 3 {
+		t.Fatalf("local address history has %d entries, want 3: %v", len(history), history)
+	}
+	if history[0] != "[2001:db8::4]:4242" || history[1] != "[2001:db8::3]:4242" || history[2] != "[2001:db8::2]:4242" {
+		t.Fatalf("unexpected local history order/content: %v", history)
+	}
+	current, err := reg.ResolveLocal("alpha", id.NodeID)
+	if err != nil || current.Address != "[2001:db8::5]:4242" {
+		t.Fatalf("current record = %v, %v", current, err)
+	}
+	nodes, _ := reg.Snapshot()
+	if len(nodes) != 1 || nodes[0].Address != current.Address {
+		t.Fatalf("snapshot included stale addresses: %+v", nodes)
+	}
+	reloaded, err := NewRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.HistoricalAddresses(id.NodeID, now.Add(6*time.Second)); len(got) != 3 {
+		t.Fatalf("persisted local history lost entries: %v", got)
+	}
+	if got := reloaded.HistoricalAddresses(id.NodeID, now.Add(31*24*time.Hour)); len(got) != 0 {
+		t.Fatalf("expired local hints remain: %v", got)
+	}
+}
+
+func TestRegistryRetainsSameNameIdentitiesWithoutChoosingOne(t *testing.T) {
+	firstID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	first, err := record.NewEndpointRecordV2(firstID, "shared", "[2001:db8::1]:4242", 1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := record.NewEndpointRecordV2(secondID, "shared", "[2001:db8::2]:4242", 1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := NewRegistry("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Import([]record.EndpointRecord{first, second}, nil); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ := reg.Snapshot()
+	if len(nodes) != 2 {
+		t.Fatalf("same-name identities were collapsed: %+v", nodes)
+	}
+	if _, err := reg.ResolveLocal("shared", ""); err == nil {
+		t.Fatal("name-only resolution silently chose one conflicting identity")
+	}
+	for _, candidate := range []record.EndpointRecord{first, second} {
+		got, err := reg.ResolveLocal("", candidate.NodeID)
+		if err != nil || got.NodeID != candidate.NodeID {
+			t.Fatalf("identity lookup failed for %s: %v", candidate.NodeID, err)
+		}
+	}
+}
+
 func roundTripWithConn(conn net.Conn, req request) (response, error) {
 	defer conn.Close()
 

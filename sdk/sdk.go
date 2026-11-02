@@ -313,6 +313,7 @@ func (c *Client) newDHTClient(cfg config.File) (*dht.Server, error) {
 	}
 	for _, configured := range cfg.Node.KnownPeers {
 		peer := record.EndpointRecord{
+			Version: configured.RecordVersion, Sequence: configured.RecordSequence,
 			NodeID: configured.NodeID, NodeName: configured.NodeName, Address: configured.Address,
 			PublicKey: configured.PublicKey, IssuedAt: configured.IdentityIssuedAt,
 			ExpiresAt: configured.IdentityExpiresAt, Signature: configured.IdentitySignature,

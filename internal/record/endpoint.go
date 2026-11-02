@@ -16,6 +16,8 @@ import (
 )
 
 type EndpointRecord struct {
+	Version   uint8  `json:"record_version,omitempty"`
+	Sequence  uint64 `json:"record_sequence,omitempty"`
 	NodeID    string `json:"node_id"`
 	NodeName  string `json:"node_name"`
 	Address   string `json:"address"`
@@ -45,6 +47,19 @@ func (v VerifiedEndpointRecord) PublicKey() ed25519.PublicKey {
 }
 
 func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.Duration, now time.Time) (EndpointRecord, error) {
+	return newEndpointRecord(id, nodeName, address, ttl, now, 0)
+}
+
+// NewEndpointRecordV2 creates a versioned endpoint record. Sequence is a
+// persistent per-identity counter and must increase when signed metadata changes.
+func NewEndpointRecordV2(id identity.Identity, nodeName, address string, sequence uint64, ttl time.Duration, now time.Time) (EndpointRecord, error) {
+	if sequence == 0 {
+		return EndpointRecord{}, fmt.Errorf("record sequence must be greater than zero")
+	}
+	return newEndpointRecord(id, nodeName, address, ttl, now, sequence)
+}
+
+func newEndpointRecord(id identity.Identity, nodeName, address string, ttl time.Duration, now time.Time, sequence uint64) (EndpointRecord, error) {
 	canonicalName, err := NormalizeNodeName(nodeName)
 	if err != nil {
 		return EndpointRecord{}, err
@@ -60,12 +75,17 @@ func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.
 	}
 
 	record := EndpointRecord{
+		Version:   1,
 		NodeID:    id.NodeID,
 		NodeName:  canonicalName,
 		Address:   address,
 		PublicKey: base64.StdEncoding.EncodeToString(id.PublicKey),
 		IssuedAt:  now.UTC().Format(time.RFC3339),
 		ExpiresAt: now.UTC().Add(ttl).Format(time.RFC3339),
+	}
+	if sequence > 0 {
+		record.Version = 2
+		record.Sequence = sequence
 	}
 
 	signature := ed25519.Sign(id.PrivateKey, signingPayload(record))
@@ -108,16 +128,27 @@ func VerifyEndpoint(record EndpointRecord, now time.Time) (VerifiedEndpointRecor
 		return VerifiedEndpointRecord{}, fmt.Errorf("record contains invalid signature")
 	}
 
-	issuedAt, err := time.Parse(time.RFC3339, record.IssuedAt)
-	if err != nil {
-		return VerifiedEndpointRecord{}, fmt.Errorf("parse issued_at: %w", err)
-	}
 	expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
 	if err != nil {
 		return VerifiedEndpointRecord{}, fmt.Errorf("parse expires_at: %w", err)
 	}
-	if !expiresAt.After(issuedAt) {
-		return VerifiedEndpointRecord{}, fmt.Errorf("record expiry must be after issue time")
+	if record.Version > 2 {
+		return VerifiedEndpointRecord{}, fmt.Errorf("unsupported endpoint record version %d", record.Version)
+	}
+	if record.Version == 2 && record.Sequence == 0 {
+		return VerifiedEndpointRecord{}, fmt.Errorf("version 2 endpoint record has no sequence")
+	}
+	if record.Version < 2 && record.Sequence != 0 {
+		return VerifiedEndpointRecord{}, fmt.Errorf("legacy endpoint record unexpectedly contains a sequence")
+	}
+	if record.Version < 2 {
+		issuedAt, err := time.Parse(time.RFC3339, record.IssuedAt)
+		if err != nil {
+			return VerifiedEndpointRecord{}, fmt.Errorf("parse issued_at: %w", err)
+		}
+		if !expiresAt.After(issuedAt) {
+			return VerifiedEndpointRecord{}, fmt.Errorf("record expiry must be after issue time")
+		}
 	}
 	if now.UTC().After(expiresAt) {
 		return VerifiedEndpointRecord{}, fmt.Errorf("record has expired")
@@ -141,6 +172,33 @@ func Fingerprint(record EndpointRecord) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:12])
 }
 
+// EndpointRecordNewer compares records for the same identity. Version 2 uses
+// its signed sequence; legacy records fall back to their historical issue time.
+func EndpointRecordNewer(candidate, current EndpointRecord) bool {
+	if candidate.Version != current.Version {
+		return candidate.Version > current.Version
+	}
+	if candidate.Version >= 2 {
+		return candidate.Sequence > current.Sequence
+	}
+	candidateTime, candidateErr := time.Parse(time.RFC3339, candidate.IssuedAt)
+	currentTime, currentErr := time.Parse(time.RFC3339, current.IssuedAt)
+	return candidateErr == nil && currentErr == nil && candidateTime.After(currentTime)
+}
+
+// EndpointRecordSequenceVersion returns the version used to compare records
+// inside the signed endpoint family.
+func EndpointRecordSequenceVersion(rec EndpointRecord) uint64 {
+	if rec.Version >= 2 {
+		return rec.Sequence
+	}
+	issuedAt, err := time.Parse(time.RFC3339, rec.IssuedAt)
+	if err != nil {
+		return 0
+	}
+	return uint64(issuedAt.UTC().Unix())
+}
+
 func JSON(record EndpointRecord) ([]byte, error) {
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
@@ -150,6 +208,11 @@ func JSON(record EndpointRecord) ([]byte, error) {
 }
 
 func signingPayload(record EndpointRecord) []byte {
+	if record.Version >= 2 {
+		return []byte(fmt.Sprintf("vx6/endpoint-record/v2\n%d\n%d\n%s\n%s\n%s\n%s\n%s\n%s\n",
+			record.Version, record.Sequence, record.NodeID, record.NodeName, record.Address,
+			record.PublicKey, record.IssuedAt, record.ExpiresAt))
+	}
 	return []byte(
 		record.NodeID + "\n" +
 			record.NodeName + "\n" +

@@ -5,6 +5,7 @@ package dht
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -120,16 +121,30 @@ type ReplicationReport struct {
 }
 
 func NodeNameKey(name string) string {
+	return "node/name/" + NodeNameHash(name)
+}
+
+// NodeNameHash is the bare SHA-256 coordinate for a canonical node name.
+func NodeNameHash(name string) string {
 	canonical, err := record.NormalizeNodeName(name)
 	if err != nil {
 		canonical = strings.ToUpper(name)
 	}
 	sum := sha256.Sum256([]byte("vx6/node-name/v1\x00" + canonical))
-	return "node/name/" + fmt.Sprintf("%x", sum[:])
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func NodeIDKey(nodeID string) string {
 	return "node/id/" + nodeID
+}
+
+// NodePublicKeyKey hashes the complete Ed25519 public key and uses the same
+// identity index as NodeIDKey. Names and identities remain separate targets.
+func NodePublicKeyKey(publicKey []byte) (string, error) {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return "", fmt.Errorf("public key must be %d bytes", ed25519.PublicKeySize)
+	}
+	return NodeIDKey(identity.NodeIDFromPublicKey(ed25519.PublicKey(publicKey))), nil
 }
 
 func ServiceKey(fullName string) string {
@@ -333,9 +348,19 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 	case "find_node":
 		resp.Nodes = s.RT.ClosestNodes(req.Target, K)
 	case "find_value":
-		resp.Nodes = s.RT.ClosestNodes(req.Target, K)
+		storageKey := req.Target
+		switch req.Type {
+		case proto.DHTTypeLookupName:
+			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, K)
+			storageKey = "node/name/" + req.Target
+		case proto.DHTTypeLookupKey:
+			storageKey = NodeIDKey(req.Target)
+			resp.Nodes = s.RT.ClosestNodes(req.Target, K)
+		default:
+			resp.Nodes = s.RT.ClosestNodes(req.Target, K)
+		}
 		s.mu.RLock()
-		val, ok := s.Values[req.Target]
+		val, ok := s.Values[storageKey]
 		s.mu.RUnlock()
 		if ok {
 			resp.Value = val
@@ -435,7 +460,7 @@ func (s *Server) MaintainReplicas(ctx context.Context, targetID, value string) (
 	}
 	report.LocalStored = true
 
-	candidates := selectReplicationNodes(s.RT.ClosestNodes(targetID, K), K)
+	candidates := selectReplicationNodes(s.closestForTarget(targetID, K), K)
 	desired := s.adaptiveReplicationTarget()
 	if len(candidates) < desired {
 		report.Desired = len(candidates)
@@ -479,6 +504,13 @@ func (s *Server) MaintainReplicas(ctx context.Context, targetID, value string) (
 	}
 
 	return report, nil
+}
+
+func (s *Server) closestForTarget(target string, count int) []proto.NodeInfo {
+	if strings.HasPrefix(target, "node/name/") {
+		return s.RT.ClosestNodesByNameHash(strings.TrimPrefix(target, "node/name/"), count)
+	}
+	return s.RT.ClosestNodes(target, count)
 }
 
 func (s *Server) adaptiveLookupParams() (int, int) {
@@ -748,7 +780,7 @@ func (s *Server) RecursiveFindValue(ctx context.Context, key string) (string, er
 
 func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (LookupResult, error) {
 	visited := make(map[string]bool)
-	candidates := s.RT.ClosestNodes(key, K)
+	candidates := s.closestForTarget(key, K)
 	collector := newLookupCollector(key, time.Now())
 	queried := 0
 	alpha, budget := s.adaptiveLookupParams()
@@ -904,7 +936,8 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	req := proto.DHTRequest{Type: proto.DHTTypeFor("find_value", key), Action: "find_value", Target: key}
+	typ, target := lookupRequestTarget(key)
+	req := proto.DHTRequest{Type: typ, Action: "find_value", Target: target}
 	if err := req.Validate(); err != nil {
 		return "", nil, err
 	}
@@ -933,6 +966,17 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 		return "", nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
 	}
 	return resp.Value, resp.Nodes, nil
+}
+
+func lookupRequestTarget(key string) (proto.DHTRequestType, string) {
+	switch {
+	case strings.HasPrefix(key, "node/name/"):
+		return proto.DHTTypeLookupName, strings.TrimPrefix(key, "node/name/")
+	case strings.HasPrefix(key, "node/id/"):
+		return proto.DHTTypeLookupKey, strings.TrimPrefix(key, "node/id/")
+	default:
+		return proto.DHTTypeFor("find_value", key), key
+	}
 }
 
 func nextCandidateBatch(candidates []proto.NodeInfo, visited map[string]bool, max int) []proto.NodeInfo {
@@ -1013,9 +1057,12 @@ func mergeCandidateNodes(existing, incoming []proto.NodeInfo, visited map[string
 	}
 
 	sort.Slice(dedup, func(i, j int) bool {
-		distI := rt.distance(dedup[i].ID, target)
-		distJ := rt.distance(dedup[j].ID, target)
-		return distI.Cmp(distJ) < 0
+		distI := rt.lookupDistance(dedup[i], target)
+		distJ := rt.lookupDistance(dedup[j], target)
+		if comparison := distI.Cmp(distJ); comparison != 0 {
+			return comparison < 0
+		}
+		return dedup[i].ID < dedup[j].ID
 	})
 	return dedup
 }

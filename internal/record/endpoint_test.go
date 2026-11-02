@@ -81,3 +81,47 @@ func TestEndpointRecordExpiry(t *testing.T) {
 		t.Fatal("expected expired record to fail verification")
 	}
 }
+
+func TestEndpointRecordV2UsesSignedSequenceNotIssueTimeForOrdering(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	first, err := NewEndpointRecordV2(id, "alpha", "[2001:db8::1]:4242", 7, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewEndpointRecordV2(id, "alpha", "[2001:db8::2]:4242", 8, 2*time.Hour, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !EndpointRecordNewer(second, first) {
+		t.Fatal("higher signed sequence was not considered newer")
+	}
+	if err := VerifyEndpointRecord(second, now); err != nil {
+		t.Fatalf("future-independent sequence record was rejected: %v", err)
+	}
+	second.Sequence++
+	if err := VerifyEndpointRecord(second, now); err == nil {
+		t.Fatal("accepted a sequence changed without a new signature")
+	}
+}
+
+func TestEndpointRecordV2ExpiryDoesNotUseIssueTimeAsIdentityProof(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	rec, err := NewEndpointRecordV2(id, "alpha", "[2001:db8::1]:4242", 1, time.Hour, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyEndpointRecord(rec, now); err != nil {
+		t.Fatalf("issue time incorrectly acted as a verification timestamp: %v", err)
+	}
+	if err := VerifyEndpointRecord(rec, now.Add(26*time.Hour)); err == nil {
+		t.Fatal("expired endpoint record was accepted")
+	}
+}

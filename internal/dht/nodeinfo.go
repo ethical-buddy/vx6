@@ -13,8 +13,11 @@ import (
 
 func NodeInfoFromEndpointRecord(rec record.EndpointRecord) proto.NodeInfo {
 	return proto.NodeInfo{
+		IdentityVersion:   rec.Version,
+		IdentitySequence:  rec.Sequence,
 		ID:                rec.NodeID,
 		Name:              rec.NodeName,
+		NameHash:          NodeNameHash(rec.NodeName),
 		Addr:              rec.Address,
 		PublicKey:         rec.PublicKey,
 		IdentityIssuedAt:  rec.IssuedAt,
@@ -28,7 +31,12 @@ func VerifyNodeInfo(info proto.NodeInfo, now time.Time) error {
 		info.IdentityIssuedAt == "" || info.IdentityExpiresAt == "" || info.IdentitySignature == "" {
 		return fmt.Errorf("node info is missing signed identity fields")
 	}
+	if info.NameHash != "" && info.NameHash != NodeNameHash(info.Name) {
+		return fmt.Errorf("node info name hash does not match canonical name")
+	}
 	rec := record.EndpointRecord{
+		Version:   info.IdentityVersion,
+		Sequence:  info.IdentitySequence,
 		NodeID:    info.ID,
 		NodeName:  info.Name,
 		Address:   info.Addr,

@@ -1,6 +1,7 @@
 package dht
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vx6/vx6/internal/proto"
@@ -44,6 +45,26 @@ func TestRoutingTablePromotesReplacementAfterFailures(t *testing.T) {
 	}
 	if !foundReplacement {
 		t.Fatalf("expected replacement node %q to be promoted", replacement.ID)
+	}
+}
+
+func TestNameAndIdentityLookupsUseSeparateRoutingCoordinates(t *testing.T) {
+	rt := NewRoutingTable("self")
+	zeroHash := strings.Repeat("0", 64)
+	maxHash := strings.Repeat("f", 64)
+	byName := proto.NodeInfo{
+		ID: "vx6_" + maxHash, Name: "ALPHA", NameHash: zeroHash, Addr: "[2001:db8::1]:4242",
+	}
+	byID := proto.NodeInfo{
+		ID: "vx6_" + zeroHash, Name: "OMEGA", NameHash: maxHash, Addr: "[2001:db8::2]:4242",
+	}
+	rt.Buckets[0] = []bucketEntry{{Node: byName}, {Node: byID}}
+
+	if got := rt.ClosestNodesByNameHash(zeroHash, 1); len(got) != 1 || got[0].ID != byName.ID {
+		t.Fatalf("name lookup chose %+v, want peer closest by NameHash", got)
+	}
+	if got := rt.ClosestNodes("vx6_"+zeroHash, 1); len(got) != 1 || got[0].ID != byID.ID {
+		t.Fatalf("identity lookup chose %+v, want peer closest by NodeID", got)
 	}
 }
 
