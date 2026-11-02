@@ -105,6 +105,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 list [--user USER] [--hidden]")
 	fmt.Fprintln(w, "  vx6 peer add --record ENDPOINT.json")
 	fmt.Fprintln(w, "  vx6 peer add --addr [ipv6]:port [--name NAME] (address only; IPsec requires a signed record)")
+	fmt.Fprintln(w, "  vx6 peer pin --record ENDPOINT.json (trust this identity across record expiry)")
+	fmt.Fprintln(w, "  vx6 peer unpin --node-id ID")
 	fmt.Fprintln(w, "  vx6 peer revoke --node-id ID (local, persistent deny)")
 	fmt.Fprintln(w, "  vx6 identity")
 	fmt.Fprintln(w, "  vx6 identity rename --name NAME")
@@ -189,9 +191,11 @@ func runInit(ctx context.Context, args []string) error {
 	if *name == "" {
 		return errors.New("init requires --name")
 	}
-	if err := record.ValidateNodeName(*name); err != nil {
+	canonicalName, err := record.NormalizeNodeName(*name)
+	if err != nil {
 		return err
 	}
+	*name = canonicalName
 	if err := transfer.ValidateIPv6Address(*listenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
 	}
@@ -867,6 +871,57 @@ func runService(args []string) error {
 }
 
 func runPeer(args []string) error {
+	if len(args) > 0 && args[0] == "pin" {
+		fs := flag.NewFlagSet("peer pin", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		recordPath := fs.String("record", "", "verified signed endpoint record JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *recordPath == "" {
+			return errors.New("peer pin requires --record")
+		}
+		data, err := os.ReadFile(*recordPath)
+		if err != nil {
+			return fmt.Errorf("read endpoint record: %w", err)
+		}
+		var peer record.EndpointRecord
+		if err := json.Unmarshal(data, &peer); err != nil {
+			return fmt.Errorf("decode endpoint record: %w", err)
+		}
+		if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+			return fmt.Errorf("reject endpoint record: %w", err)
+		}
+		store, err := config.NewStore("")
+		if err != nil {
+			return err
+		}
+		if err := store.PinPeer(peer, time.Now()); err != nil {
+			return err
+		}
+		fmt.Printf("peer_pinned\t%s\t%s\n", peer.NodeName, peer.NodeID)
+		return nil
+	}
+	if len(args) > 0 && args[0] == "unpin" {
+		fs := flag.NewFlagSet("peer unpin", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		nodeID := fs.String("node-id", "", "pinned peer NodeID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *nodeID == "" {
+			return errors.New("peer unpin requires --node-id")
+		}
+		store, err := config.NewStore("")
+		if err != nil {
+			return err
+		}
+		if err := store.UnpinPeer(*nodeID); err != nil {
+			return err
+		}
+		fmt.Printf("peer_unpinned\t%s\n", *nodeID)
+		return nil
+	}
 	if len(args) > 0 && args[0] == "revoke" {
 		fs := flag.NewFlagSet("peer revoke", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -1012,6 +1067,10 @@ func runPeer(args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
 	printSectionHeader("KNOWN PEERS", len(knownPeers))
 	for _, entry := range knownPeers {
 		switch {
@@ -1026,6 +1085,13 @@ func runPeer(args []string) error {
 		}
 	}
 	if len(knownPeers) == 0 {
+		fmt.Println("  (none)")
+	}
+	printSectionHeader("PINNED IDENTITIES", len(cfg.Node.PinnedPeers))
+	for _, pin := range cfg.Node.PinnedPeers {
+		fmt.Printf("  %-16s %s\n", pin.NodeName, pin.NodeID)
+	}
+	if len(cfg.Node.PinnedPeers) == 0 {
 		fmt.Println("  (none)")
 	}
 	printSectionHeader("PEER DIRECTORY", len(names))
@@ -1511,9 +1577,11 @@ func runIdentityRename(ctx context.Context, args []string) error {
 	if *name == "" {
 		return errors.New("identity rename requires --name")
 	}
-	if err := record.ValidateNodeName(*name); err != nil {
+	canonicalName, err := record.NormalizeNodeName(*name)
+	if err != nil {
 		return err
 	}
+	*name = canonicalName
 
 	store, err := config.NewStore("")
 	if err != nil {
@@ -2023,6 +2091,17 @@ func resolvePeerForSend(ctx context.Context, store *config.Store, cfg config.Fil
 }
 
 func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (record.EndpointRecord, error) {
+	canonicalName, err := record.NormalizeNodeName(name)
+	if err != nil {
+		return record.EndpointRecord{}, err
+	}
+	name = canonicalName
+	for _, pin := range cfg.Node.PinnedPeers {
+		if pin.NodeName == name {
+			return resolvePinnedNode(ctx, cfg, pin)
+		}
+	}
+
 	reg, _ := loadLocalRegistry(cfg.Node.DataDir)
 	if reg != nil {
 		nodes, _ := reg.Snapshot()
@@ -2059,6 +2138,75 @@ func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (
 		}
 	}
 	return record.EndpointRecord{}, errors.New("not found")
+}
+
+func resolvePinnedNode(ctx context.Context, cfg config.File, pin config.PinnedPeer) (record.EndpointRecord, error) {
+	verify := func(rec record.EndpointRecord) (record.EndpointRecord, error) {
+		return verifyPinnedEndpoint(rec, pin, time.Now())
+	}
+	if reg, err := loadLocalRegistry(cfg.Node.DataDir); err == nil && reg != nil {
+		if rec, err := reg.ResolveLocal("", pin.NodeID); err == nil {
+			if verified, verifyErr := verify(rec); verifyErr == nil {
+				return verified, nil
+			}
+		}
+	}
+	if client, err := newDHTClient(cfg); err == nil && client != nil {
+		result, _ := client.RecursiveFindValueDetailed(ctx, dht.NodeIDKey(pin.NodeID))
+		rawValues := append([]string(nil), result.ConflictValues...)
+		if result.Value != "" {
+			rawValues = append(rawValues, result.Value)
+		}
+		var mismatch error
+		for _, raw := range rawValues {
+			var rec record.EndpointRecord
+			if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+				continue
+			}
+			verified, err := verify(rec)
+			if err == nil {
+				return verified, nil
+			}
+			mismatch = err
+		}
+		if mismatch != nil {
+			return record.EndpointRecord{}, mismatch
+		}
+	}
+	for _, addr := range discoveryCandidates(cfg) {
+		rec, err := discovery.Resolve(ctx, addr, "", pin.NodeID)
+		if err != nil {
+			continue
+		}
+		if verified, err := verify(rec); err == nil {
+			return verified, nil
+		} else {
+			return record.EndpointRecord{}, err
+		}
+	}
+	return record.EndpointRecord{}, fmt.Errorf("pinned identity %s (%s) is not currently reachable; refusing unpinned name fallback", pin.NodeName, pin.NodeID)
+}
+
+func verifyPinnedEndpoint(rec record.EndpointRecord, pin config.PinnedPeer, now time.Time) (record.EndpointRecord, error) {
+	if err := record.VerifyEndpointRecord(rec, now); err != nil {
+		return record.EndpointRecord{}, err
+	}
+	if rec.NodeID != pin.NodeID || rec.PublicKey != pin.PublicKey {
+		return record.EndpointRecord{}, fmt.Errorf("pinned identity mismatch for %s: refusing peer %s", pin.NodeName, rec.NodeID)
+	}
+	return rec, nil
+}
+
+func validatePinnedIdentity(cfg config.File, peer record.EndpointRecord) error {
+	for _, pin := range cfg.Node.PinnedPeers {
+		if peer.NodeID == pin.NodeID && peer.PublicKey == pin.PublicKey {
+			return nil
+		}
+		if peer.NodeName == pin.NodeName {
+			return fmt.Errorf("peer name %s is pinned to %s; refusing identity %s", pin.NodeName, pin.NodeID, peer.NodeID)
+		}
+	}
+	return nil
 }
 
 func resolveServiceDistributed(ctx context.Context, cfg config.File, service string) (record.ServiceRecord, error) {
@@ -2111,7 +2259,7 @@ func waitForNodeNameAvailability(ctx context.Context, cfg config.File, name, own
 		wait = time.Minute
 	}
 	if len(discoveryCandidates(cfg)) == 0 {
-		fmt.Printf("name_check\tname=%s\tstatus=skipped\treason=no-network-entrance\n", name)
+		fmt.Printf("name_check\tname=%s\tstatus=unconfirmed\treason=no-network-entrance\n", name)
 		return nil
 	}
 
@@ -2120,6 +2268,7 @@ func waitForNodeNameAvailability(ctx context.Context, cfg config.File, name, own
 		return err
 	}
 	if client == nil {
+		fmt.Printf("name_check\tname=%s\tstatus=unconfirmed\treason=no-dht-client\n", name)
 		return nil
 	}
 
@@ -2130,21 +2279,14 @@ func waitForNodeNameAvailability(ctx context.Context, cfg config.File, name, own
 
 	for {
 		result, err := client.RecursiveFindValueDetailed(ctx, dht.NodeNameKey(name))
-		candidates := collectNodeNameCandidates(result, ownNodeID)
+		status, candidates := nodeNameCheckOutcome(result, err, ownNodeID)
 		if len(candidates) > 0 {
 			printNameConflictCandidates(name, candidates)
 			return fmt.Errorf("node name %q is already in use", name)
 		}
-		if err == nil && result.Value != "" {
-			var rec record.EndpointRecord
-			if json.Unmarshal([]byte(result.Value), &rec) == nil && rec.NodeID != ownNodeID {
-				printNameConflictCandidates(name, []record.EndpointRecord{rec})
-				return fmt.Errorf("node name %q is already in use", name)
-			}
-		}
 
 		if time.Now().After(deadline) {
-			fmt.Printf("name_check\tname=%s\tstatus=available\n", name)
+			fmt.Printf("name_check\tname=%s\tstatus=%s\treason=no-conflict-observed\n", name, status)
 			return nil
 		}
 		select {
@@ -2153,6 +2295,20 @@ func waitForNodeNameAvailability(ctx context.Context, cfg config.File, name, own
 		case <-ticker.C:
 		}
 	}
+}
+
+func nodeNameCheckOutcome(result dht.LookupResult, lookupErr error, ownNodeID string) (string, []record.EndpointRecord) {
+	candidates := collectNodeNameCandidates(result, ownNodeID)
+	if len(candidates) > 0 {
+		return "conflict", candidates
+	}
+	if lookupErr == nil && result.Value != "" {
+		var rec record.EndpointRecord
+		if json.Unmarshal([]byte(result.Value), &rec) == nil && rec.NodeID != ownNodeID {
+			return "conflict", []record.EndpointRecord{rec}
+		}
+	}
+	return "unconfirmed", nil
 }
 
 func collectNodeNameCandidates(result dht.LookupResult, ownNodeID string) []record.EndpointRecord {
@@ -2459,6 +2615,9 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 			nodes, _ := registry.Snapshot()
 			for _, peer := range nodes {
 				if peer.Address == addr && record.VerifyEndpointRecord(peer, time.Now()) == nil {
+					if err := validatePinnedIdentity(cfg, peer); err != nil {
+						return err
+					}
 					return client.EnsurePeer(ctx, peer)
 				}
 			}
@@ -2470,6 +2629,9 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
 					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
+				}
+				if err := validatePinnedIdentity(cfg, peer); err != nil {
+					return err
 				}
 				return client.EnsurePeer(ctx, peer)
 			}

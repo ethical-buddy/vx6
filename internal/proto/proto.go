@@ -5,8 +5,10 @@ package proto
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 )
 
 var magic = [4]byte{'V', 'X', '6', '1'}
@@ -23,14 +25,101 @@ const (
 )
 
 type DHTRequest struct {
-	Action string `json:"action"` // "find_node", "find_value", "store"
-	Target string `json:"target"` // NodeID or Service Name we are looking for
-	Data   string `json:"data"`   // The value to store (e.g. a signed record)
+	Type   DHTRequestType `json:"type"`
+	Action string         `json:"action"` // "find_node", "find_value", "store"
+	Target string         `json:"target"` // NodeID or Service Name we are looking for
+	Data   string         `json:"data"`   // The value to store (e.g. a signed record)
 }
 
+type DHTRequestType string
+
+const (
+	DHTTypeBootstrap   DHTRequestType = "bootstrap"
+	DHTTypeUpdate      DHTRequestType = "update"
+	DHTTypeLookupName  DHTRequestType = "lookup_name"
+	DHTTypeLookupKey   DHTRequestType = "lookup_key"
+	DHTTypeLookupSvc   DHTRequestType = "lookup_service"
+	DHTTypeLookupPriv  DHTRequestType = "lookup_private"
+	DHTTypeLookupHid   DHTRequestType = "lookup_hidden"
+	DHTTypeLookupOther DHTRequestType = "lookup_other"
+)
+
 type DHTResponse struct {
-	Nodes []NodeInfo `json:"nodes"` // Closest nodes to the target
-	Value string     `json:"value"` // Found address/descriptor (if any)
+	Type  DHTRequestType `json:"type"`
+	Nodes []NodeInfo     `json:"nodes"` // Closest nodes to the target
+	Value string         `json:"value"` // Found address/descriptor (if any)
+}
+
+func DHTTypeFor(action, target string) DHTRequestType {
+	if action == "store" {
+		return DHTTypeUpdate
+	}
+	switch {
+	case strings.HasPrefix(target, "node/name/"):
+		return DHTTypeLookupName
+	case strings.HasPrefix(target, "node/id/"):
+		return DHTTypeLookupKey
+	case strings.HasPrefix(target, "service/"):
+		return DHTTypeLookupSvc
+	case strings.HasPrefix(target, "private-catalog/"):
+		return DHTTypeLookupPriv
+	case strings.HasPrefix(target, "hidden-desc/v1/"):
+		return DHTTypeLookupHid
+	case action == "find_node":
+		return DHTTypeBootstrap
+	default:
+		return DHTTypeLookupOther
+	}
+}
+
+func (r DHTRequest) Validate() error {
+	if r.Target == "" || len(r.Target) > 512 {
+		return fmt.Errorf("DHT request target is empty or too long")
+	}
+	if len(r.Data) > 1024*1024 {
+		return fmt.Errorf("DHT request data is too large")
+	}
+	if r.Type != DHTTypeFor(r.Action, r.Target) {
+		return fmt.Errorf("DHT request type %q does not match action %q and target", r.Type, r.Action)
+	}
+	switch r.Type {
+	case DHTTypeLookupName:
+		if !isSHA256Hex(strings.TrimPrefix(r.Target, "node/name/")) {
+			return fmt.Errorf("name lookup target must be a full SHA-256 digest")
+		}
+	case DHTTypeLookupKey:
+		if !strings.HasPrefix(r.Target, "node/id/vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "node/id/vx6_")) {
+			return fmt.Errorf("identity lookup target must contain a full NodeID")
+		}
+	case DHTTypeBootstrap:
+		if strings.HasPrefix(r.Target, "vx6_") && !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
+			return fmt.Errorf("bootstrap target NodeID must contain a full SHA-256 digest")
+		}
+	case DHTTypeUpdate, DHTTypeLookupSvc, DHTTypeLookupPriv, DHTTypeLookupHid, DHTTypeLookupOther:
+	default:
+		return fmt.Errorf("unsupported DHT request type %q", r.Type)
+	}
+	switch r.Action {
+	case "find_node", "find_value":
+		if r.Data != "" {
+			return fmt.Errorf("DHT lookup request must not contain update data")
+		}
+	case "store":
+		if r.Data == "" {
+			return fmt.Errorf("DHT update request has no data")
+		}
+	default:
+		return fmt.Errorf("unsupported DHT action %q", r.Action)
+	}
+	return nil
+}
+
+func isSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 type NodeInfo struct {

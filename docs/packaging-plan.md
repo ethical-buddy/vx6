@@ -3,12 +3,12 @@
 ## Recommendation
 
 Ship one VX6 installer/package experience per operating system, not one
-monolithic executable that reimplements operating-system networking. On Linux,
-VX6 depends on the kernel's XFRM IPsec datapath and a maintained IKEv2
-implementation (currently strongSwan). The package should install and
-configure those components so an ordinary user does not need to know about
-`swanctl`; it cannot eliminate the kernel support, privileged setup, or
-maintenance dependency.
+monolithic executable that reimplements operating-system networking. The
+current Linux prototype depends on strongSwan for IKEv2 and kernel XFRM for
+ESP. The desired direction is to remove the strongSwan runtime dependency by
+building a VX6-owned Linux IKE control plane, while continuing to use kernel
+XFRM and established cryptographic libraries. That controller is not
+implemented yet and must not be represented as part of today's binary.
 
 `swanctl` is a control client for strongSwan's `charon` daemon through VICI; it
 is not the ESP packet engine. VX6 could replace the CLI invocations with a
@@ -17,14 +17,18 @@ its IKE daemon core as `libcharon`, but linking or embedding that core remains
 use of strongSwan and its plugin/dependency ecosystem, not a VX6-only IKE
 implementation. Linux kernel XFRM handles packet transforms and policy; it
 does not independently authenticate peers or negotiate IKE keys. Writing that
-IKE implementation in VX6 would create a security-critical protocol stack and
-is not recommended.
+IKE implementation in VX6 creates a security-critical protocol stack. The
+selected direction accepts that complexity, but not custom cryptographic
+primitives or a userspace ESP dataplane. Issue #57 must specify requirements,
+privilege boundaries, interoperability, benchmarks, failure behavior, tests,
+and independent review before implementation is accepted.
 
-The best initial product boundary is therefore: VX6 CLI/SDK + privileged
-`vx6-ipsecd` + packaged strongSwan daemon/plugins + kernel XFRM + distro-owned
-service manager and firewall integration. Keep the IPsec adapter behind a
-platform interface so later OS work can use the platform's supported IPsec
-facilities rather than pretending Linux XFRM is portable.
+The current prototype boundary is VX6 CLI + privileged `vx6-ipsecd` +
+strongSwan + kernel XFRM + Linux service manager/firewall. The target Linux
+product boundary is VX6 CLI/SDK + privileged VX6 IKE controller + kernel XFRM
++ distro service manager/firewall. Keep the adapter behind a platform
+interface; do not imply that a Linux controller or XFRM design ports directly
+to other operating systems.
 
 ## Contributor Work Packages
 
@@ -47,8 +51,10 @@ non-reproducible inputs.
 
 Separate contributors can own Debian/Ubuntu (`.deb`), Fedora/RHEL (`.rpm`), and
 Arch (`PKGBUILD`) packaging from one reviewed Linux installation contract.
-Package both VX6 binaries and systemd units; declare strongSwan runtime
-dependencies and required plugins; create a dedicated service user/group;
+Package both VX6 binaries and systemd units; for today's prototype declare
+strongSwan runtime dependencies and required plugins. Update that dependency
+contract only after a reviewed replacement is complete. Create a dedicated
+service user/group;
 provision a root-owned config and narrowly scoped VICI/control sockets; grant
 the regular VX6 process only the local IPC access it needs; and enable the
 privileged helper using systemd hardening. The exact `CAP_NET_ADMIN`, XFRM,
@@ -118,12 +124,14 @@ support matrix from CI results, not intentions.
 
 ## Order and ownership
 
-Continue with #59 adversarial dataplane tests and #55 deployment/operations docs;
-then implement the Linux first-install package in [#57](https://github.com/ethical-buddy/vx6/issues/57). In parallel, contributors can
-prepare independent package recipes against the shared install contract, but
-merge only after Linux behavior and lifecycle tests are stable. Keep #42
-decentralized identity/credential lifecycle open; package installation does
-not solve DHT membership trust. Windows and Android work starts after the
+First measure the current Linux baseline in [#51](https://github.com/ethical-buddy/vx6/issues/51),
+then research and prototype the replacement controller under [#57](https://github.com/ethical-buddy/vx6/issues/57),
+with adversarial tests in [#59](https://github.com/ethical-buddy/vx6/issues/59).
+Do not remove strongSwan until a replacement passes interoperability,
+lifecycle, fail-closed, and independent security gates. Contributors can
+prepare package recipes against the current install contract, clearly labeling
+strongSwan as a runtime dependency. Keep #60 and #62-#65 peer-local DHT work
+separate: packaging does not solve name conflicts or DHT eclipse risk. Windows and Android work starts after the
 shared platform interface and identity mapping are documented and tested; the
 Android platform work is tracked in [#52](https://github.com/ethical-buddy/vx6/issues/52).
 

@@ -1,5 +1,13 @@
 # VX6 IKEv2/IPsec
 
+This page describes the current Linux prototype, which uses strongSwan and
+kernel XFRM. It does not describe a VX6-owned IKE implementation. Replacing
+the strongSwan control plane is future research/prototype work in [#57](https://github.com/ethical-buddy/vx6/issues/57),
+gated on baseline measurements ([#51](https://github.com/ethical-buddy/vx6/issues/51))
+and security review. VX6 must continue to use established cryptographic
+libraries and kernel ESP; the work is not permission to invent a cipher, key
+exchange, or ESP engine.
+
 VX6's Linux peer tunnel manager uses strongSwan `swanctl` and the kernel XFRM
 backend. For each peer it verifies the signed endpoint record, pins that
 record's Ed25519 public key for IKEv2 public-key authentication, and configures
@@ -25,9 +33,10 @@ public key. Record verification checks the signature, validity interval, and
 that the node ID is derived from that key. The IPsec manager pins that verified
 key for IKE authentication; a peer-supplied name or address alone is not a
 trust anchor. This proves possession of the key named in the record, not that
-the DHT has globally established the record's uniqueness. DHT membership
-consensus, freshness, and distributed revocation are separate work tracked in
-#60.
+the DHT has globally established the record's uniqueness. Each node makes its
+own trust decision; there is no membership committee or global consensus
+service. Conflict handling, metadata, local table maintenance, and bootstrap
+remain work tracked in #60 and #62-#65.
 
 ## Bootstrap
 
@@ -80,11 +89,12 @@ explicitly lifted by an administrator; there is intentionally no automatic
 unrevoke on a refreshed DHT record.
 
 Node IDs are derived from identity public keys. Key replacement therefore
-creates a new node ID, not a transparent rotation. Until DHT supports a signed
-identity-transition proof, planned replacement means enrolling a new node
-identity and updating peer trust, then locally revoking the old ID. If the old
+creates a new node ID, not a transparent rotation. Until a signed
+identity-transition proof is implemented and locally accepted, planned
+replacement means enrolling a new node identity and updating peer trust, then
+locally revoking the old ID. If the old
 key is lost or compromised, network-wide recovery cannot be proven by that key
-and depends on the future DHT membership/revocation design in #60. An expired
+and depends on the future peer-local identity/revocation design in #60. An expired
 endpoint record must be refreshed and verified before it can be used for new
 peer setup.
 
@@ -148,9 +158,10 @@ egress, so reported totals are observations, not necessarily unique frames.
 This is passive capture plus an unauthenticated clear-port probe. It does not
 yet prove resistance to active packet modification/replay, rekey failure,
 tunnel loss/restart, or every route-leak scenario. Those cases are tracked in
-follow-up adversarial issue #59. DHT bootstrap/membership consensus is deliberately
-omitted: the test supplies signed peer endpoint records directly and verifies
-the pinned-key IKE path. DHT trust remains separate work.
+follow-up adversarial issue #59. DHT lookup and peer-local name/conflict policy
+are deliberately omitted: the test supplies signed peer endpoint records
+directly and verifies the pinned-key IKE path. DHT trust remains separate
+work; this test does not assume consensus.
 
 Run the complete routed capture test with:
 

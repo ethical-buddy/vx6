@@ -45,7 +45,8 @@ func (v VerifiedEndpointRecord) PublicKey() ed25519.PublicKey {
 }
 
 func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.Duration, now time.Time) (EndpointRecord, error) {
-	if err := ValidateNodeName(nodeName); err != nil {
+	canonicalName, err := NormalizeNodeName(nodeName)
+	if err != nil {
 		return EndpointRecord{}, err
 	}
 	if err := transfer.ValidateIPv6Address(address); err != nil {
@@ -60,7 +61,7 @@ func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.
 
 	record := EndpointRecord{
 		NodeID:    id.NodeID,
-		NodeName:  nodeName,
+		NodeName:  canonicalName,
 		Address:   address,
 		PublicKey: base64.StdEncoding.EncodeToString(id.PublicKey),
 		IssuedAt:  now.UTC().Format(time.RFC3339),
@@ -85,7 +86,7 @@ func VerifyEndpoint(record EndpointRecord, now time.Time) (VerifiedEndpointRecor
 	if record.NodeID == "" || record.NodeName == "" || record.Address == "" {
 		return VerifiedEndpointRecord{}, fmt.Errorf("record missing required fields")
 	}
-	if err := ValidateNodeName(record.NodeName); err != nil {
+	if err := ValidateCanonicalNodeName(record.NodeName); err != nil {
 		return VerifiedEndpointRecord{}, err
 	}
 	if err := transfer.ValidateIPv6Address(record.Address); err != nil {

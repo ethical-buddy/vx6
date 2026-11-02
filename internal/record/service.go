@@ -32,7 +32,8 @@ type ServiceRecord struct {
 }
 
 func NewServiceRecord(id identity.Identity, nodeName, serviceName, address string, ttl time.Duration, now time.Time) (ServiceRecord, error) {
-	if err := ValidateNodeName(nodeName); err != nil {
+	canonicalName, err := NormalizeNodeName(nodeName)
+	if err != nil {
 		return ServiceRecord{}, err
 	}
 	if err := ValidateServiceName(serviceName); err != nil {
@@ -52,7 +53,7 @@ func NewServiceRecord(id identity.Identity, nodeName, serviceName, address strin
 
 	rec := ServiceRecord{
 		NodeID:      id.NodeID,
-		NodeName:    nodeName,
+		NodeName:    canonicalName,
 		ServiceName: serviceName,
 		Address:     address,
 		PublicKey:   base64.StdEncoding.EncodeToString(id.PublicKey),
@@ -74,7 +75,7 @@ func VerifyServiceRecord(rec ServiceRecord, now time.Time) error {
 	if rec.NodeID == "" || rec.NodeName == "" || rec.ServiceName == "" {
 		return fmt.Errorf("service record missing required fields")
 	}
-	if err := ValidateNodeName(rec.NodeName); err != nil {
+	if err := ValidateCanonicalNodeName(rec.NodeName); err != nil {
 		return err
 	}
 	if rec.Alias != "" {
@@ -143,7 +144,21 @@ func VerifyServiceRecord(rec ServiceRecord, now time.Time) error {
 }
 
 func FullServiceName(nodeName, serviceName string) string {
+	if canonical, err := NormalizeNodeName(nodeName); err == nil {
+		nodeName = canonical
+	}
 	return nodeName + "." + serviceName
+}
+
+func CanonicalServiceLookupKey(key string) string {
+	nodeName, serviceName, ok := strings.Cut(key, ".")
+	if !ok {
+		return key
+	}
+	if canonical, err := NormalizeNodeName(nodeName); err == nil {
+		return canonical + "." + serviceName
+	}
+	return key
 }
 
 func ServiceLookupKey(rec ServiceRecord) string {

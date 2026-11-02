@@ -22,7 +22,7 @@ func TestObserveStatus(t *testing.T) {
 		t.Fatalf("abs control path: %v", err)
 	}
 	server, err := runtimectl.Start(controlPath, 1234, nil, func() runtimectl.Status {
-		return runtimectl.Status{NodeName: "test", RegistryNodes: 3}
+		return runtimectl.Status{NodeName: "TEST", RegistryNodes: 3}
 	})
 	if err != nil {
 		t.Fatalf("start runtime control: %v", err)
@@ -35,7 +35,7 @@ func TestObserveStatus(t *testing.T) {
 	err = client.ObserveStatus(ctx, StatusObserverOptions{
 		Interval: 200 * time.Millisecond,
 		OnStatus: func(s runtimectl.Status) {
-			if s.NodeName == "test" {
+			if s.NodeName == "TEST" {
 				atomic.AddInt32(&seen, 1)
 				cancel()
 			}

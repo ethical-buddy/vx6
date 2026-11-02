@@ -448,7 +448,6 @@ func validateLookupValue(key, raw string, now time.Time) (validatedValue, error)
 func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, error) {
 	switch {
 	case strings.HasPrefix(key, "node/name/"):
-		want := strings.TrimPrefix(key, "node/name/")
 		var rec record.EndpointRecord
 		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode endpoint record: %w", err)
@@ -456,8 +455,8 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 		if err := record.VerifyEndpointRecord(rec, now); err != nil {
 			return validatedValue{}, err
 		}
-		if rec.NodeName != want {
-			return validatedValue{}, fmt.Errorf("endpoint record name %q does not match key %q", rec.NodeName, want)
+		if NodeNameKey(rec.NodeName) != key {
+			return validatedValue{}, fmt.Errorf("endpoint record name %q does not match name lookup key", rec.NodeName)
 		}
 		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
 		if err != nil {

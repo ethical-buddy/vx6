@@ -57,6 +57,9 @@ docs/
 
 The verified IKEv2/IPsec dataplane and the capture test are Linux-only. The
 Go SDK builds within this repository, but external SDK consumers still need the
-public API cleanup tracked by issue #58. The IPsec path uses strongSwan and
-Linux kernel XFRM; a production installer is tracked by issue #57. See
-[current status](status.md) before relying on platform or feature claims.
+public API cleanup tracked by issue #58. The current IPsec path uses strongSwan
+and Linux kernel XFRM. Issue #57 is future research/prototyping for a VX6-owned
+Linux IKE controller; it does not mean the current implementation has removed
+strongSwan. DHT plans use peer-local validation and maintenance, not a committee
+or global consensus authority. See [current status](status.md) before relying
+on platform or feature claims.

@@ -14,6 +14,8 @@ Typical flow:
 The protocol itself is not Linux-only, but the verified IPsec adapter and
 privileged service are Linux-only. The ordinary node is a user service; the
 IPsec manager is a separate root system service (`vx6-ipsecd`) and requires
-strongSwan, the Linux XFRM backend, and nftables. Their install/upgrade
-lifecycle is not yet packaged for end users; see [IPsec operations](ipsec.md)
+strongSwan, the Linux XFRM backend, and nftables. This is the current Linux
+prototype, not the desired final dependency model; #57 tracks research and a
+reviewed VX6-owned Linux IKE controller while retaining kernel XFRM. The
+install/upgrade lifecycle is not yet packaged for end users; see [IPsec operations](ipsec.md)
 and the [packaging plan](packaging-plan.md).

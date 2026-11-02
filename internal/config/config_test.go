@@ -23,7 +23,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("load default config: %v", err)
 	}
 	cfg.Node.Name = "alpha"
-	cfg.Peers["beta"] = PeerEntry{Address: "[2001:db8::2]:4242"}
+	cfg.Peers["BETA"] = PeerEntry{Address: "[2001:db8::2]:4242"}
 
 	if err := store.Save(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -33,11 +33,11 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if loaded.Node.Name != "alpha" {
+	if loaded.Node.Name != "ALPHA" {
 		t.Fatalf("unexpected node name %q", loaded.Node.Name)
 	}
-	if loaded.Peers["beta"].Address != "[2001:db8::2]:4242" {
-		t.Fatalf("unexpected peer address %q", loaded.Peers["beta"].Address)
+	if loaded.Peers["BETA"].Address != "[2001:db8::2]:4242" {
+		t.Fatalf("unexpected peer address %q", loaded.Peers["BETA"].Address)
 	}
 }
 
@@ -207,7 +207,10 @@ func TestAddPeerValidatesNameAndAddress(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 
-	if err := store.AddPeer("Alpha", "[2001:db8::2]:4242"); err == nil {
+	if err := store.AddPeer("Alpha", "[2001:db8::2]:4242"); err != nil {
+		t.Fatalf("expected case-insensitive peer name input to normalize, got %v", err)
+	}
+	if err := store.AddPeer("bad_name", "[2001:db8::2]:4242"); err == nil {
 		t.Fatal("expected invalid peer name to fail")
 	}
 	if err := store.AddPeer("beta", "127.0.0.1:4242"); err == nil {
@@ -320,5 +323,75 @@ func TestUpsertKnownPeerRecordRefreshesAddressByNodeIdentity(t *testing.T) {
 	}
 	if entry.PublicKey != rec.PublicKey || entry.IdentityIssuedAt != rec.IssuedAt || entry.IdentityExpiresAt != rec.ExpiresAt || entry.IdentitySignature != rec.Signature {
 		t.Fatal("known peer config did not preserve the signed public-key identity")
+	}
+}
+
+func TestPinnedPeerPersistsIdentityAcrossEndpointExpiry(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	rec, err := record.NewEndpointRecord(id, "alice", "[2001:db8::2]:4242", time.Second, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PinPeer(rec, now); err != nil {
+		t.Fatalf("pin peer: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Node.PinnedPeers) != 1 {
+		t.Fatalf("pinned peers after reload = %d, want 1", len(loaded.Node.PinnedPeers))
+	}
+	if got := loaded.Node.PinnedPeers[0]; got.NodeID != id.NodeID || got.NodeName != "ALICE" {
+		t.Fatalf("unexpected pin after reload: %+v", got)
+	}
+	if _, found, err := store.PinnedPeerByName("alice"); err != nil || !found {
+		t.Fatalf("pin lookup after record expiry should remain available: found=%v err=%v", found, err)
+	}
+
+	otherID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := record.NewEndpointRecord(otherID, "alice", "[2001:db8::3]:4242", time.Minute, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PinPeer(other, time.Now()); err == nil {
+		t.Fatal("expected a different key to be rejected for an already pinned name")
+	}
+	if err := store.UnpinPeer(id.NodeID); err != nil {
+		t.Fatalf("unpin peer: %v", err)
+	}
+	if _, found, err := store.PinnedPeerByName("ALICE"); err != nil || found {
+		t.Fatalf("pin should be gone after unpin: found=%v err=%v", found, err)
+	}
+}
+
+func TestLoadRejectsCorruptedPinnedIdentity(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Node.PinnedPeers = []PinnedPeer{{NodeID: "vx6_wrong", NodeName: "ALICE", PublicKey: "invalid"}}
+	if err := store.Save(cfg); err == nil {
+		t.Fatal("expected malformed pin to be rejected rather than silently dropped")
 	}
 }

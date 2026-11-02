@@ -2,8 +2,10 @@ package dht
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"math/big"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/vx6/vx6/internal/proto"
@@ -186,11 +188,27 @@ func (rt *RoutingTable) promoteReplacementLocked(bucketIdx int) {
 }
 
 func (rt *RoutingTable) distance(id1, id2 string) *big.Int {
-	h1 := sha256.Sum256([]byte(id1))
-	h2 := sha256.Sum256([]byte(id2))
-
-	i1 := new(big.Int).SetBytes(h1[:])
-	i2 := new(big.Int).SetBytes(h2[:])
+	i1 := new(big.Int).SetBytes(routingIDBytes(id1))
+	i2 := new(big.Int).SetBytes(routingIDBytes(id2))
 
 	return new(big.Int).Xor(i1, i2)
+}
+
+func routingIDBytes(value string) []byte {
+	var encoded string
+	switch {
+	case strings.HasPrefix(value, "vx6_"):
+		encoded = strings.TrimPrefix(value, "vx6_")
+	case strings.HasPrefix(value, "node/name/"):
+		encoded = strings.TrimPrefix(value, "node/name/")
+	case strings.HasPrefix(value, "node/id/"):
+		encoded = strings.TrimPrefix(value, "node/id/vx6_")
+	}
+	if len(encoded) == sha256.Size*2 {
+		if decoded, err := hex.DecodeString(encoded); err == nil {
+			return decoded
+		}
+	}
+	sum := sha256.Sum256([]byte(value))
+	return sum[:]
 }
