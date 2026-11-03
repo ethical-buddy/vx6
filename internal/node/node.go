@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +54,11 @@ const (
 	relayHandshakeDeadline    = 60 * time.Second
 	serviceProxyDeadline      = 30 * time.Second
 	idleSessionDeadline       = 5 * time.Minute
+	dhtRouteRefreshInterval   = 10 * time.Minute
+	dhtRouteRefreshJitter     = 2 * time.Minute
+	dhtRefreshFanout          = 4
+	dhtRefreshRoundLimit      = 2
+	dhtPeerStoreFlushInterval = time.Minute
 )
 
 type ServiceRefresher func() map[string]string
@@ -114,6 +121,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.recordState == nil {
 		cfg.recordState = newEndpointRecordState(cfg.ConfigPath)
 	}
+	if cfg.DHT != nil && cfg.DHT.RT != nil {
+		cfg.DHT.RT.SetSelfNameHash(dht.NodeNameHash(cfg.Name))
+	}
 	if cfg.Registry == nil {
 		return errors.New("registry cannot be nil")
 	}
@@ -123,6 +133,20 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
+	}
+	var peerStore *dht.PeerStore
+	if cfg.DHT != nil && cfg.DHT.RT != nil {
+		store, err := dht.OpenPeerStore(filepath.Join(cfg.DataDir, "dht-peers.db"))
+		if err != nil {
+			return err
+		}
+		peerStore = store
+		defer peerStore.Close()
+		cached, err := peerStore.LoadCandidates(time.Now(), 512)
+		if err != nil {
+			return err
+		}
+		cfg.DHT.RT.RestoreCandidates(cached, time.Now())
 	}
 	if cfg.ReceiveDir == "" {
 		cfg.ReceiveDir = defaultReceiveDir(cfg.DataDir)
@@ -322,6 +346,13 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		go func() {
 			defer wg.Done()
 			runPeerSyncTasks(ctx, log, cfg)
+		}()
+	}
+	if cfg.DHT != nil && cfg.DHT.RT != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runDHTMaintenance(ctx, log, cfg, peerStore)
 		}()
 	}
 	if cfg.AdvertiseAddr != "" {
@@ -810,6 +841,120 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 	}
 }
 
+func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dht.PeerStore) {
+	flush := func() {
+		if store == nil || cfg.DHT == nil || cfg.DHT.RT == nil {
+			return
+		}
+		now := time.Now()
+		cfg.DHT.RT.PruneOffline(now)
+		if err := store.SaveSnapshot(cfg.DHT.RT.SnapshotPeers(), now); err != nil {
+			fmt.Fprintf(log, "[DHT] Could not persist peer observations: %v\n", err)
+		}
+	}
+	refresh := func() {
+		if cfg.DHT == nil || cfg.DHT.RT == nil {
+			return
+		}
+		// Recheck only a small number of durable address hints. They remain
+		// candidates until signed identity, IKE and in-tunnel liveness succeed.
+		if rec, err := cfg.recordState.Current(cfg.Identity, cfg.Name, cfg.AdvertiseAddr); err == nil {
+			cached := cfg.DHT.RT.CandidateNodes(2)
+			for _, candidate := range cached {
+				if ctx.Err() != nil {
+					return
+				}
+				if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
+					continue
+				}
+				if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
+					continue
+				}
+				attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				result := syncTarget(attemptCtx, log, cfg, &rec, candidate.Addr)
+				cancel()
+				if result.err == nil && result.peer != nil {
+					cfg.DHT.RT.AddNode(dht.NodeInfoFromEndpointRecord(*result.peer))
+					_ = cfg.Registry.Import([]record.EndpointRecord{*result.peer}, nil)
+				} else if result.nodeID != "" {
+					cfg.DHT.RT.NoteFailure(result.nodeID)
+				}
+			}
+		}
+		selfKey := dht.NodeIDKey(cfg.NodeID)
+		for _, contact := range cfg.DHT.RT.ClosestNodes(cfg.NodeID, dhtRefreshFanout) {
+			if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
+				continue
+			}
+			if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
+				continue
+			}
+			attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			referrals, err := cfg.DHT.QueryNode(attemptCtx, contact.Addr, selfKey)
+			cancel()
+			if err != nil {
+				cfg.DHT.RT.NoteFailure(contact.ID)
+				continue
+			}
+			cfg.DHT.RT.RecordUse(contact.ID, time.Now(), 0)
+			for _, referral := range referrals {
+				if dht.VerifyNodeInfo(referral, time.Now()) == nil {
+					cfg.DHT.RT.AddCandidate(referral)
+				}
+			}
+		}
+		for _, target := range cfg.DHT.RT.RefreshTargets(time.Now(), dhtRefreshRoundLimit) {
+			contacts := cfg.DHT.RT.ClosestNodes(target.Key, dhtRefreshFanout)
+			if target.NameHash {
+				contacts = cfg.DHT.RT.ClosestNodesByNameHash(strings.TrimPrefix(target.Key, "node/name/"), dhtRefreshFanout)
+			}
+			for _, contact := range contacts {
+				if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
+					continue
+				}
+				if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
+					continue
+				}
+				attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				referrals, err := cfg.DHT.QueryNode(attemptCtx, contact.Addr, target.Key)
+				cancel()
+				if err != nil {
+					cfg.DHT.RT.NoteFailure(contact.ID)
+					continue
+				}
+				cfg.DHT.RT.RecordUse(contact.ID, time.Now(), 0)
+				for _, referral := range referrals {
+					if dht.VerifyNodeInfo(referral, time.Now()) == nil {
+						cfg.DHT.RT.AddCandidate(referral)
+					}
+				}
+			}
+		}
+		flush()
+	}
+
+	flushTicker := time.NewTicker(dhtPeerStoreFlushInterval)
+	defer flushTicker.Stop()
+	defer flush()
+	refreshTimer := time.NewTimer(jitteredDHTRefresh())
+	defer refreshTimer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-flushTicker.C:
+			flush()
+		case <-refreshTimer.C:
+			refresh()
+			refreshTimer.Reset(jitteredDHTRefresh())
+		}
+	}
+}
+
+func jitteredDHTRefresh() time.Duration {
+	return dhtRouteRefreshInterval - dhtRouteRefreshJitter + time.Duration(rand.Int63n(int64(2*dhtRouteRefreshJitter)+1))
+}
+
 func warnOnNodeNameConflict(ctx context.Context, log io.Writer, cfg Config) {
 	if cfg.DHT == nil || cfg.Name == "" {
 		return
@@ -1156,7 +1301,21 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.Endpoi
 		if len(pending) == 0 {
 			break
 		}
-
+		eligible := pending[:0]
+		for _, addr := range pending {
+			if cfg.DHT != nil && cfg.DHT.RT != nil {
+				peer, known := cfg.DHT.RT.NodeByAddress(addr)
+				if known && !cfg.DHT.RT.ProbeAllowed(peer.ID, time.Now()) {
+					synced[addr] = struct{}{}
+					continue
+				}
+			}
+			eligible = append(eligible, addr)
+		}
+		pending = eligible
+		if len(pending) == 0 {
+			continue
+		}
 		results := syncTargetBatch(ctx, log, cfg, rec, pending)
 		for _, result := range results {
 			synced[result.addr] = struct{}{}
@@ -1243,6 +1402,11 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.Endp
 	result := syncResult{addr: addr}
 	if addr == "" {
 		return result
+	}
+	if cfg.DHT != nil && cfg.DHT.RT != nil {
+		if candidate, ok := cfg.DHT.RT.NodeByAddress(addr); ok {
+			result.nodeID = candidate.ID
+		}
 	}
 	peer, known := endpointRecordByAddress(cfg, addr)
 	wantIdentity := !known

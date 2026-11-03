@@ -82,11 +82,11 @@ func (r DHTRequest) Validate() error {
 	}
 	switch r.Type {
 	case DHTTypeLookupName:
-		if r.Action != "find_value" || !isSHA256Hex(r.Target) {
+		if (r.Action != "find_value" && r.Action != "find_node") || !isSHA256Hex(r.Target) {
 			return fmt.Errorf("name lookup target must be a full SHA-256 digest")
 		}
 	case DHTTypeLookupKey:
-		if r.Action != "find_value" || !strings.HasPrefix(r.Target, "vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
+		if (r.Action != "find_value" && r.Action != "find_node") || !strings.HasPrefix(r.Target, "vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
 			return fmt.Errorf("identity lookup target must contain a full NodeID")
 		}
 	case DHTTypeBootstrap:

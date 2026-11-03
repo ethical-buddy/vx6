@@ -2538,6 +2538,7 @@ func discoveryCandidates(cfg config.File) []string {
 func newDHTClient(cfg config.File) (*dht.Server, error) {
 	_, _ = dht.ConfigureASNResolver(mustDefaultConfigPath())
 	client := dht.NewServer("cli-observer")
+	client.RT.SetSelfNameHash(dht.NodeNameHash(cfg.Node.Name))
 	var registryNodes []record.EndpointRecord
 	registry, err := loadLocalRegistry(cfg.Node.DataDir)
 	if err != nil {

@@ -346,7 +346,11 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 
 	switch req.Action {
 	case "find_node":
-		resp.Nodes = s.RT.ClosestNodes(req.Target, K)
+		if req.Type == proto.DHTTypeLookupName {
+			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, K)
+		} else {
+			resp.Nodes = s.RT.ClosestNodes(strings.TrimPrefix(req.Target, "node/id/"), K)
+		}
 	case "find_value":
 		storageKey := req.Target
 		switch req.Type {
@@ -396,7 +400,7 @@ func (s *Server) StoreLocal(key, value string) {
 // RecursiveFindNode searches the network for a specific NodeID.
 func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]proto.NodeInfo, error) {
 	visited := make(map[string]bool)
-	candidates := s.RT.ClosestNodes(targetID, K)
+	candidates := s.closestForTarget(targetID, K)
 
 	for {
 		foundNew := false
@@ -411,6 +415,9 @@ func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]prot
 					continue
 				}
 				s.RT.AddCandidate(node)
+			}
+			if !s.RT.ProbeAllowed(node.ID, time.Now()) {
+				continue
 			}
 
 			newNodes, err := s.QueryNode(ctx, node.Addr, targetID)
@@ -436,7 +443,7 @@ func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]prot
 		}
 	}
 
-	return s.RT.ClosestNodes(targetID, K), nil
+	return s.closestForTarget(targetID, K), nil
 }
 
 // Store saves a value on a bounded set of the closest nodes to the target key.
@@ -897,7 +904,8 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	req := proto.DHTRequest{Type: proto.DHTTypeFor("find_node", targetID), Action: "find_node", Target: targetID}
+	typ, target := nodeLookupTarget(targetID)
+	req := proto.DHTRequest{Type: typ, Action: "find_node", Target: target}
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
@@ -926,6 +934,19 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 		return nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
 	}
 	return resp.Nodes, nil
+}
+
+func nodeLookupTarget(target string) (proto.DHTRequestType, string) {
+	switch {
+	case strings.HasPrefix(target, "node/name/"):
+		return proto.DHTTypeLookupName, strings.TrimPrefix(target, "node/name/")
+	case strings.HasPrefix(target, "node/id/"):
+		return proto.DHTTypeLookupKey, strings.TrimPrefix(target, "node/id/")
+	case strings.HasPrefix(target, "vx6_"):
+		return proto.DHTTypeLookupKey, target
+	default:
+		return proto.DHTTypeFor("find_node", target), target
+	}
 }
 
 func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []proto.NodeInfo, error) {
@@ -1074,9 +1095,10 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 
 	out := make([]proto.NodeInfo, 0, limit)
 	remaining := make([]proto.NodeInfo, 0, len(nodes))
-	seenASNs := map[string]struct{}{}
+	seenASNs := map[string]int{}
 	seenProviders := map[string]struct{}{}
 	seenNetworks := map[string]struct{}{}
+	seenPrefixes := map[string]int{}
 	selected := map[string]struct{}{}
 
 	appendNode := func(node proto.NodeInfo) bool {
@@ -1086,7 +1108,7 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 		selected[node.ID] = struct{}{}
 		out = append(out, node)
 		if asn := (sourceObservation{addr: node.Addr}).asnKey(); asn != "" {
-			seenASNs[asn] = struct{}{}
+			seenASNs[asn]++
 		}
 		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
 			seenProviders[provider] = struct{}{}
@@ -1094,16 +1116,25 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 		if network := (sourceObservation{addr: node.Addr}).networkKey(); network != "" {
 			seenNetworks[network] = struct{}{}
 		}
+		if prefix := ipv6Prefix48(node.Addr); prefix != "" {
+			seenPrefixes[prefix]++
+		}
 		return len(out) == limit
 	}
 
 	for _, node := range nodes {
 		asn := (sourceObservation{addr: node.Addr}).asnKey()
+		prefix := ipv6Prefix48(node.Addr)
+		if (prefix != "" && seenPrefixes[prefix] >= maxPrefixPeersPerBucket) ||
+			(asn != "" && seenASNs[asn] >= maxASNPeersPerBucket) {
+			remaining = append(remaining, node)
+			continue
+		}
 		if asn == "" {
 			remaining = append(remaining, node)
 			continue
 		}
-		if _, ok := seenASNs[asn]; ok {
+		if seenASNs[asn] > 0 {
 			remaining = append(remaining, node)
 			continue
 		}
@@ -1115,6 +1146,11 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 	secondPass := remaining
 	remaining = remaining[:0]
 	for _, node := range secondPass {
+		asn := (sourceObservation{addr: node.Addr}).asnKey()
+		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
+			remaining = append(remaining, node)
+			continue
+		}
 		provider := (sourceObservation{addr: node.Addr}).providerKey()
 		if provider == "" {
 			remaining = append(remaining, node)
@@ -1132,6 +1168,11 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 	thirdPass := remaining
 	remaining = remaining[:0]
 	for _, node := range thirdPass {
+		asn := (sourceObservation{addr: node.Addr}).asnKey()
+		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
+			remaining = append(remaining, node)
+			continue
+		}
 		network := (sourceObservation{addr: node.Addr}).networkKey()
 		if network == "" {
 			remaining = append(remaining, node)
@@ -1147,11 +1188,34 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 	}
 
 	for _, node := range remaining {
+		asn := (sourceObservation{addr: node.Addr}).asnKey()
+		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
+			continue
+		}
 		if appendNode(node) {
 			return out
 		}
 	}
+	if len(out) < limit {
+		for _, node := range nodes {
+			if appendNode(node) {
+				break
+			}
+		}
+	}
 	return out
+}
+
+func ipv6Prefix48(address string) string {
+	host := address
+	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
+		host = parsedHost
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || ip.To4() != nil {
+		return ""
+	}
+	return ip.Mask(net.CIDRMask(48, 128)).String()
 }
 
 func storedVersionFromValidated(value validatedValue) StoredVersion {
