@@ -21,7 +21,7 @@
 
 param(
   [string]$Repo = "dailker/vx6",
-  [string]$Branch = "claude/compassionate-babbage-qjp4bm",
+  [string]$Branch = "main",
   [int]$Repeat = 5,
   [int]$Duration = 10,
   [switch]$InstallDocker

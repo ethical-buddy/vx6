@@ -5,7 +5,7 @@
 # One-shot IPsec validation on any Docker host, including macOS (Docker
 # Desktop / colima / OrbStack on Apple Silicon). Run as your normal user:
 #
-#   curl -fsSLO https://raw.githubusercontent.com/dailker/vx6/claude/compassionate-babbage-qjp4bm/scripts/bench/docker-host-run.sh
+#   curl -fsSLO https://raw.githubusercontent.com/dailker/vx6/main/scripts/bench/docker-host-run.sh
 #   bash docker-host-run.sh
 #
 # It does, in a throw-away directory:
@@ -24,7 +24,7 @@
 set -uo pipefail
 
 REPO="${VX6_REPO:-https://github.com/dailker/vx6.git}"
-BRANCH="${VX6_BRANCH:-claude/compassionate-babbage-qjp4bm}"
+BRANCH="${VX6_BRANCH:-main}"
 REPEAT="${REPEAT:-5}"
 DURATION="${DURATION:-10}"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
