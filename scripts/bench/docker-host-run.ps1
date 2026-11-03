@@ -23,7 +23,8 @@ param(
   [string]$Repo = "dailker/vx6",
   [string]$Branch = "claude/compassionate-babbage-qjp4bm",
   [int]$Repeat = 5,
-  [int]$Duration = 10
+  [int]$Duration = 10,
+  [switch]$InstallDocker
 )
 
 $ErrorActionPreference = "Continue"
@@ -44,6 +45,45 @@ Start-Transcript -Path (Join-Path $Results "transcript.txt") | Out-Null
 
 function Say($msg) { Write-Host "`n>> $msg" -ForegroundColor Magenta }
 function Note($msg) { Write-Host "   $msg" }
+
+# ---------------------------------------------------------------- find / start Docker
+function Find-Docker {
+  if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
+  foreach ($dir in @("$env:ProgramFiles\Docker\Docker\resources\bin", "$env:LOCALAPPDATA\Programs\Docker\Docker\resources\bin")) {
+    if (Test-Path (Join-Path $dir "docker.exe")) { $env:Path = "$dir;$env:Path"; return $true }
+  }
+  return $false
+}
+$script:HaveDocker = Find-Docker
+if (-not $script:HaveDocker -and $InstallDocker) {
+  Say "Installing Docker Desktop with winget (needs admin; a restart may be required)"
+  winget install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements
+  $script:HaveDocker = Find-Docker
+}
+if (-not $script:HaveDocker) {
+  try { Stop-Transcript | Out-Null } catch {}
+  Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+  Write-Host ""
+  Write-Host "Docker Desktop is not installed on this PC." -ForegroundColor Yellow
+  Write-Host "  1. Install it: https://docs.docker.com/desktop/setup/install/windows-install/"
+  Write-Host "     or run this script again with -InstallDocker (uses winget, needs admin)."
+  Write-Host "  2. Use the WSL 2 backend (the default), reboot if the installer asks, start Docker Desktop once."
+  Write-Host "  3. Run: powershell -ExecutionPolicy Bypass -File .\docker-host-run.ps1"
+  exit 2
+}
+docker info 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  $dd = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+  if (Test-Path $dd) {
+    Say "Starting Docker Desktop (waiting up to 3 minutes)"
+    Start-Process $dd | Out-Null
+    for ($i = 0; $i -lt 90; $i++) {
+      Start-Sleep -Seconds 2
+      docker info 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { break }
+    }
+  }
+}
 
 $preImages = @(docker images -q 2>$null | Sort-Object -Unique)
 
