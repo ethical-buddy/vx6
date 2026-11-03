@@ -112,6 +112,14 @@ run_priv '
   echo "ipv6=$ok6 xfrm_esp_gcm=$okx" | tee /results/kernel-capabilities.txt
 '
 caps=$(cat "$RESULTS/kernel-capabilities.txt" 2>/dev/null)
+if [ -z "$caps" ]; then
+  # An empty file means the container could not write to the shared results
+  # folder (e.g. Colima without this path mounted). Falling back would test
+  # the wrong configuration, so stop instead.
+  echo "kernel check produced no output: $RESULTS is not shared with the Docker VM."
+  echo "With Colima, share it (colima start --mount \$HOME:w) or set TMPDIR to a shared folder."
+  exit 1
+fi
 if echo "$caps" | grep -q "ipv6=yes xfrm_esp_gcm=yes"; then
   FAMILY=6; DATAPLANE=xfrm; note "using the target configuration: IPv6 + kernel XFRM"
 else

@@ -13,7 +13,7 @@ Today a VX6 Linux node needs, besides the `vx6` binary:
 | Plugin directory | `/usr/lib/ipsec` = **4.2 MB** |
 | A second long-running daemon | `charon`: **~17.7 MB RSS idle, ~18.5 MB with one peer** (see #51 numbers) |
 | Provisioning work | VICI socket permissions, `strongswan.conf`, AppArmor profile, systemd ordering between `charon` and `vx6-ipsecd`, version skew across distros (Ed25519 needs ≥ 5.5.2; Curve25519 plugin may be split out) |
-| Per-check cost | every `EnsurePeer`/`AcceptPeer` forks `swanctl --list-sas`: **~24 ms median per call** |
+| Per-check cost | every `EnsurePeer`/`AcceptPeer` forks `swanctl --list-sas`: **5.7 ms median on IPv6/XFRM (Mac mini VM), 24 ms on the sandbox** |
 
 For comparison, `vx6` is 12.4 MB (8.4 MB stripped) and `vx6-ipsecd` is 6.6 MB,
 both static Go binaries with no shared-library dependencies.
@@ -152,10 +152,10 @@ Measured strongSwan costs (from #51) and what a native controller might change:
 
 | Metric | strongSwan baseline | Native expectation | Why |
 |---|---|---|---|
-| ESP throughput / per-packet latency | kernel-bound | **same** | Same XFRM dataplane. Do not claim gains. |
-| IKE_SA + CHILD_SA setup (LAN) | 54 ms median (lab host, two children) | lower bound ≈ 2 RTT + crypto. Go crypto for one side costs **≈ 0.2 ms** (bench below) | Most of today's time is daemon/IPC/exec overhead, not crypto. Must be measured, not assumed. |
-| SA state check per dial/accept | ~24 ms (`swanctl` fork+exec+VICI) | µs (in-process map lookup + optional `GETSA`) | Biggest practical win. Option A already gets most of it. |
-| Extra daemon RSS | 17.8–20.4 MB | a few MB inside `vx6-ipsecd` | One process fewer. |
+| ESP throughput / per-packet latency | 3.6 Gbit/s per stream, +3 µs p50 RR (XFRM run) | **same** | Same XFRM dataplane. Do not claim gains. |
+| IKE_SA + CHILD_SA setup (LAN) | 16.5 ms median on IPv6/XFRM (54 ms sandbox), two children | lower bound ≈ 2 RTT + crypto. Go crypto for one side costs **≈ 0.2 ms** (bench below) | Most of today's time is daemon/IPC/exec overhead, not crypto. Must be measured, not assumed. |
+| SA state check per dial/accept | 5.7 ms (XFRM run) (`swanctl` fork+exec+VICI) | µs (in-process map lookup + optional `GETSA`) | Biggest practical win. Option A already gets most of it. |
+| Extra daemon RSS | 16.1–17.2 MB (XFRM run) | a few MB inside `vx6-ipsecd` | One process fewer. |
 | Install footprint | ≈ 3.6 MB of packages plus shared libs | +~1–2 MB in `vx6-ipsecd` | No third-party runtime dependency. |
 | Operational complexity | two daemons, VICI permissions | one daemon | Fewer moving parts. |
 | Security maturity | 20 years of review | **new code, unreviewed** | The main cost. It is why the gates in §9 exist. |

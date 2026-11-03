@@ -1,0 +1,8 @@
+pcap=/Users/<user>/.vx6-tmp/vx6-docker-run.FHnKOM/results/e2e/positive-control/wire.pcap
+ESP packets:       54
+IKE UDP packets:        8
+Clear VX6-port packets:        0
+Clear peer-to-peer ICMPv6 packets:       16
+Clear echo packets after IKE began: 4
+Peer SA packet counters before/after post-tunnel ping (in,out): 12/15 -> 12/15
+Service sentinel in capture: no

@@ -1,0 +1,7 @@
+host_os=Darwin arm64
+docker_server=29.5.2 linux/arm64
+docker_kernel=6.8.0-117-generic
+docker_cpus=4 docker_mem=6198624256
+go=go version go1.27.3 darwin/arm64
+branch=claude/compassionate-babbage-qjp4bm
+faffa51 bench: detect, start or install Docker Desktop in the Windows runner

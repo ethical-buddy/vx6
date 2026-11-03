@@ -22,7 +22,9 @@ peer_b="vx6-e2e-peer-b-$run_id"
 impostor="vx6-e2e-impostor-$run_id"
 sniffer="vx6-e2e-sniffer-$run_id"
 results=${VX6_E2E_RESULTS_DIR:-"/tmp/vx6-ipsec-e2e-$run_id"}
-work=$(mktemp -d)
+# macOS mktemp ignores TMPDIR without a template, and Colima only shares
+# selected host folders with its VM, so honour TMPDIR explicitly.
+work=$(mktemp -d "${TMPDIR:-/tmp}/vx6-e2e.XXXXXX")
 mkdir -p "$results"
 capture_pid=
 

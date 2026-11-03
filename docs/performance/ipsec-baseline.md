@@ -40,6 +40,76 @@ What the harness does (`scripts/bench/ipsec-netns-lab.sh`, `ipsec-baseline.sh`,
   Raw outputs are kept: iperf3 JSON, rrbench JSON, timings, pcap summary,
   environment.
 
+## Results: 2026-11-03, IPv6 + kernel XFRM (target configuration)
+
+Run with `scripts/bench/docker-host-run.sh` on a Mac mini (Apple Silicon)
+in a Colima VM: Ubuntu kernel 6.8.0-117-generic, linux/arm64, 4 vCPU, 6 GB,
+Docker 29.5.2, strongSwan from Debian bookworm. `REPEAT=5 DURATION=10`.
+The kernel check passed (`ipv6=yes xfrm_esp_gcm=yes`), so this is
+IPv6-only and kernel XFRM with no NAT-T, as in production. The peers are two
+network namespaces on one veth, so link speed is memory speed. Raw data:
+[`results/2026-11-03-mac-mini-colima-xfrm/`](results/2026-11-03-mac-mini-colima-xfrm/).
+
+| Metric (split selectors) | median | p95 | min | max | n |
+|---|---|---|---|---|---|
+| IKE_SA + both CHILD_SAs established | **16.5 ms** | 21 | 14 | 26 | 20 |
+| CHILD_SA rekey | **13 ms** | 15 | 12 | 15 | 5 |
+| IKE_SA rekey | **12 ms** | 14 | 11 | 14 | 5 |
+| teardown → re-establish → first answered request | **22 ms** | 26 | 19 | 26 | 5 |
+| `swanctl --list-sas` (per `EnsurePeer` / every `AcceptPeer`) | **5.7 ms** | 7.6 | 5.0 | 16.2 | 200 |
+| TCP throughput, 1 stream, no ESP | 137 069 Mbit/s | | | | 5 |
+| TCP throughput, 1 stream, **ESP (XFRM, AES-GCM-128)** | **3 636 Mbit/s** | 7 955 | 3 268 | 7 955 | 5 |
+| charon RSS idle / 1 peer / after load | 16.1 / 17.2 / 17.2 MB | | | | |
+| charon CPU during ESP iperf | 0 % (all ESP work is in the kernel) | | | | |
+
+| Request/response (64 B unless noted) | no ESP p50 / p99 µs | ESP p50 / p99 µs | ESP req/s |
+|---|---|---|---|
+| 1 connection | 21.0 / 34.2 | **24.1 / 36.8** | 40 k |
+| 64 concurrent connections | 71.3 / 516 | **100 / 966** | 460 k |
+| new TCP connection per request, 16 workers | 211 / 1 558 | **259 / 1 541** | 48.7 k |
+| 64 KiB request/response | 32.7 / 74.5 | **279 / 322** | 3.6 k |
+
+All runs: 0 errors. Packet overhead from the capture (100 B UDP payload): clear
+frame 162 B, ESP frame 238 B, so **+76 B per packet** (outer IPv6 40 + ESP 8 +
+IV 8 + pad/trailer 4 + ICV 16). That matches the 74–77 B estimate.
+
+Reading it:
+
+* Kernel ESP adds only ~3 µs at p50 to small request/response, while
+  single-stream bulk throughput is bounded by one core doing AES-GCM per SA
+  direction (≈3.6 Gbit/s on this VM). Use `iperf3 -P` / several SAs if that matters (#54).
+* Control-plane costs drop ~3× from the sandbox run. The ratio still stands:
+  setup is 16.5 ms against a ≈0.19 ms crypto budget (see below), and each
+  `swanctl` check costs 5.7 ms, which caps a serial accept loop at roughly
+  175 connections/s.
+
+### Negative control: selectors from 4e26ace, on real XFRM
+
+With `SELECTORS=pinned` (both ends pinned to the VX6 port), port-4242 iperf ran
+at **154.0 Gbit/s**, the same as the no-ESP baseline of 155.1 Gbit/s, and the 64 B
+request/response p50 was 5.4 µs. The ephemeral-port traffic matched **no IPsec policy
+and travelled in clear**. That confirms the finding below on the production
+dataplane. In this lab the clear packets got through because the lab does not
+install VX6's `inet vx6` nftables table. In a VX6 deployment that table drops
+clear TCP/UDP to the VX6 port in both directions, so VX6 fails closed and the
+connection fails. Note: that firewall is then the *only* control stopping the
+leak.
+
+### Routed e2e capture suite (`tests/ipsec-e2e/run.sh`) on the same VM
+
+| Case | Result |
+|---|---|
+| Wrong-key impostor at the expected address | **pass**: initiator logs AUTH_FAILED; the guarded dial returned before opening the application socket |
+| Unauthenticated clear TCP probe to the VX6 port | **pass**: blocked |
+| Positive control: VX6 service traffic | `-out` (initiator) and `-in` (responder) children pair on the same SPIs; **54 ESP packets, 0 clear VX6-port packets, service sentinel absent from the capture** |
+| Positive control: post-tunnel ICMPv6 ping inside the SA | **fail**: 4 clear echo packets, SA counters unchanged |
+
+The ping assertion predates 4e26ace. It held when the selectors were
+host-wide `/128` (Oct 29 run). Since 4e26ace the selectors cover only TCP/UDP,
+so ICMPv6 is outside the SA by design. This fails with or without the split-selector fix.
+Whether ICMPv6 between peers should be protected is an open design decision.
+See "Other observations" below: ICMP errors for VX6 ports also leave in clear.
+
 ## Results: 2026-11-03, sandbox run (**not** the target configuration)
 
 > **Read this first.** The only machine available for this run was a
@@ -56,7 +126,7 @@ What the harness does (`scripts/bench/ipsec-netns-lab.sh`, `ipsec-baseline.sh`,
 > * **Dataplane numbers** (throughput, request latency, CPU) measure
 >   libipsec, **not** kernel XFRM. Do not quote them as VX6 ESP performance.
 >   They do show what *userspace* ESP costs, which is relevant to #54.
-> * The IPv6 + XFRM run on real hardware is still **pending**. It is one command (above).
+> * The IPv6 + XFRM results are in the section above.
 
 Environment: Intel Xeon @ 2.10 GHz, 4 vCPU, 16 GB, Linux 6.18.44,
 strongSwan 5.9.13 (Ubuntu 24.04 packages), iperf 3.16, Go 1.24.7.
@@ -166,8 +236,8 @@ Negative control (`SELECTORS=pinned`, raw data in
 Under kernel XFRM, the unmatched SYN leaves without IPsec and the `inet vx6`
 nftables output rule (`tcp dport 4242 drop` unless `rt ipsec exists`) drops
 it. VX6 still fails *closed* (no cleartext leak), but peers cannot connect.
-The Oct 29 e2e capture run predates this commit. **Re-run
-`tests/ipsec-e2e/run.sh` on an IPv6 Docker host to confirm on XFRM.**
+The Oct 29 e2e capture run predates this commit. The XFRM negative control above
+confirms the behaviour on the production dataplane.
 
 Fix in this branch (`internal/ipsec/manager.go`): two CHILD_SAs per peer,
 each pinning only the listener side's port:
@@ -186,18 +256,19 @@ port-4242 packets.
 ## Other observations to follow up (#59)
 
 * The selectors cover only TCP and UDP. When a datagram that arrived through
-  ESP hits a closed UDP port, the ICMP "port unreachable" reply went back
-  **in clear** in the lab, quoting the start of the decrypted datagram. Verify
-  on XFRM, and consider adding ICMPv6 for the peer pair to the SA, or
+  ESP hits a closed UDP port, the ICMPv6 "destination unreachable" reply goes
+  back **in clear**, quoting the start of the decrypted datagram. Seen in the
+  libipsec lab, and **confirmed on kernel XFRM** in the Mac/Colima overhead
+  capture (`results/2026-11-03-mac-mini-colima-xfrm/overhead.txt`). Consider adding ICMPv6 for the peer pair to the SA, or
   rate-limiting/dropping ICMP errors for VX6 ports in `inet vx6`.
 * `AcceptPeer` has no SA-state cache, and `EnsurePeer` caches for 3 s. Either
   way, a revoked or deleted SA is seen within one check. Keep that property when
   replacing the polling with events.
 
-## Pending for the real-host run
+## Still pending
 
-- [ ] IPv6 + kernel XFRM run (`sudo scripts/bench/ipsec-baseline.sh`) on two
-      hosts or namespaces of a normal distro kernel; record NIC, AES-NI/VAES
-- [ ] `tests/ipsec-e2e/run.sh` with the selector fix
+- [x] IPv6 + kernel XFRM run (Mac mini / Colima, above)
+- [x] `tests/ipsec-e2e/run.sh` with the selector fix (service traffic: pass; ICMPv6 ping: fails by design since 4e26ace; decision needed)
+- [ ] Bare-metal Linux host with a real NIC (the VM numbers are veth/memory bound)
 - [ ] Parallel streams (`iperf3 -P 4/8`) to see the per-SA single-core limit
 - [ ] Packet loss/recovery with `tc qdisc add dev va root netem loss 1%`
