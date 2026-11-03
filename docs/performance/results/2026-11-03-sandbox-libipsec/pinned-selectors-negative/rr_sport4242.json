@@ -1,0 +1,1 @@
+{"requests":20,"errors":0,"concurrency":1,"size":64,"new_conn_per_request":false,"elapsed_sec":0.006584779,"requests_per_sec":3037.3077061508066,"p50_us":251.221,"p95_us":387.883,"p99_us":387.883,"max_us":1417.917,"mean_us":326.11605}

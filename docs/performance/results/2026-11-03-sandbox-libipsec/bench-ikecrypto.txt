@@ -1,0 +1,36 @@
+goos: linux
+goarch: amd64
+pkg: github.com/vx6/vx6/internal/ipsec
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkIKEX25519KeyExchange-4            	   10000	    105870 ns/op	     256 B/op	       6 allocs/op
+BenchmarkIKEX25519KeyExchange-4            	   12711	     97264 ns/op	     256 B/op	       6 allocs/op
+BenchmarkIKEX25519KeyExchange-4            	   13461	    101800 ns/op	     256 B/op	       6 allocs/op
+BenchmarkIKEX25519KeyExchange-4            	   13444	     88152 ns/op	     256 B/op	       6 allocs/op
+BenchmarkIKEX25519KeyExchange-4            	   13448	     92923 ns/op	     256 B/op	       6 allocs/op
+BenchmarkIKEEd25519SignAuth-4              	   51459	     25882 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519SignAuth-4              	   48928	     25716 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519SignAuth-4              	   48358	     27837 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519SignAuth-4              	   56331	     22154 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519SignAuth-4              	   52452	     24960 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519VerifyAuth-4            	   23665	     59164 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519VerifyAuth-4            	   24091	     55242 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519VerifyAuth-4            	   22634	     54418 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519VerifyAuth-4            	   23857	     49700 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEEd25519VerifyAuth-4            	   22444	     51067 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIKEKeySchedule-4                  	  178645	      6359 ns/op	    4711 B/op	      62 allocs/op
+BenchmarkIKEKeySchedule-4                  	  191536	      5731 ns/op	    4711 B/op	      62 allocs/op
+BenchmarkIKEKeySchedule-4                  	  202058	      5839 ns/op	    4711 B/op	      62 allocs/op
+BenchmarkIKEKeySchedule-4                  	  197578	      6691 ns/op	    4711 B/op	      62 allocs/op
+BenchmarkIKEKeySchedule-4                  	  207217	      6226 ns/op	    4711 B/op	      62 allocs/op
+BenchmarkIKEMessageAESGCM128-4             	 3825312	       304.0 ns/op	1315.65 MB/s	     416 B/op	       1 allocs/op
+BenchmarkIKEMessageAESGCM128-4             	 3886468	       299.5 ns/op	1335.39 MB/s	     416 B/op	       1 allocs/op
+BenchmarkIKEMessageAESGCM128-4             	 4041900	       295.4 ns/op	1354.15 MB/s	     416 B/op	       1 allocs/op
+BenchmarkIKEMessageAESGCM128-4             	 3697107	       297.6 ns/op	1344.14 MB/s	     416 B/op	       1 allocs/op
+BenchmarkIKEMessageAESGCM128-4             	 3786117	       332.2 ns/op	1204.06 MB/s	     416 B/op	       1 allocs/op
+BenchmarkIKEFullHandshakeCryptoOneSide-4   	    5838	    203060 ns/op	    5639 B/op	      68 allocs/op
+BenchmarkIKEFullHandshakeCryptoOneSide-4   	    6816	    188423 ns/op	    5639 B/op	      68 allocs/op
+BenchmarkIKEFullHandshakeCryptoOneSide-4   	    6854	    173709 ns/op	    5639 B/op	      68 allocs/op
+BenchmarkIKEFullHandshakeCryptoOneSide-4   	    7011	    192505 ns/op	    5639 B/op	      68 allocs/op
+BenchmarkIKEFullHandshakeCryptoOneSide-4   	    7432	    182019 ns/op	    5639 B/op	      68 allocs/op
+PASS
+ok  	github.com/vx6/vx6/internal/ipsec	50.620s

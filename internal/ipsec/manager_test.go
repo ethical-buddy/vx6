@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,7 @@ func TestPreparePeerWritesPinnedIPv6TunnelConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "local_ts = 2001:db8::1/128[tcp/4242], 2001:db8::1/128[udp/4242]", "remote_ts = 2001:db8::2/128[tcp/4242], 2001:db8::2/128[udp/4242]", "start_action = trap", "esp_proposals = aes128gcm16"} {
+	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "-out {", "-in {", "local_ts = 2001:db8::1/128[tcp], 2001:db8::1/128[udp]", "remote_ts = 2001:db8::2/128[tcp/4242], 2001:db8::2/128[udp/4242]", "local_ts = 2001:db8::1/128[tcp/4242], 2001:db8::1/128[udp/4242]", "remote_ts = 2001:db8::2/128[tcp], 2001:db8::2/128[udp]", "start_action = trap", "esp_proposals = aes128gcm16"} {
 		if !strings.Contains(string(config), want) {
 			t.Errorf("generated connection config lacks %q", want)
 		}
@@ -202,7 +203,7 @@ func TestEnsurePeerAcceptsOnlyInstalledChildSA(t *testing.T) {
 	manager, err := newManager(t.TempDir(), "[2001:db8::1]:4242", local, func(_ context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))
 		if len(args) > 0 && args[0] == "--list-sas" {
-			return []byte(connectionName(remote.NodeID) + ": #1, ESTABLISHED, IKEv2\n  " + connectionName(remote.NodeID) + ": #1, INSTALLED, TUNNEL\n"), nil
+			return []byte(connectionName(remote.NodeID) + ": #1, ESTABLISHED, IKEv2\n  " + connectionName(remote.NodeID) + "-out: #1, INSTALLED, TUNNEL\n"), nil
 		}
 		return nil, nil
 	})
@@ -240,7 +241,7 @@ func TestAcceptPeerRequiresCurrentlyInstalledSA(t *testing.T) {
 	manager, err := newManager(t.TempDir(), "[2001:db8::1]:4242", local, func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "--list-sas" && installed {
 			name := connectionName(remote.NodeID)
-			return []byte(name + ": #1, INSTALLED, TUNNEL\n"), nil
+			return []byte(name + "-in: #1, INSTALLED, TUNNEL\n"), nil
 		}
 		return nil, nil
 	})
@@ -284,7 +285,7 @@ func TestRevokePeerPersistsBlocksAndTerminatesPeer(t *testing.T) {
 		}
 		if len(args) > 0 && args[0] == "--list-sas" {
 			connection := connectionName(remote.NodeID)
-			return []byte(connection + ": #1, ESTABLISHED, IKEv2\n  " + connection + ": #1, INSTALLED, TUNNEL\n"), nil
+			return []byte(connection + ": #1, ESTABLISHED, IKEv2\n  " + connection + "-out: #1, INSTALLED, TUNNEL\n  " + connection + "-in: #2, INSTALLED, TUNNEL\n"), nil
 		}
 		return nil, nil
 	})
@@ -307,10 +308,10 @@ func TestRevokePeerPersistsBlocksAndTerminatesPeer(t *testing.T) {
 	if manager.AcceptPeer(context.Background(), "[2001:db8::2]:50000") {
 		t.Fatal("accepted an installed peer after local revocation")
 	}
-	if len(calls) != 5 || !strings.Contains(calls[3], "--terminate") || !strings.Contains(calls[4], "--uninstall") {
+	if len(calls) != 6 || !strings.Contains(calls[3], "--terminate") || !strings.Contains(calls[4], "--uninstall") || !strings.HasSuffix(calls[4], "-out") || !strings.HasSuffix(calls[5], "-in") {
 		t.Fatalf("unexpected revoke sequence: %v", calls)
 	}
-	if len(events) != 6 || events[2] != "--list-sas" || events[3] != "--terminate" || events[4] != "firewall" || events[5] != "--uninstall" {
+	if len(events) != 7 || events[2] != "--list-sas" || events[3] != "--terminate" || events[4] != "firewall" || events[5] != "--uninstall" || events[6] != "--uninstall" {
 		t.Fatalf("unexpected revocation enforcement order: %v", events)
 	}
 	if err := manager.PreparePeer(context.Background(), peer); err == nil || !strings.Contains(err.Error(), "revoked") {
@@ -354,7 +355,7 @@ func TestReplacementIdentityRequiresNewNodeIDAndExplicitEnrollment(t *testing.T)
 	manager, err := newManager(t.TempDir(), "[2001:db8::1]:4242", local, func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "--list-sas" {
 			connection := connectionName(newIdentity.NodeID)
-			return []byte(connection + ": #1, ESTABLISHED, IKEv2\n  " + connection + ": #1, INSTALLED, TUNNEL\n"), nil
+			return []byte(connection + ": #1, ESTABLISHED, IKEv2\n  " + connection + "-out: #1, INSTALLED, TUNNEL\n  " + connection + "-in: #2, INSTALLED, TUNNEL\n"), nil
 		}
 		return nil, nil
 	})
@@ -380,12 +381,99 @@ func TestReplacementIdentityRequiresNewNodeIDAndExplicitEnrollment(t *testing.T)
 }
 
 func TestChildSAInstalledRequiresExpectedConnectionAndState(t *testing.T) {
-	if !childSAInstalled("vx6-a: #1, ESTABLISHED, IKEv2\n  vx6-a: #1, INSTALLED, TUNNEL", "vx6-a") {
+	output := "vx6-a: #1, ESTABLISHED, IKEv2\n  vx6-a-out: #1, reqid 1, INSTALLED, TUNNEL"
+	if !childSAInstalled(output, "vx6-a-out") {
 		t.Fatal("failed to recognize installed CHILD_SA")
 	}
-	for _, output := range []string{"vx6-a: #1, ESTABLISHED, IKEv2", "vx6-b: #1, INSTALLED, TUNNEL"} {
-		if childSAInstalled(output, "vx6-a") {
-			t.Fatalf("accepted non-installed or wrong peer SA: %q", output)
+	for _, tc := range []struct{ output, child string }{
+		{"vx6-a: #1, ESTABLISHED, IKEv2", "vx6-a-out"},
+		{"vx6-b-out: #1, INSTALLED, TUNNEL", "vx6-a-out"},
+		{output, "vx6-a-in"},                                 // other direction only
+		{"  vx6-a-outx: #1, INSTALLED, TUNNEL", "vx6-a-out"}, // prefix only
+	} {
+		if childSAInstalled(tc.output, tc.child) {
+			t.Fatalf("accepted non-installed or wrong SA %q for %q", tc.output, tc.child)
 		}
 	}
+}
+
+// A VX6 service connection always has an ephemeral port on the dialing side.
+// Every (dialer, listener) direction must be covered by exactly the child the
+// manager checks for it; a selector pair with the VX6 port on both ends would
+// leave ordinary dials unprotected (they match no IPsec policy).
+func TestSelectorsCoverEphemeralSourcePorts(t *testing.T) {
+	cfg := connectionConfig("vx6-x", "2001:db8::1", "4242", "2001:db8::2", "4343", "/l.pem", "/r.pem")
+	children := parseChildren(t, cfg)
+	type flow struct{ lport, rport int }
+	covers := func(c childTS, f flow) bool {
+		return c.local.match(f.lport) && c.remote.match(f.rport)
+	}
+	// This node dials the peer's listener (4343) from an ephemeral port.
+	if c := children["vx6-x-out"]; !covers(c, flow{51234, 4343}) {
+		t.Fatalf("outbound child does not cover local ephemeral -> peer listener: %+v", c)
+	}
+	// The peer dials this node's listener (4242) from an ephemeral port.
+	if c := children["vx6-x-in"]; !covers(c, flow{4242, 60001}) {
+		t.Fatalf("inbound child does not cover peer ephemeral -> local listener: %+v", c)
+	}
+	// Neither child may cover arbitrary non-VX6 port pairs.
+	for name, c := range children {
+		if covers(c, flow{51234, 60001}) {
+			t.Fatalf("child %s covers non-VX6 traffic: %+v", name, c)
+		}
+	}
+}
+
+type portSel struct {
+	any  bool
+	port int
+}
+
+func (p portSel) match(port int) bool { return p.any || p.port == port }
+
+type childTS struct{ local, remote portSel }
+
+func parseChildren(t *testing.T, cfg string) map[string]childTS {
+	t.Helper()
+	out := map[string]childTS{}
+	var current string
+	sel := func(v string) portSel {
+		first := strings.TrimSpace(strings.Split(v, ",")[0])
+		open := strings.Index(first, "[")
+		if open < 0 {
+			return portSel{any: true}
+		}
+		inner := strings.TrimSuffix(first[open+1:], "]")
+		_, port, ok := strings.Cut(inner, "/")
+		if !ok {
+			return portSel{any: true}
+		}
+		var n int
+		if _, err := fmt.Sscanf(port, "%d", &n); err != nil {
+			t.Fatalf("bad selector %q", first)
+		}
+		return portSel{port: n}
+	}
+	for _, line := range strings.Split(cfg, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, "{") && strings.HasPrefix(line, "vx6-x-") {
+			current = strings.TrimSpace(strings.TrimSuffix(line, "{"))
+			continue
+		}
+		if current == "" {
+			continue
+		}
+		c := out[current]
+		if v, ok := strings.CutPrefix(line, "local_ts = "); ok {
+			c.local = sel(v)
+		}
+		if v, ok := strings.CutPrefix(line, "remote_ts = "); ok {
+			c.remote = sel(v)
+		}
+		out[current] = c
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected two children, got %v", out)
+	}
+	return out
 }

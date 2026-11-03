@@ -200,8 +200,10 @@ func (m *Manager) RevokePeer(ctx context.Context, peer record.EndpointRecord) er
 			revokeErr = errors.Join(revokeErr, fmt.Errorf("enforce peer revocation in firewall: %w", err))
 		}
 	}
-	if _, err := m.run(ctx, "swanctl", "--uninstall", "--ike", name, "--child", name); err != nil {
-		revokeErr = errors.Join(revokeErr, fmt.Errorf("remove revoked peer trap policy: %w", err))
+	for _, child := range []string{outboundChild(name), inboundChild(name)} {
+		if _, err := m.run(ctx, "swanctl", "--uninstall", "--ike", name, "--child", child); err != nil {
+			revokeErr = errors.Join(revokeErr, fmt.Errorf("remove revoked peer trap policy %s: %w", child, err))
+		}
 	}
 	return revokeErr
 }
@@ -227,14 +229,14 @@ func (m *Manager) EnsurePeer(ctx context.Context, peer record.EndpointRecord) er
 		return nil
 	}
 	name := connectionName(peer.NodeID)
-	if _, err := m.run(ctx, "swanctl", "--initiate", "--ike", name, "--child", name, "--timeout", "15"); err != nil {
+	if _, err := m.run(ctx, "swanctl", "--initiate", "--ike", name, "--child", outboundChild(name), "--timeout", "15"); err != nil {
 		return fmt.Errorf("IKEv2 negotiation failed for %s: %w", peer.NodeID, err)
 	}
 	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name)
 	if err != nil {
 		return fmt.Errorf("query IPsec SA for %s: %w", peer.NodeID, err)
 	}
-	if !childSAInstalled(string(out), name) {
+	if !childSAInstalled(string(out), outboundChild(name)) {
 		return fmt.Errorf("IPsec CHILD_SA for %s is not installed; refusing cleartext dial", peer.NodeID)
 	}
 	m.mu.Lock()
@@ -277,13 +279,20 @@ func (m *Manager) AcceptPeer(ctx context.Context, remoteAddress string) bool {
 	if peer.NodeID == "" {
 		return false
 	}
-	return m.saInstalled(ctx, peer)
+	return m.childInstalled(ctx, peer, inboundChild(connectionName(peer.NodeID)))
 }
 
 func (m *Manager) saInstalled(ctx context.Context, peer record.EndpointRecord) bool {
+	return m.childInstalled(ctx, peer, outboundChild(connectionName(peer.NodeID)))
+}
+
+// childInstalled reports whether the named CHILD_SA of the peer's IKE_SA is
+// installed. Dials need the outbound child; accepted connections need the
+// inbound child, because each covers a different ephemeral-port direction.
+func (m *Manager) childInstalled(ctx context.Context, peer record.EndpointRecord, child string) bool {
 	name := connectionName(peer.NodeID)
 	out, err := m.run(ctx, "swanctl", "--list-sas", "--ike", name)
-	if err != nil || !childSAInstalled(string(out), name) {
+	if err != nil || !childSAInstalled(string(out), child) {
 		return false
 	}
 	m.mu.Lock()
@@ -339,7 +348,41 @@ func (m *Manager) writeFiles(verifiedPeer record.VerifiedEndpointRecord) error {
 	return nil
 }
 
+// connectionConfig generates one IKE connection with two CHILD_SAs.
+//
+// A VX6 service connection has the listener's port on one end and an
+// ephemeral port on the other. A single child with the VX6 port on both
+// selectors (local[tcp/P] === remote[tcp/P]) matches only traffic whose
+// source and destination ports are both P, so ordinary dials from an
+// ephemeral port would match no policy. Each child here pins only the
+// listener side:
+//
+//   - <name>-out: local host, any port === peer host, peer's VX6 port
+//     (this node dials the peer)
+//   - <name>-in:  local host, local VX6 port === peer host, any port
+//     (the peer dials this node)
+//
+// Only TCP/UDP is covered, so the separate liveness probe port remains
+// outside the SA as before, while all VX6 service traffic is protected.
 func connectionConfig(name, localIP, localPort, remoteIP, remotePort, localKeyFile, peerKeyFile string) string {
+	child := func(child, localTS, remoteTS string) string {
+		return fmt.Sprintf(`      %s {
+        mode = tunnel
+        local_ts = %s
+        remote_ts = %s
+        esp_proposals = aes128gcm16
+        start_action = trap
+        close_action = trap
+        dpd_action = restart
+      }
+`, child, localTS, remoteTS)
+	}
+	ts := func(ip, port string) string {
+		if port == "" {
+			return fmt.Sprintf("%s/128[tcp], %s/128[udp]", ip, ip)
+		}
+		return fmt.Sprintf("%s/128[tcp/%s], %s/128[udp/%s]", ip, port, ip, port)
+	}
 	return fmt.Sprintf(`connections {
   %s {
     version = 2
@@ -357,20 +400,16 @@ func connectionConfig(name, localIP, localPort, remoteIP, remotePort, localKeyFi
       pubkeys = %s
     }
     children {
-      %s {
-        mode = tunnel
-        local_ts = %s/128[tcp/%s], %s/128[udp/%s]
-        remote_ts = %s/128[tcp/%s], %s/128[udp/%s]
-        esp_proposals = aes128gcm16
-        start_action = trap
-        close_action = trap
-        dpd_action = restart
-      }
-    }
+%s%s    }
   }
 }
-`, name, localIP, remoteIP, localKeyFile, peerKeyFile, name, localIP, localPort, localIP, localPort, remoteIP, remotePort, remoteIP, remotePort)
+`, name, localIP, remoteIP, localKeyFile, peerKeyFile,
+		child(outboundChild(name), ts(localIP, ""), ts(remoteIP, remotePort)),
+		child(inboundChild(name), ts(localIP, localPort), ts(remoteIP, "")))
 }
+
+func outboundChild(name string) string { return name + "-out" }
+func inboundChild(name string) string  { return name + "-in" }
 
 func peerRawAddress(address string) string {
 	host, _, _ := net.SplitHostPort(address)
@@ -389,9 +428,15 @@ func connectionName(nodeID string) string {
 	return fmt.Sprintf("vx6-%x", sum[:8])
 }
 
-func childSAInstalled(output, name string) bool {
+// childSAInstalled reports whether swanctl --list-sas output lists the exact
+// CHILD_SA name as INSTALLED. Child lines look like
+// "  <child>: #2, reqid 1, INSTALLED, TUNNEL, ...". The name must match the
+// whole label so "vx6-x-in" never satisfies a check for "vx6-x-out" or the
+// IKE_SA line "vx6-x: #1, ESTABLISHED".
+func childSAInstalled(output, child string) bool {
 	for _, line := range strings.Split(output, "\n") {
-		if strings.Contains(line, name) && strings.Contains(line, "INSTALLED") {
+		label, rest, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && label == child && strings.Contains(rest, "INSTALLED") {
 			return true
 		}
 	}
