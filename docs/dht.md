@@ -35,6 +35,115 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 - blinded rotating hidden keys
 - encrypted hidden descriptor payloads
 
+## Routing Table: Current Implementation
+
+Issue [#62](https://github.com/ethical-buddy/vx6/issues/62) is in progress. The
+core bounded routing table and persistence path are implemented, but the issue
+is not complete: broad churn/flood simulations, configurable diversity
+settings, and memory/churn benchmarks remain required before it can be closed.
+
+### Two Routing Coordinates
+
+Every known peer can be reached through two independent 256-bit coordinates:
+
+- **NodeID:** SHA-256 of the complete Ed25519 public key. Identity lookups use
+  the `lookup_key` request type and this coordinate.
+- **NameHash:** SHA-256 of the versioned, canonical uppercase node name. Name
+  lookups use `lookup_name` and this separate coordinate. The name is not
+  substituted for NodeID.
+
+The routing table keeps an index for each coordinate. A peer record can appear
+in both indexes, but they answer different lookup questions. Returned peers
+are sorted by XOR distance to the requested target; recency does not change a
+peer's coordinate or override the distance calculation.
+
+### Bucket and Candidate Limits
+
+The initial code defaults are:
+
+| Setting | Current value | Meaning |
+|---|---:|---|
+| XOR ranges per coordinate | 256 | Possible ranges for a 256-bit coordinate. Empty ranges stay empty. |
+| Active peers per range (`k`) | 20 | Upper bound, not a target to fill. |
+| Underfilled refresh threshold | 15 | A non-empty range below this value is eligible for refresh. |
+| Replacement entries per range | 10 | Recently verified alternatives when an active range is full. |
+| Pending candidates per NodeID range | 10 | Referrals and restored peers waiting for validation. |
+| Pending candidates total | 512 | Global cap across not-yet-active referrals. |
+| Startup candidates restored | 512 | Most-recently-successful cached contacts; none start active. |
+| Local peer observations | 10,000 | Maximum stored peer observations, including offline history. |
+| Offline address retry window | 7 days | Older unpinned addresses are not retried. |
+| Offline history retention | 30 days | Old unpinned history is pruned locally. |
+
+The arrays of ranges have fixed slice headers; peer slices grow only when
+contacts are learned. So a fresh node does not allocate thousands of peer
+records merely because the coordinate space has 256 possible ranges.
+
+New successful contacts move to the front of their local range. Replacements
+are bounded and prefer less-represented observed IPv6 `/48` prefixes and,
+when the optional local ASN map can resolve them, different ASNs. The starting
+preferences are two peers per observed `/48` and four per known ASN. They are
+soft preferences: a sparse range is not rejected merely because peers share a
+prefix, and enough lookup candidates are returned when diversity information
+is missing. These numeric limits are currently constants, not runtime
+configuration; making them configurable and testing different values remains
+open work in #62.
+
+### Health, Retry, and Refresh
+
+A failed check does not immediately remove an active peer. The table applies
+local retry delays of 5 seconds, 20 seconds, and 60 seconds across consecutive
+failures. At the third spaced failure the peer is removed from active routing;
+it may remain as a local offline hint. A successful authenticated contact
+clears the failure state. Local times control retry and cache cleanup only;
+they do not prove identity, DHT membership, or which signed record wins.
+
+The node runs a local routing refresh approximately every 10 minutes, with
+20-percent jitter (about 8-12 minutes). One round selects at most two stale or
+underfilled non-empty bucket targets and asks up to four closest contacts for
+referrals. It also asks up to four close contacts about the node's own NodeID
+coordinate. This is bounded local maintenance, not a network-wide ping sweep.
+An authenticated referral is kept as a candidate until it responds through the
+normal signed-identity, IKE, and protected VX6 path.
+
+### Persistent Peer Cache
+
+When the DHT is enabled, VX6 stores local peer observations in
+`<data-dir>/dht-peers.db`, an embedded bbolt database. Each update is a database
+transaction; peer values are JSON for inspectability, with a separate
+NameHash index. The database contains public peer metadata and local
+observations, not private identity keys. The file is created with mode `0600`.
+
+On restart, at most 512 recent records are loaded as candidates. The node must
+revalidate them before they return to active routes. Signed endpoint validity
+and a fresh authenticated tunnel exchange remain required; reading a record
+from disk is never proof that its address is live. The database retains
+history for up to 30 days, while an unpinned address is only considered for
+retry for 7 days. User identity pins and routing-table slots are separate
+concepts. The existing peer identity pin command does not yet provide a
+user-facing manager for the routing table's internal `Pinned` observation.
+
+### What Is Still Needed For #62
+
+- Make prefix and ASN diversity limits configurable while preserving
+  non-blocking behavior in sparse ranges.
+- Test that malformed/unverified referrals and an inbound contact flood cannot
+  displace authenticated routes; test promotion only after fresh peer
+  validation and test pinned state across restart.
+- Add repeatable sparse, dense, churn, and prefix-concentrated simulations.
+- Benchmark memory use, lookup/refresh work, false eviction, and recovery under
+  churn. The current values are reasoned starting defaults, not measured
+  production tuning.
+
+Until those items are done, the routing table should be treated as an
+implemented prototype with bounded behavior, not as a proven large-network
+resilience guarantee.
+
+The latest full-suite run also exposed a separate failure in
+`TestHiddenServiceRendezvousPlainTCP`: two rendezvous circuits reused a relay.
+This is not a DHT table acceptance criterion, but it is an unresolved
+repository test failure and should be investigated in the hidden-service
+workstream.
+
 ## What It Does Not Do Yet
 
 - disk-backed large-scale value storage

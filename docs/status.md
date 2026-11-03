@@ -8,6 +8,8 @@ authority.
 
 - TCP service transport and localhost service forwarding
 - signed discovery, signed service publication, and DHT-backed lookup
+- separate NodeID and canonical-name routing coordinates in the DHT
+- bounded local DHT active/replacement/candidate state with bbolt peer-cache persistence
 - private service catalogs and hidden-service descriptors/rendezvous
 - file transfer with local permission policy
 - runtime status/reload and the `vx6-gui` frontend
@@ -28,8 +30,12 @@ VPN/IKEv2 and SDK integration. See the [platform packaging plan](packaging-plan.
 - peer-local DHT identity/name conflict and credential lifecycle; there is no
   planned committee or global consensus service, and a local lookup is not
   proof that a name is globally unique
-- signed metadata, routing-table maintenance, independent bootstrap/liveness,
-  and adversarial churn/eclipse simulation (#60, #62-#65)
+- signed metadata and record semantics (#63), bootstrap/liveness (#64), and
+  adversarial churn/eclipse simulation (#65)
+- DHT #62 remains open: broad flood/churn tests, configurable diversity caps,
+  and memory/churn benchmarks are still required. The current 20-active,
+  10-replacement, 512-candidate defaults are implementation starting points,
+  not validated large-network settings.
 - deny-by-default service authorization and proof that every service path uses
   its required IPsec protection
 - production Linux package and first-install/upgrade/removal lifecycle
@@ -39,5 +45,14 @@ VPN/IKEv2 and SDK integration. See the [platform packaging plan](packaging-plan.
   XFRM are the current tested implementation (#51, #57)
 - QUIC is optional inside ESP, not the default security layer or a clear-path
   fallback; UDP/WebRTC and acceleration remain separate and incomplete
+
+## Recent Verification Note
+
+The latest full `go test ./... -count=1` run did not pass completely. DHT and
+node packages passed, but `TestHiddenServiceRendezvousPlainTCP` failed because
+two hidden rendezvous circuits reused one relay. The failure also reproduced
+when that integration test ran alone. It belongs to hidden-service relay
+selection, not the routing-table implementation, and remains an unresolved
+repository test failure. The DHT/node race tests and `go build ./...` passed.
 
 For per-feature guarantees and limitations, start at [security.md](security.md).

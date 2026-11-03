@@ -15,6 +15,12 @@ The core project is a Go module. It provides the `vx6` command and the Go SDK. O
 
 The current transport is TCP. QUIC and eBPF/XDP acceleration are not production transport paths. Hidden-service routing is under active hardening and should not be treated as equivalent to a mature anonymity network. See [security and limitations](docs/security.md).
 
+The DHT keeps separate name and NodeID routing indexes. Its active table,
+candidate limits, local peer-cache persistence, and unfinished validation
+gates are described in the [DHT guide](docs/dht.md). The routing work is still
+under test; do not read the current limits as demonstrated 10-million-node
+capacity or Sybil/eclipse resistance.
+
 ## Repository map
 
 | Path | Purpose |
@@ -89,6 +95,7 @@ Start with the [SDK guide](docs/sdk.md). Mobile binding experiments are document
 - [Usage workflows](docs/usage.md)
 - [Command reference](docs/commands.md)
 - [Architecture](docs/architecture.md)
+- [DHT behavior, current limits, and remaining tests](docs/dht.md)
 - [SDK guide](docs/sdk.md)
 - [Current status and limitations](docs/status.md)
 - [Security notes](docs/security.md)

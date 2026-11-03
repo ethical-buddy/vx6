@@ -47,6 +47,10 @@ docs/
 **I want to understand packet security:** [security status](security.md) ->
 [threat model](dataplane-threat-model.md) -> [IPsec guide](ipsec.md).
 
+**I want to understand DHT lookup and routing maintenance:**
+[DHT behavior and status](dht.md) -> [discovery overview](discovery.md) ->
+[current project status](status.md).
+
 **I want to develop against VX6:** [repository map](repository-map.md) ->
 [architecture](architecture.md) -> [SDK status](sdk.md).
 
