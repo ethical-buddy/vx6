@@ -37,10 +37,11 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 
 ## Routing Table: Current Implementation
 
-Issue [#62](https://github.com/ethical-buddy/vx6/issues/62) is in progress. The
-core bounded routing table and persistence path are implemented, but the issue
-is not complete: broad churn/flood simulations, configurable diversity
-settings, and memory/churn benchmarks remain required before it can be closed.
+The core bounded routing table and persistence path from
+[#62](https://github.com/ethical-buddy/vx6/issues/62) have landed. Follow-up
+[#71](https://github.com/ethical-buddy/vx6/issues/71) tracks the remaining
+validation and tuning work; closing #62 does not claim scale behavior is
+proven.
 
 ### Two Routing Coordinates
 
@@ -86,7 +87,7 @@ soft preferences: a sparse range is not rejected merely because peers share a
 prefix, and enough lookup candidates are returned when diversity information
 is missing. These numeric limits are currently constants, not runtime
 configuration; making them configurable and testing different values remains
-open work in #62.
+open work in #71.
 
 ### Health, Retry, and Refresh
 
@@ -122,7 +123,7 @@ retry for 7 days. User identity pins and routing-table slots are separate
 concepts. The existing peer identity pin command does not yet provide a
 user-facing manager for the routing table's internal `Pinned` observation.
 
-### What Is Still Needed For #62
+### What Is Still Needed For #71
 
 - Make prefix and ASN diversity limits configurable while preserving
   non-blocking behavior in sparse ranges.

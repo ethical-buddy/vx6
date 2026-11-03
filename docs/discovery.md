@@ -52,6 +52,9 @@ The planned routing lifecycle and test model are tracked in
 record semantics are tracked separately in
 [#63](https://github.com/ethical-buddy/vx6/issues/63).
 
+The #62 routing implementation is closed; its remaining validation and tuning
+work is tracked in [#71](https://github.com/ethical-buddy/vx6/issues/71).
+
 The current implementation has separate NodeID and canonical-name routing
 indexes, bounded active and replacement entries, and a local bbolt peer cache.
 Saved contacts restart as candidates and require revalidation. The exact

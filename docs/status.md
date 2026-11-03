@@ -32,10 +32,10 @@ VPN/IKEv2 and SDK integration. See the [platform packaging plan](packaging-plan.
   proof that a name is globally unique
 - signed metadata and record semantics (#63), bootstrap/liveness (#64), and
   adversarial churn/eclipse simulation (#65)
-- DHT #62 remains open: broad flood/churn tests, configurable diversity caps,
-  and memory/churn benchmarks are still required. The current 20-active,
-  10-replacement, 512-candidate defaults are implementation starting points,
-  not validated large-network settings.
+- DHT routing implementation #62 is closed; configurable diversity caps,
+  adversarial/restart tests, and memory/churn benchmarks remain in #71. The
+  current 20-active, 10-replacement, 512-candidate defaults are starting
+  points, not validated large-network settings.
 - deny-by-default service authorization and proof that every service path uses
   its required IPsec protection
 - production Linux package and first-install/upgrade/removal lifecycle
