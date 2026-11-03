@@ -1,0 +1,1 @@
+ipv6=yes xfrm_esp_gcm=yes

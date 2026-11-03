@@ -64,6 +64,7 @@ Go SDK builds within this repository, but external SDK consumers still need the
 public API cleanup tracked by issue #58. The current IPsec path uses strongSwan
 and Linux kernel XFRM. Issue #57 is future research/prototyping for a VX6-owned
 Linux IKE controller; it does not mean the current implementation has removed
-strongSwan. DHT plans use peer-local validation and maintenance, not a committee
+strongSwan; its research plan is in [research/ipsec-native-controller.md](research/ipsec-native-controller.md)
+and the #51 baseline numbers are in [performance/](performance/README.md). DHT plans use peer-local validation and maintenance, not a committee
 or global consensus authority. See [current status](status.md) before relying
 on platform or feature claims.

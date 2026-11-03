@@ -1,0 +1,10 @@
+date_utc=2026-11-03T08:07:21Z
+kernel=6.18.44-fc-v230
+cpu=Intel(R) Xeon(R) Processor @ 2.10GHz
+nproc=4
+mem_total_kb=16477348
+strongswan=Linux strongSwan 5.9.13
+iperf3=iperf 3.16 (cJSON 1.7.15)
+go=go version go1.24.7 linux/amd64
+family=4 dataplane=libipsec selectors=split mtu=1500 repeat=5 duration=5
+ike_proposal=aes128gcm16-prfsha256-curve25519 esp_proposal=aes128gcm16 auth=ed25519-pubkey

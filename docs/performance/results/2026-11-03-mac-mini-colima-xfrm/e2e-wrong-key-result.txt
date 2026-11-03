@@ -1,0 +1,2 @@
+53:Initiator log proves AUTH_FAILED for the responder key; guarded dial returned before opening the application socket.
+54:Responder log proves it received IKE_AUTH. An active listener was present at the impostor endpoint; the guarded dial stopped before TCP connect.
