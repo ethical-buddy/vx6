@@ -220,6 +220,19 @@ func TestFindNodeWireTypesFollowRequestedCoordinate(t *testing.T) {
 	}
 }
 
+func TestLookupCandidatesAreExcludedFromPeerStoreSnapshots(t *testing.T) {
+	rt := NewRoutingTable("self")
+	referral := proto.NodeInfo{ID: "peer-transient", Name: "TEMP", Addr: "[2001:db8::1]:4242"}
+	rt.AddLookupCandidate(referral)
+	if got := rt.SnapshotPeers(); len(got) != 0 {
+		t.Fatalf("transient lookup candidate appeared in peer-store snapshot: %+v", got)
+	}
+	rt.AddNode(referral)
+	if got := rt.SnapshotPeers(); len(got) != 1 || got[0].Node.ID != referral.ID {
+		t.Fatalf("authenticated active peer was not included after promotion: %+v", got)
+	}
+}
+
 func TestPeerStoreRestoresCandidatesNotActiveRoutes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dht-peers.db")
 	store, err := OpenPeerStore(path)

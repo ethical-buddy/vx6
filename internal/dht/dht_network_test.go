@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +108,262 @@ func TestNameLookupWireTargetIsBareHashAndResolvesSignedRecord(t *testing.T) {
 	if typ != proto.DHTTypeLookupName || target != NodeNameHash("ALPHA") {
 		t.Fatalf("wire name lookup = (%q, %q), want lookup_name and bare digest", typ, target)
 	}
+}
+
+func TestNodeLookupMatchesExactNameHashAndNodeIDLocally(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	rec, err := record.NewEndpointRecordV2(id, "NODE-7", "[2001:db8::7]:4242", 1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := NodeInfoFromEndpointRecord(rec)
+	if err := VerifyNodeInfo(info, now); err != nil {
+		t.Fatalf("record should verify: %v", err)
+	}
+	if !matchesNodeLookupTarget(info, NodeNameKey("node-7")) {
+		t.Fatal("name lookup did not match canonical name hash")
+	}
+	if matchesNodeLookupTarget(info, NodeNameKey("other")) {
+		t.Fatal("name lookup accepted a different name hash")
+	}
+	if !matchesNodeLookupTarget(info, NodeIDKey(info.ID)) {
+		t.Fatal("key lookup did not match the full NodeID")
+	}
+	wrong := info
+	wrong.ID = "vx6_" + strings.Repeat("0", 64)
+	if matchesNodeLookupTarget(wrong, NodeIDKey(info.ID)) {
+		t.Fatal("key lookup accepted a different identity")
+	}
+}
+
+func TestHandleDHTReturnsAtMostFourClosestReferrals(t *testing.T) {
+	server := newTestServer("local")
+	for i := 0; i < 9; i++ {
+		id := fmt.Sprintf("vx6_%064x", i+1)
+		server.RT.AddNode(proto.NodeInfo{ID: id, Name: fmt.Sprintf("N-%d", i), Addr: fmt.Sprintf("[2001:db8::%x]:4242", i+1)})
+	}
+	target := strings.Repeat("a", 64)
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	go func() {
+		kind, err := proto.ReadHeader(peer)
+		if err != nil || kind != proto.KindDHT {
+			return
+		}
+		payload, err := proto.ReadLengthPrefixed(peer, defaultLookupResponseLimit)
+		if err != nil {
+			return
+		}
+		var response proto.DHTResponse
+		if json.Unmarshal(payload, &response) != nil {
+			return
+		}
+		_ = server.HandleDHT(context.Background(), peer, proto.DHTRequest{Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
+	}()
+	if err := proto.WriteHeader(client, proto.KindDHT); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(proto.DHTRequest{Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
+	if err := proto.WriteLengthPrefixed(client, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := proto.ReadHeader(client); err != nil {
+		t.Fatal(err)
+	}
+	responsePayload, err := proto.ReadLengthPrefixed(client, defaultLookupResponseLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response proto.DHTResponse
+	if err := json.Unmarshal(responsePayload, &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Nodes) != defaultLookupReferralLimit {
+		t.Fatalf("got %d referrals, want %d", len(response.Nodes), defaultLookupReferralLimit)
+	}
+}
+
+func TestNodeLookupFindsSignedTargetAndDoesNotPersistTransientReferral(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	identityB, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeB := newTestServer(identityB.NodeID)
+	addrB := startDHTListener(t, ctx, nodeB)
+	rec, err := record.NewEndpointRecordV2(identityB, "TARGET-9", addrB, 1, time.Hour, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetInfo := NodeInfoFromEndpointRecord(rec)
+	nodeA := newTestServer("relay-a")
+	nodeA.RT.AddNode(targetInfo)
+	addrA := startDHTListener(t, ctx, nodeA)
+	client := newTestServer("client")
+	client.RT.AddNode(proto.NodeInfo{ID: "relay-a", Name: "RELAY-A", Addr: addrA})
+
+	found, err := client.RecursiveFindNode(ctx, NodeIDKey(targetInfo.ID))
+	if err != nil {
+		t.Fatalf("node lookup: %v", err)
+	}
+	if len(found) != 1 || found[0].ID != targetInfo.ID {
+		t.Fatalf("lookup returned %v, want exact target %s", found, targetInfo.ID)
+	}
+	for _, peer := range client.RT.SnapshotPeers() {
+		if peer.Node.ID == targetInfo.ID {
+			t.Fatal("lookup-only referral was persisted in local peer state")
+		}
+	}
+}
+
+func TestLookupPolicyDefaultsAndRejectsUnsafeCeilings(t *testing.T) {
+	server := newTestServer("local")
+	defaults := server.LookupLimits()
+	if defaults.MaxRounds != 20 || defaults.MaxConcurrent != 4 || defaults.MaxPeerQueries != 80 || defaults.TotalTimeout != 10*time.Second {
+		t.Fatalf("unexpected lookup defaults: %+v", defaults)
+	}
+	defaults.MaxRounds = 3
+	defaults.MaxConcurrent = 2
+	defaults.MaxPeerQueries = 6
+	defaults.TotalTimeout = 5 * time.Second
+	if err := server.SetLookupLimits(defaults); err != nil {
+		t.Fatalf("set lower lookup limits: %v", err)
+	}
+	if got := server.LookupLimits(); got != defaults {
+		t.Fatalf("lookup limits = %+v, want %+v", got, defaults)
+	}
+	defaults.MaxConcurrent = 5
+	if err := server.SetLookupLimits(defaults); err == nil {
+		t.Fatal("accepted a concurrency setting above the safety ceiling")
+	}
+}
+
+func TestCyclicLookupTerminatesAsReachableViewNotFound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	identityA, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityB, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeA := newTestServer(identityA.NodeID)
+	nodeB := newTestServer(identityB.NodeID)
+	addrA := startDHTListener(t, ctx, nodeA)
+	addrB := startDHTListener(t, ctx, nodeB)
+	now := time.Now().UTC()
+	recordA, err := record.NewEndpointRecordV2(identityA, "NODE-A", addrA, 1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordB, err := record.NewEndpointRecordV2(identityB, "NODE-B", addrB, 1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infoA, infoB := NodeInfoFromEndpointRecord(recordA), NodeInfoFromEndpointRecord(recordB)
+	nodeA.RT.AddNode(infoB)
+	nodeB.RT.AddNode(infoA)
+	client := newTestServer("client")
+	client.RT.AddNode(infoA)
+	result, err := client.RecursiveFindNodeDetailed(ctx, "vx6_"+strings.Repeat("f", 64))
+	if err != nil {
+		t.Fatalf("bounded cyclic lookup: %v", err)
+	}
+	if result.Outcome != LookupNotFound || result.QueriedNodes != 2 {
+		t.Fatalf("lookup result = %+v, want reachable-view not-found after two unique peers", result)
+	}
+}
+
+func TestLookupHonorsConcurrencyAndPeerTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var active, peak atomic.Int32
+	client := newTestServer("client")
+	for index := 0; index < 4; index++ {
+		peer := newTestServer(fmt.Sprintf("peer-%d", index))
+		addr := startCountingDHTListener(t, ctx, peer, 80*time.Millisecond, &active, &peak)
+		client.RT.AddNode(proto.NodeInfo{ID: fmt.Sprintf("peer-%d", index), Name: fmt.Sprintf("PEER-%d", index), Addr: addr})
+	}
+	result, err := client.RecursiveFindNodeDetailed(ctx, "vx6_"+strings.Repeat("f", 64))
+	if err != nil {
+		t.Fatalf("parallel lookup: %v", err)
+	}
+	if result.QueriedNodes != 4 || peak.Load() != 4 {
+		t.Fatalf("queries=%d peak concurrency=%d; want four peers in one parallel round", result.QueriedNodes, peak.Load())
+	}
+
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), time.Second)
+	defer timeoutCancel()
+	client = newTestServer("timeout-client")
+	peer := newTestServer("silent-peer")
+	addr := startCountingDHTListener(t, timeoutCtx, peer, 500*time.Millisecond, &active, &peak)
+	client.RT.AddNode(proto.NodeInfo{ID: "silent-peer", Name: "SILENT", Addr: addr})
+	limits := client.LookupLimits()
+	limits.MaxRounds, limits.MaxConcurrent, limits.MaxPeerQueries = 1, 1, 1
+	limits.PeerTimeout, limits.TotalTimeout = 40*time.Millisecond, 300*time.Millisecond
+	if err := client.SetLookupLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	result, err = client.RecursiveFindNodeDetailed(timeoutCtx, "vx6_"+strings.Repeat("e", 64))
+	if !errors.Is(err, ErrLookupIncomplete) || result.Outcome != LookupIncomplete {
+		t.Fatalf("silent peer lookup = (%+v, %v), want incomplete timeout", result, err)
+	}
+	limits = client.LookupLimits()
+	limits.PeerTimeout, limits.TotalTimeout = time.Second, 40*time.Millisecond
+	if err := client.SetLookupLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	result, err = client.RecursiveFindNodeDetailed(timeoutCtx, "vx6_"+strings.Repeat("d", 64))
+	if !errors.Is(err, ErrLookupIncomplete) || result.Outcome != LookupIncomplete {
+		t.Fatalf("overall-deadline lookup = (%+v, %v), want incomplete timeout", result, err)
+	}
+}
+
+func startCountingDHTListener(t *testing.T, ctx context.Context, server *Server, delay time.Duration, active, peak *atomic.Int32) string {
+	t.Helper()
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Fatalf("listen counting DHT peer: %v", err)
+	}
+	go func() { <-ctx.Done(); _ = listener.Close() }()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				current := active.Add(1)
+				defer active.Add(-1)
+				for old := peak.Load(); current > old && !peak.CompareAndSwap(old, current); old = peak.Load() {
+				}
+				kind, err := proto.ReadHeader(conn)
+				if err != nil || kind != proto.KindDHT {
+					return
+				}
+				payload, err := proto.ReadLengthPrefixed(conn, defaultLookupResponseLimit)
+				if err != nil {
+					return
+				}
+				var req proto.DHTRequest
+				if json.Unmarshal(payload, &req) != nil {
+					return
+				}
+				time.Sleep(delay)
+				_ = server.HandleDHT(ctx, conn, req)
+			}(conn)
+		}
+	}()
+	return listener.Addr().String()
 }
 
 func TestStoreReplicatesAcrossBoundedPeers(t *testing.T) {

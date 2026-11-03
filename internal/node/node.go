@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -56,7 +55,6 @@ const (
 	idleSessionDeadline       = 5 * time.Minute
 	dhtRouteRefreshInterval   = 10 * time.Minute
 	dhtRouteRefreshJitter     = 2 * time.Minute
-	dhtRefreshFanout          = 4
 	dhtRefreshRoundLimit      = 2
 	dhtPeerStoreFlushInterval = time.Minute
 )
@@ -882,21 +880,10 @@ func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dh
 			}
 		}
 		selfKey := dht.NodeIDKey(cfg.NodeID)
-		for _, contact := range cfg.DHT.RT.ClosestNodes(cfg.NodeID, dhtRefreshFanout) {
-			if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
-				continue
-			}
-			if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
-				continue
-			}
-			attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			referrals, err := cfg.DHT.QueryNode(attemptCtx, contact.Addr, selfKey)
-			cancel()
-			if err != nil {
-				cfg.DHT.RT.NoteFailure(contact.ID)
-				continue
-			}
-			cfg.DHT.RT.RecordUse(contact.ID, time.Now(), 0)
+		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		referrals, err := cfg.DHT.RecursiveFindNode(refreshCtx, selfKey)
+		cancel()
+		if err == nil {
 			for _, referral := range referrals {
 				if dht.VerifyNodeInfo(referral, time.Now()) == nil {
 					cfg.DHT.RT.AddCandidate(referral)
@@ -904,29 +891,15 @@ func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dh
 			}
 		}
 		for _, target := range cfg.DHT.RT.RefreshTargets(time.Now(), dhtRefreshRoundLimit) {
-			contacts := cfg.DHT.RT.ClosestNodes(target.Key, dhtRefreshFanout)
-			if target.NameHash {
-				contacts = cfg.DHT.RT.ClosestNodesByNameHash(strings.TrimPrefix(target.Key, "node/name/"), dhtRefreshFanout)
+			refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			referrals, err := cfg.DHT.RecursiveFindNode(refreshCtx, target.Key)
+			cancel()
+			if err != nil {
+				continue
 			}
-			for _, contact := range contacts {
-				if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
-					continue
-				}
-				if !cfg.DHT.RT.ProbeAllowed(contact.ID, time.Now()) {
-					continue
-				}
-				attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				referrals, err := cfg.DHT.QueryNode(attemptCtx, contact.Addr, target.Key)
-				cancel()
-				if err != nil {
-					cfg.DHT.RT.NoteFailure(contact.ID)
-					continue
-				}
-				cfg.DHT.RT.RecordUse(contact.ID, time.Now(), 0)
-				for _, referral := range referrals {
-					if dht.VerifyNodeInfo(referral, time.Now()) == nil {
-						cfg.DHT.RT.AddCandidate(referral)
-					}
+			for _, referral := range referrals {
+				if dht.VerifyNodeInfo(referral, time.Now()) == nil {
+					cfg.DHT.RT.AddCandidate(referral)
 				}
 			}
 		}

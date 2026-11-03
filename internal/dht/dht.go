@@ -10,7 +10,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"sort"
 	"strconv"
@@ -31,6 +33,7 @@ type Server struct {
 	publisher         identity.Identity
 	hidden            HiddenDescriptorPrivacyConfig
 	adaptive          AdaptiveConfig
+	lookupLimits      LookupLimits
 	versions          map[string]StoredValueState
 	replicas          map[string]ReplicaObservation
 	hiddenCache       map[string]cachedHiddenService
@@ -69,6 +72,12 @@ type lookupBranch struct {
 const (
 	defaultLookupAlpha               = 4
 	defaultLookupQueryBudget         = 12
+	defaultLookupRounds              = 20
+	defaultLookupParallelism         = 4
+	defaultLookupPeerTimeout         = 2 * time.Second
+	defaultLookupTotalTimeout        = 10 * time.Second
+	defaultLookupReferralLimit       = 4
+	defaultLookupResponseLimit       = 1024 * 1024
 	defaultReplicationFactor         = 5
 	lookupAlpha                      = defaultLookupAlpha
 	lookupQueryBudget                = defaultLookupQueryBudget
@@ -83,6 +92,57 @@ const (
 	hiddenDescriptorStoreRateWindow  = 30 * time.Second
 	hiddenDescriptorStoreRateLimit   = 24
 )
+
+// LookupLimits bounds one iterative walk. SetLookupLimits permits tuning down
+// from the protocol safety ceilings, but never raising them.
+type LookupLimits struct {
+	MaxRounds       int
+	MaxConcurrent   int
+	MaxPeerQueries  int
+	MaxReferrals    int
+	MaxResponseSize int
+	MaxRetries      int
+	PeerTimeout     time.Duration
+	TotalTimeout    time.Duration
+}
+
+func defaultLookupLimits() LookupLimits {
+	return LookupLimits{
+		MaxRounds: defaultLookupRounds, MaxConcurrent: defaultLookupParallelism,
+		MaxPeerQueries: defaultLookupRounds * defaultLookupParallelism,
+		MaxReferrals:   defaultLookupReferralLimit, MaxResponseSize: defaultLookupResponseLimit,
+		PeerTimeout: defaultLookupPeerTimeout, TotalTimeout: defaultLookupTotalTimeout,
+	}
+}
+
+func (s *Server) SetLookupLimits(limits LookupLimits) error {
+	defaults := defaultLookupLimits()
+	if limits.MaxRounds <= 0 || limits.MaxRounds > defaults.MaxRounds ||
+		limits.MaxConcurrent <= 0 || limits.MaxConcurrent > defaults.MaxConcurrent ||
+		limits.MaxPeerQueries <= 0 || limits.MaxPeerQueries > defaults.MaxPeerQueries ||
+		limits.MaxPeerQueries > limits.MaxRounds*limits.MaxConcurrent ||
+		limits.MaxReferrals <= 0 || limits.MaxReferrals > defaults.MaxReferrals ||
+		limits.MaxResponseSize <= 0 || limits.MaxResponseSize > defaults.MaxResponseSize ||
+		limits.MaxRetries < 0 || limits.MaxRetries > 2 ||
+		limits.PeerTimeout <= 0 || limits.PeerTimeout > defaults.PeerTimeout ||
+		limits.TotalTimeout <= 0 || limits.TotalTimeout > defaults.TotalTimeout {
+		return fmt.Errorf("lookup limits must be positive and cannot exceed protocol ceilings")
+	}
+	s.mu.Lock()
+	s.lookupLimits = limits
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) LookupLimits() LookupLimits {
+	s.mu.RLock()
+	limits := s.lookupLimits
+	s.mu.RUnlock()
+	if limits.MaxRounds == 0 {
+		return defaultLookupLimits()
+	}
+	return limits
+}
 
 type AdaptiveConfig struct {
 	LookupAlphaBase      int
@@ -256,6 +316,7 @@ func NewServer(selfID string) *Server {
 		RT:            NewRoutingTable(selfID),
 		Values:        make(map[string]string),
 		adaptive:      defaultAdaptiveConfig(),
+		lookupLimits:  defaultLookupLimits(),
 		versions:      make(map[string]StoredValueState),
 		replicas:      make(map[string]ReplicaObservation),
 		hiddenCache:   make(map[string]cachedHiddenService),
@@ -346,22 +407,24 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 
 	switch req.Action {
 	case "find_node":
+		limits := s.LookupLimits()
 		if req.Type == proto.DHTTypeLookupName {
-			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, K)
+			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, limits.MaxReferrals)
 		} else {
-			resp.Nodes = s.RT.ClosestNodes(strings.TrimPrefix(req.Target, "node/id/"), K)
+			resp.Nodes = s.RT.ClosestNodes(strings.TrimPrefix(req.Target, "node/id/"), limits.MaxReferrals)
 		}
 	case "find_value":
+		limits := s.LookupLimits()
 		storageKey := req.Target
 		switch req.Type {
 		case proto.DHTTypeLookupName:
-			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, K)
+			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, limits.MaxReferrals)
 			storageKey = "node/name/" + req.Target
 		case proto.DHTTypeLookupKey:
 			storageKey = NodeIDKey(req.Target)
-			resp.Nodes = s.RT.ClosestNodes(req.Target, K)
+			resp.Nodes = s.RT.ClosestNodes(req.Target, limits.MaxReferrals)
 		default:
-			resp.Nodes = s.RT.ClosestNodes(req.Target, K)
+			resp.Nodes = s.RT.ClosestNodes(req.Target, limits.MaxReferrals)
 		}
 		s.mu.RLock()
 		val, ok := s.Values[storageKey]
@@ -397,53 +460,194 @@ func (s *Server) StoreLocal(key, value string) {
 	}
 }
 
-// RecursiveFindNode searches the network for a specific NodeID.
+// RecursiveFindNode performs a bounded iterative lookup and returns the closest
+// verified peers it learned about. The target is a name hash or full NodeID.
 func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]proto.NodeInfo, error) {
-	visited := make(map[string]bool)
-	candidates := s.closestForTarget(targetID, K)
+	result, err := s.RecursiveFindNodeDetailed(ctx, targetID)
+	if len(result.Matches) > 0 {
+		return result.Matches, err
+	}
+	return result.Closest, err
+}
 
-	for {
-		foundNew := false
-		newCandidates := []proto.NodeInfo{}
-		for _, node := range candidates {
-			if visited[node.ID] {
-				continue
-			}
-			visited[node.ID] = true
-			if _, active := s.RT.ActiveNode(node.ID); !active {
-				if VerifyNodeInfo(node, time.Now()) != nil {
-					continue
-				}
-				s.RT.AddCandidate(node)
-			}
-			if !s.RT.ProbeAllowed(node.ID, time.Now()) {
-				continue
-			}
+type NodeLookupResult struct {
+	Matches      []proto.NodeInfo
+	Closest      []proto.NodeInfo
+	Outcome      LookupOutcome
+	QueriedNodes int
+	Rounds       int
+}
 
-			newNodes, err := s.QueryNode(ctx, node.Addr, targetID)
-			if err != nil {
-				s.RT.NoteFailure(node.ID)
-				s.RT.DiscardCandidate(node.ID)
-				continue
-			}
-			s.RT.PromoteCandidate(node.ID)
-			s.RT.AddNode(node)
-			for _, n := range newNodes {
-				if !visited[n.ID] && VerifyNodeInfo(n, time.Now()) == nil {
-					s.RT.AddCandidate(n)
-					newCandidates = append(newCandidates, n)
-					foundNew = true
-				}
-			}
+func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (NodeLookupResult, error) {
+	limits := s.LookupLimits()
+	ctx, cancel := boundedLookupContext(ctx, limits.TotalTimeout)
+	defer cancel()
+	known := make(map[string]proto.NodeInfo)
+	matches := make(map[string]proto.NodeInfo)
+	queriedIDs := make(map[string]bool)
+	transient := make(map[string]struct{})
+	defer func() {
+		for id := range transient {
+			s.RT.DiscardCandidate(id)
 		}
-		candidates = append(candidates, newCandidates...)
-
-		if !foundNew {
-			break
+	}()
+	for _, node := range s.closestForTarget(target, limits.MaxConcurrent) {
+		verified := VerifyNodeInfo(node, time.Now()) == nil
+		if _, active := s.RT.ActiveNode(node.ID); active || verified {
+			known[node.ID] = node
+			if verified && matchesNodeLookupTarget(node, target) {
+				matches[node.ID] = node
+			}
 		}
 	}
+	if !strings.HasPrefix(target, "node/name/") && len(matches) > 0 {
+		return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupFound}, nil
+	}
+	queries := 0
+	failures := 0
+	rounds := 0
+	for round := 0; round < limits.MaxRounds && queries < limits.MaxPeerQueries; round++ {
+		rounds = round + 1
+		batchLimit := min(limits.MaxConcurrent, limits.MaxPeerQueries-queries)
+		batch := closestUnqueried(known, queriedIDs, target, batchLimit)
+		if len(batch) == 0 {
+			if len(matches) > 0 {
+				if failures > 0 {
+					return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w: %d peer queries failed; name conflicts may be missing", ErrLookupIncomplete, failures)
+				}
+				outcome := LookupFound
+				if len(matches) > 1 {
+					outcome = LookupConflict
+				}
+				return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: outcome, QueriedNodes: queries, Rounds: rounds}, nil
+			}
+			if failures > 0 {
+				return NodeLookupResult{Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w: %d peer queries failed", ErrLookupIncomplete, failures)
+			}
+			return NodeLookupResult{Closest: sortedKnown(known, target, K), Outcome: LookupNotFound, QueriedNodes: queries, Rounds: rounds}, nil
+		}
+		results := make(chan nodeQueryResult, len(batch))
+		for _, node := range batch {
+			queriedIDs[node.ID] = true
+			queries++
+			if _, active := s.RT.ActiveNode(node.ID); !active {
+				if s.RT.AddLookupCandidate(node) {
+					transient[node.ID] = struct{}{}
+				}
+			}
+			go func(node proto.NodeInfo) {
+				peerCtx, stop := context.WithTimeout(ctx, limits.PeerTimeout)
+				defer stop()
+				refs, err := s.QueryNode(peerCtx, node.Addr, target)
+				results <- nodeQueryResult{node: node, refs: refs, err: err}
+			}(node)
+		}
+		for range batch {
+			select {
+			case <-ctx.Done():
+				return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w after %d queries: %w", ErrLookupIncomplete, queries, ctx.Err())
+			case result := <-results:
+				if result.err != nil {
+					failures++
+					continue
+				}
+				for _, ref := range result.refs {
+					if VerifyNodeInfo(ref, time.Now()) != nil || ref.ID == "" || ref.Addr == "" {
+						continue
+					}
+					if _, exists := known[ref.ID]; !exists {
+						known[ref.ID] = ref
+					}
+					if matchesNodeLookupTarget(ref, target) {
+						matches[ref.ID] = ref
+					}
+				}
+			}
+		}
+		if !strings.HasPrefix(target, "node/name/") && len(matches) > 0 {
+			return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupFound, QueriedNodes: queries, Rounds: rounds}, nil
+		}
+	}
+	if len(closestUnqueried(known, queriedIDs, target, 1)) > 0 {
+		return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w: reached configured query/round limit", ErrLookupIncomplete)
+	}
+	if len(matches) > 0 {
+		if failures > 0 {
+			return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w: %d peer queries failed; name conflicts may be missing", ErrLookupIncomplete, failures)
+		}
+		outcome := LookupFound
+		if len(matches) > 1 {
+			outcome = LookupConflict
+		}
+		return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: outcome, QueriedNodes: queries, Rounds: rounds}, nil
+	}
+	if failures > 0 {
+		return NodeLookupResult{Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w: %d peer queries failed", ErrLookupIncomplete, failures)
+	}
+	return NodeLookupResult{Closest: sortedKnown(known, target, K), Outcome: LookupNotFound, QueriedNodes: queries, Rounds: rounds}, nil
+}
 
-	return s.closestForTarget(targetID, K), nil
+func matchesNodeLookupTarget(info proto.NodeInfo, target string) bool {
+	switch {
+	case strings.HasPrefix(target, "node/name/"):
+		want := strings.TrimPrefix(target, "node/name/")
+		return NodeNameHash(info.Name) == want && (info.NameHash == "" || info.NameHash == want)
+	case strings.HasPrefix(target, "node/id/"):
+		return info.ID == strings.TrimPrefix(target, "node/id/")
+	case strings.HasPrefix(target, "vx6_"):
+		return info.ID == target
+	default:
+		return info.ID == target
+	}
+}
+
+type nodeQueryResult struct {
+	node proto.NodeInfo
+	refs []proto.NodeInfo
+	err  error
+}
+
+func boundedLookupContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, timeout)
+}
+
+func closestUnqueried(known map[string]proto.NodeInfo, queried map[string]bool, target string, limit int) []proto.NodeInfo {
+	all := make([]proto.NodeInfo, 0, len(known))
+	for id, node := range known {
+		if !queried[id] {
+			all = append(all, node)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		left, right := xorDistanceForNode(all[i], target), xorDistanceForNode(all[j], target)
+		if cmp := left.Cmp(right); cmp != 0 {
+			return cmp < 0
+		}
+		return all[i].ID < all[j].ID
+	})
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	return all
+}
+
+func sortedKnown(known map[string]proto.NodeInfo, target string, limit int) []proto.NodeInfo {
+	all := closestUnqueried(known, map[string]bool{}, target, len(known))
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	return all
+}
+
+func xorDistanceForNode(node proto.NodeInfo, target string) *big.Int {
+	if strings.HasPrefix(target, "node/name/") {
+		hash := node.NameHash
+		if hash == "" {
+			hash = NodeNameHash(node.Name)
+		}
+		return xorDistance(hash, strings.TrimPrefix(target, "node/name/"))
+	}
+	return xorDistance(node.ID, strings.TrimPrefix(target, "node/id/"))
 }
 
 // Store saves a value on a bounded set of the closest nodes to the target key.
@@ -786,11 +990,27 @@ func (s *Server) RecursiveFindValue(ctx context.Context, key string) (string, er
 }
 
 func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (LookupResult, error) {
-	visited := make(map[string]bool)
-	candidates := s.closestForTarget(key, K)
+	limits := s.LookupLimits()
+	ctx, cancel := boundedLookupContext(ctx, limits.TotalTimeout)
+	defer cancel()
+	known := make(map[string]proto.NodeInfo)
+	queriedIDs := make(map[string]bool)
+	transient := make(map[string]struct{})
+	defer func() {
+		for id := range transient {
+			s.RT.DiscardCandidate(id)
+		}
+	}()
+	branchByID := make(map[string]int)
+	for index, node := range s.closestForTarget(key, limits.MaxConcurrent) {
+		if _, active := s.RT.ActiveNode(node.ID); active || VerifyNodeInfo(node, time.Now()) == nil {
+			known[node.ID] = node
+			branchByID[node.ID] = index + 1
+		}
+	}
 	collector := newLookupCollector(key, time.Now())
 	queried := 0
-	alpha, budget := s.adaptiveLookupParams()
+	failures := 0
 
 	s.mu.RLock()
 	if local, ok := s.Values[key]; ok && local != "" {
@@ -798,92 +1018,89 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 	}
 	s.mu.RUnlock()
 
-	branches, spares, nextBranchID := buildLookupBranches(candidates, alpha)
-	for len(branches) > 0 && queried < budget {
-		type branchQuery struct {
-			branchID int
-			node     proto.NodeInfo
-		}
-		batch := make([]branchQuery, 0, len(branches))
-		active := make([]lookupBranch, 0, len(branches))
-		for _, branch := range branches {
-			node, ok := nextBranchCandidate(branch.queue, visited)
-			if !ok {
-				if len(spares) > 0 {
-					branch.id = nextBranchID
-					nextBranchID++
-					branch.rootNodeID = spares[0].ID
-					branch.queue = []proto.NodeInfo{spares[0]}
-					spares = spares[1:]
-					node, ok = nextBranchCandidate(branch.queue, visited)
-				}
-			}
-			if !ok {
-				continue
-			}
-			if _, active := s.RT.ActiveNode(node.ID); !active {
-				if VerifyNodeInfo(node, time.Now()) != nil {
-					visited[node.ID] = true
-					continue
-				}
-				s.RT.AddCandidate(node)
-			}
-			visited[node.ID] = true
-			batch = append(batch, branchQuery{branchID: branch.id, node: node})
-			active = append(active, branch)
-		}
-		branches = active
+	for round := 0; round < limits.MaxRounds && queried < limits.MaxPeerQueries; round++ {
+		batchLimit := min(limits.MaxConcurrent, limits.MaxPeerQueries-queried)
+		batch := closestUnqueried(known, queriedIDs, key, batchLimit)
 		if len(batch) == 0 {
 			break
 		}
-
 		type queryResult struct {
-			branchID int
-			node     proto.NodeInfo
-			value    string
-			next     []proto.NodeInfo
-			err      error
+			node   proto.NodeInfo
+			branch int
+			value  string
+			next   []proto.NodeInfo
+			err    error
 		}
-
 		resultsCh := make(chan queryResult, len(batch))
-		for _, item := range batch {
-			item := item
-			go func() {
-				val, nextNodes, err := s.QueryValue(ctx, item.node.Addr, key)
-				resultsCh <- queryResult{branchID: item.branchID, node: item.node, value: val, next: nextNodes, err: err}
-			}()
+		for _, node := range batch {
+			queriedIDs[node.ID] = true
+			if _, active := s.RT.ActiveNode(node.ID); !active {
+				if s.RT.AddLookupCandidate(node) {
+					transient[node.ID] = struct{}{}
+				}
+			}
+			go func(node proto.NodeInfo, branch int) {
+				peerCtx, stop := context.WithTimeout(ctx, limits.PeerTimeout)
+				defer stop()
+				val, refs, err := s.QueryValue(peerCtx, node.Addr, key)
+				resultsCh <- queryResult{node: node, branch: branch, value: val, next: refs, err: err}
+			}(node, branchByID[node.ID])
 		}
-
-		for i := 0; i < len(batch); i++ {
-			result := <-resultsCh
-			queried++
-			if result.err != nil {
+		for range batch {
+			select {
+			case <-ctx.Done():
+				res, _ := collector.Resolve(queried)
+				res.Outcome = LookupIncomplete
 				s.noteLookupResult(false)
-				s.RT.NoteFailure(result.node.ID)
-				s.RT.DiscardCandidate(result.node.ID)
-				continue
-			}
-			s.noteLookupResult(true)
-			s.RT.PromoteCandidate(result.node.ID)
-			s.RT.AddNode(result.node)
-			if result.value != "" {
-				collector.Observe(sourceObservation{nodeID: result.node.ID, addr: result.node.Addr, trust: 1, branch: result.branchID}, result.value)
-			}
-			for idx := range branches {
-				if branches[idx].id != result.branchID {
+				return res, fmt.Errorf("%w after %d queries: %v", ErrLookupIncomplete, queried, ctx.Err())
+			case result := <-resultsCh:
+				queried++
+				if result.err != nil {
+					failures++
+					s.noteLookupResult(false)
+					s.RT.NoteFailure(result.node.ID)
+					if _, temporary := transient[result.node.ID]; temporary {
+						s.RT.DiscardCandidate(result.node.ID)
+						delete(transient, result.node.ID)
+					}
 					continue
 				}
-				branches[idx].queue = mergeBranchCandidates(branches[idx].queue, result.next, visited, key, s.RT)
-				break
+				s.noteLookupResult(true)
+				if _, temporary := transient[result.node.ID]; temporary {
+					s.RT.DiscardCandidate(result.node.ID)
+					delete(transient, result.node.ID)
+				}
+				if result.value != "" {
+					collector.Observe(sourceObservation{nodeID: result.node.ID, addr: result.node.Addr, trust: 1, branch: result.branch}, result.value)
+				}
+				for _, ref := range result.next {
+					if VerifyNodeInfo(ref, time.Now()) != nil || ref.ID == "" || ref.Addr == "" {
+						continue
+					}
+					if _, exists := known[ref.ID]; !exists {
+						known[ref.ID] = ref
+						branchByID[ref.ID] = result.branch
+					}
+				}
 			}
 		}
-
 		if collector.IsConfirmed() {
 			break
 		}
 	}
-
 	res, err := collector.Resolve(queried)
+	if err != nil && queried > 0 && len(closestUnqueried(known, queriedIDs, key, 1)) > 0 {
+		res.Outcome = LookupIncomplete
+		return res, fmt.Errorf("%w: reached configured query/round limit: %v", ErrLookupIncomplete, err)
+	}
+	if err != nil && failures > 0 && errors.Is(err, ErrLookupNotFound) {
+		res.Outcome = LookupIncomplete
+		return res, fmt.Errorf("%w: %d peer queries failed", ErrLookupIncomplete, failures)
+	}
+	if err != nil && errors.Is(err, ErrInsufficientConfirmation) {
+		res.Outcome = LookupIncomplete
+		return res, fmt.Errorf("%w: %w", ErrLookupIncomplete, err)
+	}
 	if err != nil {
 		s.noteLookupResult(false)
 		return res, err
@@ -893,8 +1110,24 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 }
 
 func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
+	limits := s.LookupLimits()
+	var lastErr error
+	for attempt := 0; attempt <= limits.MaxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		nodes, err := s.queryNodeOnce(ctx, addr, targetID, limits)
+		if err == nil {
+			return nodes, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limits LookupLimits) ([]proto.NodeInfo, error) {
 	ctx = s.guardedContext(ctx)
-	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	dialCtx, cancel := context.WithTimeout(ctx, limits.PeerTimeout)
 	defer cancel()
 
 	conn, err := vxtransport.DialContext(dialCtx, vxtransport.ModeAuto, addr)
@@ -902,7 +1135,9 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 		return nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	setLookupConnDeadline(ctx, conn, limits.PeerTimeout)
 
 	typ, target := nodeLookupTarget(targetID)
 	req := proto.DHTRequest{Type: typ, Action: "find_node", Target: target}
@@ -922,7 +1157,7 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 		return nil, fmt.Errorf("invalid response")
 	}
 
-	resPayload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+	resPayload, err := proto.ReadLengthPrefixed(conn, uint32(limits.MaxResponseSize))
 	if err != nil {
 		return nil, err
 	}
@@ -932,6 +1167,9 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 	}
 	if resp.Type != req.Type {
 		return nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	}
+	if len(resp.Nodes) > limits.MaxReferrals {
+		return nil, fmt.Errorf("DHT response exceeds %d referrals", limits.MaxReferrals)
 	}
 	return resp.Nodes, nil
 }
@@ -950,12 +1188,30 @@ func nodeLookupTarget(target string) (proto.DHTRequestType, string) {
 }
 
 func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []proto.NodeInfo, error) {
+	limits := s.LookupLimits()
+	var lastErr error
+	for attempt := 0; attempt <= limits.MaxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", nil, err
+		}
+		value, nodes, err := s.queryValueOnce(ctx, addr, key, limits)
+		if err == nil {
+			return value, nodes, nil
+		}
+		lastErr = err
+	}
+	return "", nil, lastErr
+}
+
+func (s *Server) queryValueOnce(ctx context.Context, addr, key string, limits LookupLimits) (string, []proto.NodeInfo, error) {
 	conn, err := s.dialDHTConn(ctx, addr, key, "lookup")
 	if err != nil {
 		return "", nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	setLookupConnDeadline(ctx, conn, limits.PeerTimeout)
 
 	typ, target := lookupRequestTarget(key)
 	req := proto.DHTRequest{Type: typ, Action: "find_value", Target: target}
@@ -975,7 +1231,7 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 		return "", nil, fmt.Errorf("invalid response")
 	}
 
-	resPayload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+	resPayload, err := proto.ReadLengthPrefixed(conn, uint32(limits.MaxResponseSize))
 	if err != nil {
 		return "", nil, err
 	}
@@ -986,7 +1242,18 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 	if resp.Type != req.Type {
 		return "", nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
 	}
+	if len(resp.Nodes) > limits.MaxReferrals {
+		return "", nil, fmt.Errorf("DHT response exceeds %d referrals", limits.MaxReferrals)
+	}
 	return resp.Value, resp.Nodes, nil
+}
+
+func setLookupConnDeadline(ctx context.Context, conn net.Conn, peerTimeout time.Duration) {
+	deadline := time.Now().Add(peerTimeout)
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(deadline) {
+		deadline = callerDeadline
+	}
+	_ = conn.SetDeadline(deadline)
 }
 
 func lookupRequestTarget(key string) (proto.DHTRequestType, string) {

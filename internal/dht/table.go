@@ -30,6 +30,7 @@ const (
 
 type bucketEntry struct {
 	Node         proto.NodeInfo `json:"node"`
+	Transient    bool           `json:"-"`
 	FailCount    uint8          `json:"fail_count,omitempty"`
 	SuccessCount uint32         `json:"success_count,omitempty"`
 	LastSeen     time.Time      `json:"last_seen,omitempty"`
@@ -118,6 +119,7 @@ func (rt *RoutingTable) AddNode(node proto.NodeInfo) {
 	} else {
 		entry.Node = node
 	}
+	entry.Transient = false
 	delete(rt.offline, node.ID)
 	entry.FailCount = 0
 	entry.NextProbeAt = time.Time{}
@@ -137,6 +139,29 @@ func (rt *RoutingTable) AddNode(node proto.NodeInfo) {
 // AddCandidate keeps a referral or persisted peer out of active routes until
 // it has responded successfully through the authenticated VX6 path.
 func (rt *RoutingTable) AddCandidate(node proto.NodeInfo) {
+	rt.addCandidate(node)
+}
+
+// AddLookupCandidate makes a signed referral available to the guarded transport
+// during one lookup without allowing periodic peer-store snapshots to persist it.
+func (rt *RoutingTable) AddLookupCandidate(node proto.NodeInfo) bool {
+	if node.ID == "" || node.ID == rt.SelfID || node.Addr == "" {
+		return false
+	}
+	idx := rt.bucketIndex(node.ID)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.peerByID[node.ID] != nil || rt.pendingN >= maxPendingCandidates || len(rt.Pending[idx]) >= maxPendingPerBucket {
+		return false
+	}
+	entry := &bucketEntry{Node: node, Transient: true}
+	rt.peerByID[node.ID] = entry
+	rt.Pending[idx] = append(rt.Pending[idx], entry)
+	rt.pendingN++
+	return true
+}
+
+func (rt *RoutingTable) addCandidate(node proto.NodeInfo) {
 	if node.ID == "" || node.ID == rt.SelfID || node.Addr == "" {
 		return
 	}
@@ -164,6 +189,7 @@ func (rt *RoutingTable) AddCandidate(node proto.NodeInfo) {
 	} else {
 		entry.Node = node
 	}
+	entry.Transient = false
 	delete(rt.offline, node.ID)
 	rt.Pending[idx] = append(rt.Pending[idx], entry)
 	rt.pendingN++
@@ -491,6 +517,9 @@ func (rt *RoutingTable) SnapshotPeers() []PeerObservation {
 	defer rt.mu.RUnlock()
 	out := make([]PeerObservation, 0, len(rt.peerByID))
 	for _, entry := range rt.peerByID {
+		if entry.Transient {
+			continue
+		}
 		out = append(out, PeerObservation{
 			Node: entry.Node, FailCount: entry.FailCount, SuccessCount: entry.SuccessCount,
 			LastSeen: entry.LastSeen, LastSuccess: entry.LastSuccess, LastUsed: entry.LastUsed,

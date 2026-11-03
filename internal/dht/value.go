@@ -18,6 +18,17 @@ import (
 var (
 	ErrConflictingValues        = errors.New("dht lookup returned conflicting values")
 	ErrInsufficientConfirmation = errors.New("dht lookup returned insufficient confirmation")
+	ErrLookupIncomplete         = errors.New("dht lookup incomplete")
+	ErrLookupNotFound           = errors.New("no matching value in reachable peers")
+)
+
+type LookupOutcome string
+
+const (
+	LookupFound      LookupOutcome = "found_verified"
+	LookupNotFound   LookupOutcome = "not_found_reachable"
+	LookupIncomplete LookupOutcome = "incomplete"
+	LookupConflict   LookupOutcome = "conflict"
 )
 
 const (
@@ -30,6 +41,7 @@ const (
 )
 
 type LookupResult struct {
+	Outcome           LookupOutcome
 	Value             string
 	Verified          bool
 	SourceCount       int
@@ -176,6 +188,7 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 			sort.Strings(families)
 			sort.Strings(conflicts)
 			return LookupResult{
+				Outcome:        LookupConflict,
 				Verified:       true,
 				QueriedNodes:   queried,
 				RejectedValues: c.rejected,
@@ -186,8 +199,10 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		for _, candidate := range c.verified {
 			result := candidate.lookupResult(queried, c.rejected)
 			if !candidate.confirmed() {
+				result.Outcome = LookupIncomplete
 				return result, fmt.Errorf("%w: exact=%d branches=%d asns=%d providers=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactBranches), len(candidate.exactASNs), len(candidate.exactProviders), len(candidate.exactNetworks), candidate.exactWeight)
 			}
+			result.Outcome = LookupFound
 			return result, nil
 		}
 	}
@@ -196,7 +211,8 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		return LookupResult{
 			QueriedNodes:   queried,
 			RejectedValues: c.rejected,
-		}, fmt.Errorf("value not found in DHT")
+			Outcome:        LookupNotFound,
+		}, ErrLookupNotFound
 	}
 
 	var best *candidateObservation
@@ -223,11 +239,13 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		return LookupResult{
 			QueriedNodes:   queried,
 			RejectedValues: c.rejected,
-		}, fmt.Errorf("value not found in DHT")
+			Outcome:        LookupNotFound,
+		}, ErrLookupNotFound
 	}
 	if conflicts > 1 {
 		sort.Strings(conflictValues)
 		return LookupResult{
+			Outcome:        LookupConflict,
 			QueriedNodes:   queried,
 			RejectedValues: c.rejected,
 			ConflictCount:  conflicts,
@@ -235,7 +253,9 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		}, fmt.Errorf("%w: conflicting unverified values for key %q", ErrConflictingValues, c.key)
 	}
 
-	return best.lookupResult(queried, c.rejected), nil
+	result := best.lookupResult(queried, c.rejected)
+	result.Outcome = LookupFound
+	return result, nil
 }
 
 func newCandidateObservation(value validatedValue) *candidateObservation {
