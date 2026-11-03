@@ -61,10 +61,10 @@ C
 children() {
   local self="$1" peer="$2" h="/$HOSTLEN"
   if [[ "$SELECTORS" == pinned ]]; then
-    child vx6-bench "$self$h[tcp/$PORT], $self$h[udp/$PORT]" "$peer$h[tcp/$PORT], $peer$h[udp/$PORT]"
+    child vx6-bench "${self}${h}[tcp/$PORT], ${self}${h}[udp/$PORT]" "${peer}${h}[tcp/$PORT], ${peer}${h}[udp/$PORT]"
   else
-    child vx6-bench-out "$self$h[tcp], $self$h[udp]" "$peer$h[tcp/$PORT], $peer$h[udp/$PORT]"
-    child vx6-bench-in "$self$h[tcp/$PORT], $self$h[udp/$PORT]" "$peer$h[tcp], $peer$h[udp]"
+    child vx6-bench-out "${self}${h}[tcp], ${self}${h}[udp]" "${peer}${h}[tcp/$PORT], ${peer}${h}[udp/$PORT]"
+    child vx6-bench-in "${self}${h}[tcp/$PORT], ${self}${h}[udp/$PORT]" "${peer}${h}[tcp], ${peer}${h}[udp]"
   fi
 }
 
@@ -72,7 +72,7 @@ write_node() {
   local n="$1" self="$2" peer="$3" dir="$LAB/$1" other="$4"
   mkdir -p "$dir"/swanctl/{conf.d,private,pubkey}
   chmod 700 "$dir"/swanctl/private
-  local libipsec=no netlink_ipsec=yes
+  local libipsec=no
   if [[ "$DATAPLANE" == libipsec ]]; then libipsec=yes; fi
   cat >"$dir/strongswan.conf" <<CONF
 charon {
