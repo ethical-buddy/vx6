@@ -65,46 +65,72 @@ The initial code defaults are:
 | Setting | Current value | Meaning |
 |---|---:|---|
 | XOR ranges per coordinate | 256 | Possible ranges for a 256-bit coordinate. Empty ranges stay empty. |
-| Active peers per range (`k`) | 20 | Upper bound, not a target to fill. |
+| Normal DHT `k` value | 20 | Replication/closest-set target; not a hard per-range cap. |
+| Parallel lookup width | 4 | At most four peers queried at once. |
+| Referrals returned per lookup RPC | 4 | Closest active peers for the requested coordinate. |
 | Underfilled refresh threshold | 15 | A non-empty range below this value is eligible for refresh. |
-| Replacement entries per range | 10 | Recently verified alternatives when an active range is full. |
 | Pending candidates per NodeID range | 10 | Referrals and restored peers waiting for validation. |
 | Pending candidates total | 512 | Global cap across not-yet-active referrals. |
 | Startup candidates restored | 512 | Most-recently-successful cached contacts; none start active. |
-| Local peer observations | 10,000 | Maximum stored peer observations, including offline history. |
-| Offline address retry window | 7 days | Older unpinned addresses are not retried. |
-| Offline history retention | 30 days | Old unpinned history is pruned locally. |
+| Active routing contacts | 10,000 | Local safety bound across both indexes; each peer is counted once. |
+| Persisted peer observations | 10,000 | bbolt snapshot bound, including offline history. |
+| New-peer probation | 2 hours | Non-pinned peers participate locally in memory but are not persisted yet. |
+| Offline history retention | 30 days | Based on local `OfflineSince`; old unpinned history is pruned. |
 
 The arrays of ranges have fixed slice headers; peer slices grow only when
-contacts are learned. So a fresh node does not allocate thousands of peer
-records merely because the coordinate space has 256 possible ranges.
+contacts are learned. A fresh node does not allocate thousands of peer records
+merely because the coordinate space has 256 possible ranges. The normal target
+of 20 is a useful response/replication size, not a maximum for a range. Verified
+contacts can grow a range beyond 20 as the local view grows, up to the separate
+10,000-contact local safety bound.
 
-New successful contacts move to the front of their local range. Replacements
-are bounded and prefer less-represented observed IPv6 `/48` prefixes and,
-when the optional local ASN map can resolve them, different ASNs. The starting
-preferences are two peers per observed `/48` and four per known ASN. They are
-soft preferences: a sparse range is not rejected merely because peers share a
-prefix, and enough lookup candidates are returned when diversity information
-is missing. These numeric limits are currently constants, not runtime
-configuration; making them configurable and testing different values remains
-open work in #71.
+New successful contacts move to the front of their local range. XOR distance,
+not recency or network location, determines which contacts are closest to a
+lookup target. IPv6-prefix and optional ASN diversity remain soft selection
+signals for replica placement; they are not identity proof and do not block an
+otherwise valid peer from being retained. There is no hard "20 peers per
+range" limit now. The 10,000-contact local cap is a memory/persistence safety
+limit, not a claim that a node should learn every network member.
 
 ### Health, Retry, and Refresh
 
-A failed check does not immediately remove an active peer. The table applies
-local retry delays of 5 seconds, 20 seconds, and 60 seconds across consecutive
-failures. At the third spaced failure the peer is removed from active routing;
-it may remain as a local offline hint. A successful authenticated contact
-clears the failure state. Local times control retry and cache cleanup only;
-they do not prove identity, DHT membership, or which signed record wins.
+A failed DHT lookup by itself does not remove a peer. A separate liveness worker
+checks active contacts one at a time, with a stable initial offset to avoid
+starting all checks together. It checks the signed endpoint, probes the
+advertised IPv6 address, ensures the IKE/IPsec peer identity, and confirms the
+protected VX6 path. Consecutive failed liveness checks must be at least five
+minutes apart; the third miss moves the peer to local inactive history. A
+successful check resets the miss count. The worker is serialized, so a slow
+peer delays later checks; the five-minute interval is a minimum spacing per
+peer, not a promise that an arbitrarily large table is swept within five
+minutes.
 
-The node runs a local routing refresh approximately every 10 minutes, with
-20-percent jitter (about 8-12 minutes). One round selects at most two stale or
+New non-pinned contacts have a two-hour in-memory probation period. They can
+participate in this node's routing during that period, but are not written to
+the durable peer snapshot yet. An unverified referral is not durable peer
+history at all; it must first complete the authenticated peer check. After
+probation, normal persistence applies. This is a local retention policy, not a
+network-wide admission vote or proof that a peer is honest.
+
+Inactive contacts are excluded from ordinary lookup referrals. An explicit
+bootstrap lookup can include locally retained inactive contacts as address
+hints; a returned hint is not promoted to active and must be validated again.
+Inactive unpinned history is retained for up to 30 days from the local time it
+was marked inactive. Local times control retry and cleanup only; they do not
+prove identity, DHT membership, or which signed record wins.
+
+The node runs a local routing refresh approximately every 5 minutes, with
+20-percent jitter (about 4-6 minutes). One round selects at most two stale or
 underfilled non-empty bucket targets and asks up to four closest contacts for
 referrals. It also asks up to four close contacts about the node's own NodeID
 coordinate. This is bounded local maintenance, not a network-wide ping sweep.
 An authenticated referral is kept as a candidate until it responds through the
-normal signed-identity, IKE, and protected VX6 path.
+normal signed-identity, IKE, and protected VX6 path. Peer liveness checks are
+separate from these bounded routing refresh lookups.
+When a node has no active routing contacts, refresh uses the explicit bootstrap
+lookup type for both its NodeID and NameHash coordinates. That request can
+return recently inactive contacts as hints; an ordinary lookup never gets
+those inactive contacts from a peer.
 
 ### Persistent Peer Cache
 
@@ -117,11 +143,22 @@ observations, not private identity keys. The file is created with mode `0600`.
 On restart, at most 512 recent records are loaded as candidates. The node must
 revalidate them before they return to active routes. Signed endpoint validity
 and a fresh authenticated tunnel exchange remain required; reading a record
-from disk is never proof that its address is live. The database retains
-history for up to 30 days, while an unpinned address is only considered for
-retry for 7 days. User identity pins and routing-table slots are separate
-concepts. The existing peer identity pin command does not yet provide a
-user-facing manager for the routing table's internal `Pinned` observation.
+from disk is never proof that its address is live. Offline history is retained
+for up to 30 days. User identity pins and routing-table slots are separate
+concepts. The CLI's identity pins are not yet fully connected to the DHT
+peer-store preference metadata, and service-use history is not yet maintained
+as a separate durable contact category.
+
+The local verified-node registry, including records encountered while
+resolving services, can seed a local DHT client. User-selected identity pins
+live in the config store. These are local convenience sources, not trust
+claims shared with the network. There is not yet a separate service-use score
+or dedicated diversity-contact list. First-seen time, successful-check count,
+last-success time, and pin status prioritize durable peer observations when
+the peer store reaches its limit. A signed name conflict is reported as
+multiple identities; it does not automatically evict one contact, because a
+single peer's conflict report is not a network-wide proof that one identity is
+the rightful owner.
 
 ### What Is Still Needed For #71
 
@@ -170,13 +207,11 @@ VX6 reduces the obvious alias leak, but it does not hide all metadata from a pow
 
 ## WAN/Churn Adaptation
 
-The DHT now adjusts lookup and replication behavior from live lookup failure signals:
-
-- lookup fanout (`alpha`) increases when recent failures rise
-- lookup query budget (`beta`-style budget) increases under churn
-- replication target increases under churn to keep availability stable
-
-This reduces timeout risk in unstable WAN conditions without permanently paying high bandwidth cost in healthy periods.
+The replication target can increase under churn based on observed lookup
+failures. Lookup fanout and the bounded query budget currently remain fixed by
+the configured lookup limits; they do not automatically increase when failures
+rise. Adaptive lookup tuning remains a separate implementation and benchmark
+task.
 
 ## Adversarial Test Harness
 

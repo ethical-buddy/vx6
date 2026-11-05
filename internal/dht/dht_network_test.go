@@ -222,6 +222,72 @@ func TestNodeLookupFindsSignedTargetAndDoesNotPersistTransientReferral(t *testin
 	}
 }
 
+func TestOnlyBootstrapFindNodeReturnsInactiveContacts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewEndpointRecordV2(id, "OFFLINE", "[2001:db8::9]:4242", 1, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerInfo := NodeInfoFromEndpointRecord(rec)
+	server := newTestServer("server")
+	server.RT.AddNode(peerInfo)
+	start := time.Now()
+	for _, delay := range []time.Duration{0, 5 * time.Minute, 10 * time.Minute} {
+		server.RT.RecordLivenessResult(peerInfo.ID, start.Add(delay), false)
+	}
+	addr := startDHTListener(t, ctx, server)
+	client := newTestServer("client")
+	target := NodeNameKey("OFFLINE")
+	ordinary, err := client.QueryNode(ctx, addr, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordinary) != 0 {
+		t.Fatalf("ordinary lookup returned inactive peers: %+v", ordinary)
+	}
+	bootstrap, err := client.QueryBootstrapNode(ctx, addr, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bootstrap) != 1 || bootstrap[0].ID != peerInfo.ID {
+		t.Fatalf("bootstrap lookup returned %+v, want inactive address hint %s", bootstrap, peerInfo.ID)
+	}
+}
+
+func TestRecursiveBootstrapLookupCanRevalidateInactiveSeed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServerWithIdentity(id)
+	addr := startDHTListener(t, ctx, server)
+	rec, err := record.NewEndpointRecordV2(id, "OLD-SEED", addr, 1, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := NodeInfoFromEndpointRecord(rec)
+	client := newTestServer("client")
+	client.RT.AddNode(seed)
+	start := time.Now()
+	for _, delay := range []time.Duration{0, 5 * time.Minute, 10 * time.Minute} {
+		client.RT.RecordLivenessResult(seed.ID, start.Add(delay), false)
+	}
+	result, err := client.RecursiveBootstrapFindNodeDetailed(ctx, NodeNameKey("OLD-SEED"))
+	if err != nil {
+		t.Fatalf("bootstrap lookup through inactive seed: %v", err)
+	}
+	if result.Outcome != LookupFound || len(result.Matches) != 1 || result.Matches[0].ID != seed.ID {
+		t.Fatalf("bootstrap lookup result = %+v, want signed seed identity", result)
+	}
+}
+
 func TestLookupPolicyDefaultsAndRejectsUnsafeCeilings(t *testing.T) {
 	server := newTestServer("local")
 	defaults := server.LookupLimits()

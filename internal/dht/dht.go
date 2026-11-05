@@ -408,7 +408,10 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 	switch req.Action {
 	case "find_node":
 		limits := s.LookupLimits()
-		if req.Type == proto.DHTTypeLookupName {
+		if req.Type == proto.DHTTypeBootstrap {
+			byNameHash := !strings.HasPrefix(req.Target, "vx6_")
+			resp.Nodes = s.RT.ClosestNodesForBootstrap(req.Target, limits.MaxReferrals, byNameHash)
+		} else if req.Type == proto.DHTTypeLookupName {
 			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, limits.MaxReferrals)
 		} else {
 			resp.Nodes = s.RT.ClosestNodes(strings.TrimPrefix(req.Target, "node/id/"), limits.MaxReferrals)
@@ -479,6 +482,17 @@ type NodeLookupResult struct {
 }
 
 func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (NodeLookupResult, error) {
+	return s.recursiveFindNodeDetailed(ctx, target, false)
+}
+
+// RecursiveBootstrapFindNodeDetailed includes recently inactive local
+// contacts as initial hints and asks responders for their bootstrap contacts.
+// All returned contacts still require independent validation before use.
+func (s *Server) RecursiveBootstrapFindNodeDetailed(ctx context.Context, target string) (NodeLookupResult, error) {
+	return s.recursiveFindNodeDetailed(ctx, target, true)
+}
+
+func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, bootstrap bool) (NodeLookupResult, error) {
 	limits := s.LookupLimits()
 	ctx, cancel := boundedLookupContext(ctx, limits.TotalTimeout)
 	defer cancel()
@@ -491,7 +505,15 @@ func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (
 			s.RT.DiscardCandidate(id)
 		}
 	}()
-	for _, node := range s.closestForTarget(target, limits.MaxConcurrent) {
+	seeds := s.closestForTarget(target, limits.MaxConcurrent)
+	if bootstrap {
+		if strings.HasPrefix(target, "node/name/") {
+			seeds = s.RT.ClosestNodesForBootstrap(strings.TrimPrefix(target, "node/name/"), limits.MaxConcurrent, true)
+		} else {
+			seeds = s.RT.ClosestNodesForBootstrap(strings.TrimPrefix(target, "node/id/"), limits.MaxConcurrent, false)
+		}
+	}
+	for _, node := range seeds {
 		verified := VerifyNodeInfo(node, time.Now()) == nil
 		if _, active := s.RT.ActiveNode(node.ID); active || verified {
 			known[node.ID] = node
@@ -538,7 +560,13 @@ func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (
 			go func(node proto.NodeInfo) {
 				peerCtx, stop := context.WithTimeout(ctx, limits.PeerTimeout)
 				defer stop()
-				refs, err := s.QueryNode(peerCtx, node.Addr, target)
+				var refs []proto.NodeInfo
+				var err error
+				if bootstrap {
+					refs, err = s.QueryBootstrapNode(peerCtx, node.Addr, target)
+				} else {
+					refs, err = s.QueryNode(peerCtx, node.Addr, target)
+				}
 				results <- nodeQueryResult{node: node, refs: refs, err: err}
 			}(node)
 		}
@@ -1110,13 +1138,21 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 }
 
 func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
+	return s.queryNode(ctx, addr, targetID, false)
+}
+
+func (s *Server) QueryBootstrapNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
+	return s.queryNode(ctx, addr, targetID, true)
+}
+
+func (s *Server) queryNode(ctx context.Context, addr, targetID string, bootstrap bool) ([]proto.NodeInfo, error) {
 	limits := s.LookupLimits()
 	var lastErr error
 	for attempt := 0; attempt <= limits.MaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		nodes, err := s.queryNodeOnce(ctx, addr, targetID, limits)
+		nodes, err := s.queryNodeOnce(ctx, addr, targetID, limits, bootstrap)
 		if err == nil {
 			return nodes, nil
 		}
@@ -1125,7 +1161,7 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 	return nil, lastErr
 }
 
-func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limits LookupLimits) ([]proto.NodeInfo, error) {
+func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limits LookupLimits, bootstrap bool) ([]proto.NodeInfo, error) {
 	ctx = s.guardedContext(ctx)
 	dialCtx, cancel := context.WithTimeout(ctx, limits.PeerTimeout)
 	defer cancel()
@@ -1140,6 +1176,14 @@ func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limit
 	setLookupConnDeadline(ctx, conn, limits.PeerTimeout)
 
 	typ, target := nodeLookupTarget(targetID)
+	if bootstrap {
+		typ = proto.DHTTypeBootstrap
+		if strings.HasPrefix(targetID, "node/name/") {
+			target = strings.TrimPrefix(targetID, "node/name/")
+		} else {
+			target = strings.TrimPrefix(targetID, "node/id/")
+		}
+	}
 	req := proto.DHTRequest{Type: typ, Action: "find_node", Target: target}
 	if err := req.Validate(); err != nil {
 		return nil, err

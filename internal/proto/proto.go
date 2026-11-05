@@ -90,8 +90,8 @@ func (r DHTRequest) Validate() error {
 			return fmt.Errorf("identity lookup target must contain a full NodeID")
 		}
 	case DHTTypeBootstrap:
-		if r.Action != "find_node" || !strings.HasPrefix(r.Target, "vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
-			return fmt.Errorf("bootstrap target NodeID must contain a full SHA-256 digest")
+		if r.Action != "find_node" || !(isSHA256Hex(r.Target) || (strings.HasPrefix(r.Target, "vx6_") && isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")))) {
+			return fmt.Errorf("bootstrap target must be a full name hash or NodeID")
 		}
 	case DHTTypeUpdate, DHTTypeLookupSvc, DHTTypeLookupPriv, DHTTypeLookupHid, DHTTypeLookupOther:
 	default:

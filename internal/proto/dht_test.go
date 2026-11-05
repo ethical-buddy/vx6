@@ -16,6 +16,14 @@ func TestDHTRequestRequiresMatchingTypedPayload(t *testing.T) {
 			},
 		},
 		{
+			name: "bootstrap by name hash",
+			req:  DHTRequest{Type: DHTTypeBootstrap, Action: "find_node", Target: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		{
+			name: "bootstrap by NodeID",
+			req:  DHTRequest{Type: DHTTypeBootstrap, Action: "find_node", Target: "vx6_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		{
 			name: "wrong operation type",
 			req: DHTRequest{
 				Type: DHTTypeLookupKey, Action: "find_value",

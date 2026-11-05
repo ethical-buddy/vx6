@@ -53,8 +53,8 @@ const (
 	relayHandshakeDeadline    = 60 * time.Second
 	serviceProxyDeadline      = 30 * time.Second
 	idleSessionDeadline       = 5 * time.Minute
-	dhtRouteRefreshInterval   = 10 * time.Minute
-	dhtRouteRefreshJitter     = 2 * time.Minute
+	dhtRouteRefreshInterval   = 5 * time.Minute
+	dhtRouteRefreshJitter     = time.Minute
 	dhtRefreshRoundLimit      = 2
 	dhtPeerStoreFlushInterval = time.Minute
 )
@@ -840,6 +840,8 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 }
 
 func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dht.PeerStore) {
+	probeMu := &sync.Mutex{}
+	go runDHTLivenessChecks(ctx, log, cfg, probeMu)
 	flush := func() {
 		if store == nil || cfg.DHT == nil || cfg.DHT.RT == nil {
 			return
@@ -856,43 +858,44 @@ func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dh
 		}
 		// Recheck only a small number of durable address hints. They remain
 		// candidates until signed identity, IKE and in-tunnel liveness succeed.
-		if rec, err := cfg.recordState.Current(cfg.Identity, cfg.Name, cfg.AdvertiseAddr); err == nil {
-			cached := cfg.DHT.RT.CandidateNodes(2)
-			for _, candidate := range cached {
-				if ctx.Err() != nil {
-					return
-				}
-				if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
-					continue
-				}
-				if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
-					continue
-				}
-				attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-				result := syncTarget(attemptCtx, log, cfg, &rec, candidate.Addr)
-				cancel()
-				if result.err == nil && result.peer != nil {
-					cfg.DHT.RT.AddNode(dht.NodeInfoFromEndpointRecord(*result.peer))
-					_ = cfg.Registry.Import([]record.EndpointRecord{*result.peer}, nil)
-				} else if result.nodeID != "" {
-					cfg.DHT.RT.NoteFailure(result.nodeID)
-				}
+		for _, candidate := range cfg.DHT.RT.CandidateNodes(2) {
+			if ctx.Err() != nil {
+				return
+			}
+			if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
+				continue
+			}
+			probeMu.Lock()
+			attemptCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			err := verifyRoutingPeer(attemptCtx, cfg, candidate)
+			cancel()
+			probeMu.Unlock()
+			if err == nil {
+				cfg.DHT.RT.AddNode(candidate)
+			} else {
+				cfg.DHT.RT.RecordLivenessResult(candidate.ID, time.Now(), false)
 			}
 		}
-		selfKey := dht.NodeIDKey(cfg.NodeID)
-		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		referrals, err := cfg.DHT.RecursiveFindNode(refreshCtx, selfKey)
-		cancel()
-		if err == nil {
-			for _, referral := range referrals {
-				if dht.VerifyNodeInfo(referral, time.Now()) == nil {
-					cfg.DHT.RT.AddCandidate(referral)
-				}
+		var refreshKeys []string
+		bootstrap := cfg.DHT.RT.ActivePeerCount() == 0
+		if bootstrap {
+			refreshKeys = []string{dht.NodeIDKey(cfg.NodeID), dht.NodeNameKey(cfg.Name)}
+		} else {
+			refreshKeys = append(refreshKeys, dht.NodeIDKey(cfg.NodeID))
+			for _, target := range cfg.DHT.RT.RefreshTargets(time.Now(), dhtRefreshRoundLimit) {
+				refreshKeys = append(refreshKeys, target.Key)
 			}
 		}
-		for _, target := range cfg.DHT.RT.RefreshTargets(time.Now(), dhtRefreshRoundLimit) {
+		for _, key := range refreshKeys {
 			refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			referrals, err := cfg.DHT.RecursiveFindNode(refreshCtx, target.Key)
+			var referrals []proto.NodeInfo
+			var err error
+			if bootstrap {
+				result, lookupErr := cfg.DHT.RecursiveBootstrapFindNodeDetailed(refreshCtx, key)
+				referrals, err = result.Closest, lookupErr
+			} else {
+				referrals, err = cfg.DHT.RecursiveFindNode(refreshCtx, key)
+			}
 			cancel()
 			if err != nil {
 				continue
@@ -922,6 +925,71 @@ func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dh
 			refreshTimer.Reset(jitteredDHTRefresh())
 		}
 	}
+}
+
+func runDHTLivenessChecks(ctx context.Context, log io.Writer, cfg Config, probeMu *sync.Mutex) {
+	if cfg.DHT == nil || cfg.DHT.RT == nil {
+		return
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		peer, ok := cfg.DHT.RT.BeginLivenessProbe(time.Now())
+		if !ok {
+			continue
+		}
+		probeMu.Lock()
+		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err := verifyRoutingPeer(probeCtx, cfg, peer)
+		cancel()
+		probeMu.Unlock()
+		removed := cfg.DHT.RT.RecordLivenessResult(peer.ID, time.Now(), err == nil)
+		if err != nil {
+			fmt.Fprintf(log, "[DHT] Peer liveness check failed (%s): %v\n", peer.ID, err)
+		}
+		if removed {
+			fmt.Fprintf(log, "[DHT] Peer marked inactive after three spaced liveness failures: %s\n", peer.ID)
+		}
+	}
+}
+
+func verifyRoutingPeer(ctx context.Context, cfg Config, peer proto.NodeInfo) error {
+	if err := dht.VerifyNodeInfo(peer, time.Now()); err != nil {
+		return fmt.Errorf("signed peer identity is invalid: %w", err)
+	}
+	endpoint := record.EndpointRecord{
+		Version: peer.IdentityVersion, Sequence: peer.IdentitySequence,
+		NodeID: peer.ID, NodeName: peer.Name, Address: peer.Addr,
+		PublicKey: peer.PublicKey, IssuedAt: peer.IdentityIssuedAt,
+		ExpiresAt: peer.IdentityExpiresAt, Signature: peer.IdentitySignature,
+	}
+	if err := record.VerifyEndpointRecord(endpoint, time.Now()); err != nil {
+		return fmt.Errorf("signed peer endpoint is invalid: %w", err)
+	}
+	if _, _, err := liveness.Probe(ctx, peer.Addr, false, syncProbeTimeout); err != nil {
+		return fmt.Errorf("peer did not answer VX6 liveness probe: %w", err)
+	}
+	if cfg.IPsecTunnel == nil {
+		return errors.New("IPsec peer verifier is unavailable")
+	}
+	if err := cfg.IPsecTunnel.EnsurePeer(ctx, endpoint); err != nil {
+		return fmt.Errorf("IKE/IPsec identity check failed: %w", err)
+	}
+	protectedCtx := vxtransport.WithDialGuard(ctx, func(_ context.Context, target string) error {
+		if target != peer.Addr {
+			return fmt.Errorf("liveness context cannot dial unverified endpoint %s", target)
+		}
+		return nil
+	})
+	if err := liveness.TunnelPing(protectedCtx, cfg.TransportMode, peer.Addr, syncProbeTimeout); err != nil {
+		return fmt.Errorf("authenticated IPsec tunnel check failed: %w", err)
+	}
+	return nil
 }
 
 func jitteredDHTRefresh() time.Duration {

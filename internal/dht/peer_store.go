@@ -61,15 +61,12 @@ func (s *PeerStore) SaveSnapshot(peers []PeerObservation, now time.Time) error {
 		return nil
 	}
 	peers = append([]PeerObservation(nil), peers...)
-	sort.Slice(peers, func(i, j int) bool {
-		if peers[i].Pinned != peers[j].Pinned {
-			return peers[i].Pinned
-		}
-		return peers[i].LastSuccess.After(peers[j].LastSuccess)
-	})
+	sort.Slice(peers, func(i, j int) bool { return peerRetentionLess(peers[i], peers[j]) })
 	selected := make([]PeerObservation, 0, min(len(peers), maxPersistedPeers))
 	for _, peer := range peers {
-		if peer.Node.ID == "" || peer.Node.Addr == "" || (!peer.Pinned && !peer.LastSeen.IsZero() && now.Sub(peer.LastSeen) > peerHistoryTTL) {
+		tooOldOffline := !peer.OfflineSince.IsZero() && now.Sub(peer.OfflineSince) > peerHistoryTTL
+		staleUnclassified := peer.OfflineSince.IsZero() && !peer.LastSeen.IsZero() && now.Sub(peer.LastSeen) > peerHistoryTTL
+		if peer.Node.ID == "" || peer.Node.Addr == "" || (!peer.Pinned && (tooOldOffline || staleUnclassified)) {
 			continue
 		}
 		if len(selected) == maxPersistedPeers {
@@ -165,7 +162,9 @@ func (s *PeerStore) LoadCandidates(now time.Time, limit int) ([]PeerObservation,
 			if err := json.Unmarshal(value, &peer); err != nil {
 				return nil // Ignore a damaged row without losing the rest of the cache.
 			}
-			if peer.Node.ID == "" || peer.Node.Addr == "" || (!peer.Pinned && !peer.LastSeen.IsZero() && now.Sub(peer.LastSeen) > peerAddressHintTTL) {
+			tooOldOffline := !peer.OfflineSince.IsZero() && now.Sub(peer.OfflineSince) > peerHistoryTTL
+			staleUnclassified := peer.OfflineSince.IsZero() && !peer.LastSeen.IsZero() && now.Sub(peer.LastSeen) > peerAddressHintTTL
+			if peer.Node.ID == "" || peer.Node.Addr == "" || (!peer.Pinned && (tooOldOffline || staleUnclassified)) {
 				return nil
 			}
 			peers = append(peers, peer)
@@ -175,14 +174,28 @@ func (s *PeerStore) LoadCandidates(now time.Time, limit int) ([]PeerObservation,
 	if err != nil {
 		return nil, fmt.Errorf("read DHT peer store: %w", err)
 	}
-	sort.Slice(peers, func(i, j int) bool {
-		if peers[i].Pinned != peers[j].Pinned {
-			return peers[i].Pinned
-		}
-		return peers[i].LastSuccess.After(peers[j].LastSuccess)
-	})
+	sort.Slice(peers, func(i, j int) bool { return peerRetentionLess(peers[i], peers[j]) })
 	if len(peers) > limit {
 		peers = peers[:limit]
 	}
 	return peers, nil
+}
+
+func peerRetentionLess(a, b PeerObservation) bool {
+	if a.Pinned != b.Pinned {
+		return a.Pinned
+	}
+	if !a.FirstSeen.Equal(b.FirstSeen) {
+		if a.FirstSeen.IsZero() {
+			return false
+		}
+		if b.FirstSeen.IsZero() {
+			return true
+		}
+		return a.FirstSeen.Before(b.FirstSeen)
+	}
+	if a.SuccessCount != b.SuccessCount {
+		return a.SuccessCount > b.SuccessCount
+	}
+	return a.LastSuccess.After(b.LastSuccess)
 }
