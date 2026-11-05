@@ -8,6 +8,7 @@ require (
 	github.com/pion/webrtc/v3 v3.2.40
 	github.com/quic-go/quic-go v0.59.1
 	go.etcd.io/bbolt v1.4.3
+	golang.org/x/crypto v0.41.0
 	golang.org/x/sys v0.35.0
 )
 
@@ -54,9 +55,9 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
+	golang.org/x/term v0.34.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
