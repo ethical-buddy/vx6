@@ -1,0 +1,10 @@
+date_utc=2026-11-03T09:07:02Z
+kernel=6.8.0-117-generic
+cpu=
+nproc=4
+mem_total_kb=6053344
+strongswan=Linux strongSwan 5.9.8
+iperf3=iperf 3.12 (cJSON 1.7.15)
+go=go version go1.24.13 linux/arm64
+family=6 dataplane=xfrm selectors=pinned mtu=1500 repeat=1 duration=2
+ike_proposal=aes128gcm16-prfsha256-curve25519 esp_proposal=aes128gcm16 auth=ed25519-pubkey

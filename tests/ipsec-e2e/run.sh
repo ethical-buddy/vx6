@@ -22,7 +22,9 @@ peer_b="vx6-e2e-peer-b-$run_id"
 impostor="vx6-e2e-impostor-$run_id"
 sniffer="vx6-e2e-sniffer-$run_id"
 results=${VX6_E2E_RESULTS_DIR:-"/tmp/vx6-ipsec-e2e-$run_id"}
-work=$(mktemp -d)
+# macOS mktemp ignores TMPDIR without a template, and Colima only shares
+# selected host folders with its VM, so honour TMPDIR explicitly.
+work=$(mktemp -d "${TMPDIR:-/tmp}/vx6-e2e.XXXXXX")
 mkdir -p "$results"
 capture_pid=
 
@@ -65,6 +67,14 @@ done
 printf 'Results directory: %s\n' "$results"
 printf 'Building the Linux strongSwan/VX6 test image and current VX6 binaries...\n'
 docker build -f "$repo_root/tests/ipsec-e2e/Dockerfile" -t "$image" "$repo_root"
+# The binaries run inside the Linux containers, not on the host. Build them for
+# the Docker engine's OS/architecture so the suite also works from macOS
+# (Docker Desktop/colima on Apple Silicon = linux/arm64).
+case "$(docker info --format '{{.Architecture}}' 2>/dev/null)" in
+  aarch64|arm64) export GOARCH=arm64 ;;
+  x86_64|amd64) export GOARCH=amd64 ;;
+esac
+export GOOS=linux CGO_ENABLED=0
 GOCACHE="${GOCACHE:-/tmp/vx6-go-build}" GOMODCACHE="${GOMODCACHE:-/tmp/vx6-go-mod}" go build -o "$work/vx6" ./cmd/vx6
 GOCACHE="${GOCACHE:-/tmp/vx6-go-build}" GOMODCACHE="${GOMODCACHE:-/tmp/vx6-go-mod}" go build -o "$work/vx6-ipsecd" ./cmd/vx6-ipsecd
 GOCACHE="${GOCACHE:-/tmp/vx6-go-build}" GOMODCACHE="${GOMODCACHE:-/tmp/vx6-go-mod}" go build -o "$work/vx6-e2e-peer" ./tests/ipsec-e2e/peer

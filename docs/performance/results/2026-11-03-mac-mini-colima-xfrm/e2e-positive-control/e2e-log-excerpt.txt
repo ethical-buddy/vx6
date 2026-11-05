@@ -1,0 +1,128 @@
+endpoint_record	BETA	[fd42:6:2::20]:4242
+known_peer	BETA	[fd42:6:2::20]:4242
+known_peer	ALPHA	[fd42:6:1::10]:4242
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP> 
+eth0@if33        UP             96:21:81:91:e9:4f <BROADCAST,MULTICAST,UP,LOWER_UP> 
+eth1@if34        UP             36:70:59:fc:b4:36 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+eth2@if35        UP             fe:4e:c0:41:cb:73 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+Transit sniffer is forwarding between the two isolated peer networks.
+
+=== Ping before IPsec negotiation (baseline) ===
+PING fd42:6:2::20(fd42:6:2::20) 56 data bytes
+64 bytes from fd42:6:2::20: icmp_seq=1 ttl=63 time=0.119 ms
+64 bytes from fd42:6:2::20: icmp_seq=2 ttl=63 time=0.113 ms
+
+--- fd42:6:2::20 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1045ms
+rtt min/avg/max/mdev = 0.113/0.116/0.119/0.003 ms
+
+=== VX6 service request through tunnel ===
+VX6_PRIVATE_SENTINEL_20261103-040731-64343
+
+=== Untrusted cleartext probe of the VX6 listener ===
+PASS: untrusted non-IPsec TCP probe was blocked.
+
+=== Ping after CHILD_SA establishment ===
+PING fd42:6:2::20(fd42:6:2::20) 56 data bytes
+64 bytes from fd42:6:2::20: icmp_seq=1 ttl=63 time=0.086 ms
+64 bytes from fd42:6:2::20: icmp_seq=2 ttl=63 time=0.138 ms
+
+--- fd42:6:2::20 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1053ms
+rtt min/avg/max/mdev = 0.086/0.112/0.138/0.026 ms
+vx6-67f7de792531f771: #1, ESTABLISHED, IKEv2, 31b7f0d7c8ad3458_i* 749b206c84d3e2e7_r
+  local  '7f:76:91:be:1f:ec:fe:77:e8:95:ba:29:bb:28:64:7d:d0:ec:86:42' @ fd42:6:1::10[500]
+  remote '5a:e1:ba:39:25:10:8f:00:20:b4:ae:ca:00:06:dc:44:6c:f7:af:a9' @ fd42:6:2::20[500]
+  AES_GCM_16-128/PRF_HMAC_SHA2_256/CURVE_25519
+  established 4s ago, rekeying in 13942s
+  vx6-67f7de792531f771-out: #3, reqid 1, INSTALLED, TUNNEL, ESP:AES_GCM_16-128
+    installed 4s ago, rekeying in 3391s, expires in 3956s
+    in  ca7fb0a0,   1441 bytes,    12 packets,     4s ago
+    out caeb1158,   1578 bytes,    15 packets,     4s ago
+    local  fd42:6:1::10/128[tcp] fd42:6:1::10/128[udp]
+    remote fd42:6:2::20/128[tcp/4242] fd42:6:2::20/128[udp/4242]
+vx6-b3d36b0afd943666: #1, ESTABLISHED, IKEv2, 31b7f0d7c8ad3458_i 749b206c84d3e2e7_r*
+  local  '5a:e1:ba:39:25:10:8f:00:20:b4:ae:ca:00:06:dc:44:6c:f7:af:a9' @ fd42:6:2::20[500]
+  remote '7f:76:91:be:1f:ec:fe:77:e8:95:ba:29:bb:28:64:7d:d0:ec:86:42' @ fd42:6:1::10[500]
+  AES_GCM_16-128/PRF_HMAC_SHA2_256/CURVE_25519
+  established 4s ago, rekeying in 14204s
+  vx6-b3d36b0afd943666-in: #3, reqid 2, INSTALLED, TUNNEL, ESP:AES_GCM_16-128
+    installed 4s ago, rekeying in 3419s, expires in 3956s
+    in  caeb1158,   1578 bytes,    15 packets,     5s ago
+    out ca7fb0a0,   1441 bytes,    12 packets,     5s ago
+    local  fd42:6:2::20/128[tcp/4242] fd42:6:2::20/128[udp/4242]
+    remote fd42:6:1::10/128[tcp] fd42:6:1::10/128[udp]
+src fd42:6:1::10 dst fd42:6:2::20
+	proto esp spi 0xcaeb1158(3404403032) reqid 1(0x00000001) mode tunnel
+	replay-window 0 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0xfca3ab989f34dde3dab43cb323c083baf972de4c (160 bits) 128
+	lastused 2026-11-03 09:07:35
+	anti-replay context: seq 0x0, oseq 0xf, bitmap 0x00000000
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3486(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  1578(bytes), 15(packets)
+	  add 2026-11-03 09:07:35 use 2026-11-03 09:07:35
+	stats:
+	  replay-window 0 replay 0 failed 0
+src fd42:6:2::20 dst fd42:6:1::10
+	proto esp spi 0xca7fb0a0(3397365920) reqid 1(0x00000001) mode tunnel
+	replay-window 32 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0x567ddbe7a7cb03ae984b5cde88d99a7a54778edb (160 bits) 128
+	lastused 2026-11-03 09:07:35
+	anti-replay context: seq 0xc, oseq 0x0, bitmap 0x00000fff
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3395(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  1441(bytes), 12(packets)
+	  add 2026-11-03 09:07:35 use 2026-11-03 09:07:35
+	stats:
+	  replay-window 0 replay 0 failed 0
+src fd42:6:2::20 dst fd42:6:1::10
+	proto esp spi 0xca7fb0a0(3397365920) reqid 2(0x00000002) mode tunnel
+	replay-window 0 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0x567ddbe7a7cb03ae984b5cde88d99a7a54778edb (160 bits) 128
+	lastused 2026-11-03 09:07:35
+	anti-replay context: seq 0x0, oseq 0xc, bitmap 0x00000000
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3423(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  1441(bytes), 12(packets)
+	  add 2026-11-03 09:07:35 use 2026-11-03 09:07:35
+	stats:
+	  replay-window 0 replay 0 failed 0
+src fd42:6:1::10 dst fd42:6:2::20
+	proto esp spi 0xcaeb1158(3404403032) reqid 2(0x00000002) mode tunnel
+	replay-window 32 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0xfca3ab989f34dde3dab43cb323c083baf972de4c (160 bits) 128
+	lastused 2026-11-03 09:07:35
+	anti-replay context: seq 0xf, oseq 0x0, bitmap 0x00007fff
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3507(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  1578(bytes), 15(packets)
+	  add 2026-11-03 09:07:35 use 2026-11-03 09:07:35
+	stats:
+	  replay-window 0 replay 0 failed 0
+pcap=/Users/<user>/.vx6-tmp/vx6-docker-run.FHnKOM/results/e2e/positive-control/wire.pcap
+ESP packets:       54
+IKE UDP packets:        8
+Clear VX6-port packets:        0
+Clear peer-to-peer ICMPv6 packets:       16
+Clear echo packets after IKE began: 4
+Peer SA packet counters before/after post-tunnel ping (in,out): 12/15 -> 12/15
+Service sentinel in capture: no
+FAIL: post-tunnel ping was not confirmed inside the IPsec SA.
+Test failed. Diagnostics and any packet capture are in /Users/<user>/.vx6-tmp/vx6-docker-run.FHnKOM/results/e2e/positive-control

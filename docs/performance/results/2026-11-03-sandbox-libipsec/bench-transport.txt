@@ -1,0 +1,46 @@
+goos: linux
+goarch: amd64
+pkg: github.com/vx6/vx6/internal/transport
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkRequestResponse64B_TCP-4    	  409342	      6298 ns/op	  20.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse64B_TCP-4    	  396688	      5987 ns/op	  21.38 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse64B_TCP-4    	  390289	      5994 ns/op	  21.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse64B_TCP-4    	  422649	      5875 ns/op	  21.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse64B_TCP-4    	  436153	      6176 ns/op	  20.73 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse64B_QUIC-4   	   32388	     71673 ns/op	   1.79 MB/s	     479 B/op	      14 allocs/op
+BenchmarkRequestResponse64B_QUIC-4   	   36694	     64510 ns/op	   1.98 MB/s	     480 B/op	      14 allocs/op
+BenchmarkRequestResponse64B_QUIC-4   	   34711	     78095 ns/op	   1.64 MB/s	     478 B/op	      14 allocs/op
+BenchmarkRequestResponse64B_QUIC-4   	   33489	     68919 ns/op	   1.86 MB/s	     478 B/op	      14 allocs/op
+BenchmarkRequestResponse64B_QUIC-4   	   32282	     64040 ns/op	   2.00 MB/s	     476 B/op	      14 allocs/op
+BenchmarkRequestResponse16K_TCP-4    	  252177	      8049 ns/op	4071.13 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse16K_TCP-4    	  326194	      7304 ns/op	4486.53 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse16K_TCP-4    	  342501	      7544 ns/op	4343.62 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse16K_TCP-4    	  333838	      7519 ns/op	4358.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse16K_TCP-4    	  344690	      7240 ns/op	4525.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkRequestResponse16K_QUIC-4   	   10000	    272886 ns/op	 120.08 MB/s	    2900 B/op	     108 allocs/op
+BenchmarkRequestResponse16K_QUIC-4   	   10000	    254561 ns/op	 128.72 MB/s	    2895 B/op	     108 allocs/op
+BenchmarkRequestResponse16K_QUIC-4   	    9457	    239874 ns/op	 136.61 MB/s	    2893 B/op	     108 allocs/op
+BenchmarkRequestResponse16K_QUIC-4   	   10000	    254138 ns/op	 128.94 MB/s	    2890 B/op	     108 allocs/op
+BenchmarkRequestResponse16K_QUIC-4   	    9800	    250674 ns/op	 130.72 MB/s	    2887 B/op	     108 allocs/op
+BenchmarkConnectFirstByte_TCP-4      	   15903	    147389 ns/op	    1685 B/op	      30 allocs/op
+BenchmarkConnectFirstByte_TCP-4      	   16116	    149218 ns/op	    1690 B/op	      30 allocs/op
+BenchmarkConnectFirstByte_TCP-4      	   16761	    138695 ns/op	    1682 B/op	      30 allocs/op
+BenchmarkConnectFirstByte_TCP-4      	   17631	    137270 ns/op	    1678 B/op	      30 allocs/op
+BenchmarkConnectFirstByte_TCP-4      	   16184	    150247 ns/op	    1688 B/op	      30 allocs/op
+BenchmarkConnectFirstByte_QUIC-4     	    1165	   3618914 ns/op	  289836 B/op	    2342 allocs/op
+BenchmarkConnectFirstByte_QUIC-4     	    1144	   3511270 ns/op	  290217 B/op	    2342 allocs/op
+BenchmarkConnectFirstByte_QUIC-4     	    1209	   2958401 ns/op	  290852 B/op	    2361 allocs/op
+BenchmarkConnectFirstByte_QUIC-4     	    1242	   3759367 ns/op	  290782 B/op	    2370 allocs/op
+BenchmarkConnectFirstByte_QUIC-4     	     962	   2799845 ns/op	  290809 B/op	    2377 allocs/op
+BenchmarkBulkSend_TCP-4              	   80751	     33481 ns/op	1957.40 MB/s	      13 B/op	       0 allocs/op
+BenchmarkBulkSend_TCP-4              	   78024	     28404 ns/op	2307.26 MB/s	      24 B/op	       0 allocs/op
+BenchmarkBulkSend_TCP-4              	   68164	     34963 ns/op	1874.44 MB/s	      11 B/op	       0 allocs/op
+BenchmarkBulkSend_TCP-4              	   66756	     37207 ns/op	1761.41 MB/s	      11 B/op	       0 allocs/op
+BenchmarkBulkSend_TCP-4              	   63254	     34853 ns/op	1880.38 MB/s	      13 B/op	       0 allocs/op
+BenchmarkBulkSend_QUIC-4             	   16681	    146567 ns/op	 447.14 MB/s	    5489 B/op	     199 allocs/op
+BenchmarkBulkSend_QUIC-4             	   15817	    149333 ns/op	 438.86 MB/s	    5551 B/op	     199 allocs/op
+BenchmarkBulkSend_QUIC-4             	   18468	    141519 ns/op	 463.09 MB/s	    5500 B/op	     199 allocs/op
+BenchmarkBulkSend_QUIC-4             	   15558	    160272 ns/op	 408.91 MB/s	    5583 B/op	     199 allocs/op
+BenchmarkBulkSend_QUIC-4             	   15840	    142914 ns/op	 458.57 MB/s	    5531 B/op	     198 allocs/op
+PASS
+ok  	github.com/vx6/vx6/internal/transport	140.918s

@@ -11,13 +11,20 @@ exchange, or ESP engine.
 VX6's Linux peer tunnel manager uses strongSwan `swanctl` and the kernel XFRM
 backend. For each peer it verifies the signed endpoint record, pins that
 record's Ed25519 public key for IKEv2 public-key authentication, and configures
-an IPv6 tunnel-mode CHILD_SA with `/128` selectors. IKE uses AES-GCM-128,
-PRF-SHA-256, and Curve25519; ESP uses AES-GCM-128. `start_action = trap` and
-`close_action = trap` ensure the kernel policy does not send matching peer
-traffic in cleartext when an SA is unavailable. The VX6 dial gate additionally
-requires strongSwan to report the matching CHILD_SA installed before opening a
-TCP or QUIC socket. The listener rejects connections unless the source maps to
-a verified peer with an installed CHILD_SA.
+two IPv6 tunnel-mode CHILD_SAs with `/128` host selectors: `<conn>-out`
+covers this node's TCP/UDP from any port to the peer's VX6 port, and
+`<conn>-in` covers the peer's TCP/UDP from any port to this node's VX6 port.
+(A single child with the VX6 port on both ends would only match traffic whose
+source *and* destination ports are both the VX6 port, so ordinary dials from
+an ephemeral port would match no policy; see
+[performance/ipsec-baseline.md](performance/ipsec-baseline.md).) IKE uses
+AES-GCM-128, PRF-SHA-256, and Curve25519; ESP uses AES-GCM-128.
+`start_action = trap` and `close_action = trap` ensure the kernel policy does
+not send matching peer traffic in cleartext when an SA is unavailable. The VX6
+dial gate additionally requires strongSwan to report the `-out` CHILD_SA
+installed before opening a TCP or QUIC socket. The listener rejects
+connections unless the source maps to a verified peer whose `-in` CHILD_SA is
+installed.
 
 The local identity key is sent to the root-owned IPsec service through the
 authorized local Unix socket and written as PKCS#8 PEM with mode `0600` under
