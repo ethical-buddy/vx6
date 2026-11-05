@@ -32,6 +32,7 @@ import (
 	"github.com/vx6/vx6/internal/runtimectl"
 	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
+	"github.com/vx6/vx6/internal/strictjson"
 	"github.com/vx6/vx6/internal/transfer"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
@@ -480,7 +481,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 
 				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
 				var dr proto.DHTRequest
-				if err := json.Unmarshal(payload, &dr); err != nil {
+				if err := strictjson.Decode(payload, &dr); err != nil {
 					fmt.Fprintf(log, "dht decode error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 var (
@@ -470,7 +471,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 	switch {
 	case strings.HasPrefix(key, "node/name/"):
 		var rec record.EndpointRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode endpoint record: %w", err)
 		}
 		if err := record.VerifyEndpointRecord(rec, now); err != nil {
@@ -499,7 +500,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 	case strings.HasPrefix(key, "node/id/"):
 		want := strings.TrimPrefix(key, "node/id/")
 		var rec record.EndpointRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode endpoint record: %w", err)
 		}
 		if err := record.VerifyEndpointRecord(rec, now); err != nil {

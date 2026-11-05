@@ -26,10 +26,11 @@ const (
 )
 
 type DHTRequest struct {
-	Type   DHTRequestType `json:"type"`
-	Action string         `json:"action"` // "find_node", "find_value", "store"
-	Target string         `json:"target"` // NodeID or Service Name we are looking for
-	Data   string         `json:"data"`   // The value to store (e.g. a signed record)
+	Version uint8          `json:"version"`
+	Type    DHTRequestType `json:"type"`
+	Action  string         `json:"action"` // "find_node", "find_value", "store"
+	Target  string         `json:"target"` // NodeID or Service Name we are looking for
+	Data    string         `json:"data"`   // The value to store (e.g. a signed record)
 }
 
 type DHTRequestType string
@@ -46,9 +47,10 @@ const (
 )
 
 type DHTResponse struct {
-	Type  DHTRequestType `json:"type"`
-	Nodes []NodeInfo     `json:"nodes"` // Closest nodes to the target
-	Value string         `json:"value"` // Found address/descriptor (if any)
+	Version uint8          `json:"version"`
+	Type    DHTRequestType `json:"type"`
+	Nodes   []NodeInfo     `json:"nodes"` // Closest nodes to the target
+	Value   string         `json:"value"` // Found address/descriptor (if any)
 }
 
 func DHTTypeFor(action, target string) DHTRequestType {
@@ -74,6 +76,9 @@ func DHTTypeFor(action, target string) DHTRequestType {
 }
 
 func (r DHTRequest) Validate() error {
+	if r.Version != DHTWireVersion {
+		return fmt.Errorf("unsupported DHT wire version %d", r.Version)
+	}
 	if r.Target == "" || len(r.Target) > 512 {
 		return fmt.Errorf("DHT request target is empty or too long")
 	}
@@ -120,9 +125,14 @@ func isSHA256Hex(value string) bool {
 	if len(value) != 64 {
 		return false
 	}
+	if strings.ToLower(value) != value {
+		return false
+	}
 	_, err := hex.DecodeString(value)
 	return err == nil
 }
+
+const DHTWireVersion uint8 = 1
 
 type NodeInfo struct {
 	IdentityVersion   uint8  `json:"identity_version,omitempty"`

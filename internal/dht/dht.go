@@ -23,6 +23,7 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -188,7 +189,7 @@ func NodeNameKey(name string) string {
 func NodeNameHash(name string) string {
 	canonical, err := record.NormalizeNodeName(name)
 	if err != nil {
-		canonical = strings.ToUpper(name)
+		return ""
 	}
 	sum := sha256.Sum256([]byte("vx6/node-name/v1\x00" + canonical))
 	return fmt.Sprintf("%x", sum[:])
@@ -394,7 +395,7 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	resp := proto.DHTResponse{Type: req.Type}
+	resp := proto.DHTResponse{Version: proto.DHTWireVersion, Type: req.Type}
 	if stringsHasHiddenDescriptorKey(req.Target) {
 		if !s.allowHiddenDescriptorRequest(conn.RemoteAddr().String(), req.Action, time.Now()) {
 			payload, _ := json.Marshal(resp)
@@ -975,7 +976,7 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	req := proto.DHTRequest{Type: proto.DHTTypeFor("store", key), Action: "store", Target: key, Data: value}
+	req := proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeFor("store", key), Action: "store", Target: key, Data: value}
 	if err := req.Validate(); err != nil {
 		return err
 	}
@@ -999,11 +1000,11 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 		return err
 	}
 	var resp proto.DHTResponse
-	if err := json.Unmarshal(resPayload, &resp); err != nil {
+	if err := strictjson.Decode(resPayload, &resp); err != nil {
 		return err
 	}
-	if resp.Type != req.Type {
-		return fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	if resp.Version != req.Version || resp.Type != req.Type {
+		return fmt.Errorf("DHT response version/type (%d, %q) does not match request (%d, %q)", resp.Version, resp.Type, req.Version, req.Type)
 	}
 	return nil
 }
@@ -1184,7 +1185,7 @@ func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limit
 			target = strings.TrimPrefix(targetID, "node/id/")
 		}
 	}
-	req := proto.DHTRequest{Type: typ, Action: "find_node", Target: target}
+	req := proto.DHTRequest{Version: proto.DHTWireVersion, Type: typ, Action: "find_node", Target: target}
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
@@ -1206,11 +1207,11 @@ func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limit
 		return nil, err
 	}
 	var resp proto.DHTResponse
-	if err := json.Unmarshal(resPayload, &resp); err != nil {
+	if err := strictjson.Decode(resPayload, &resp); err != nil {
 		return nil, err
 	}
-	if resp.Type != req.Type {
-		return nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	if resp.Version != req.Version || resp.Type != req.Type {
+		return nil, fmt.Errorf("DHT response version/type (%d, %q) does not match request (%d, %q)", resp.Version, resp.Type, req.Version, req.Type)
 	}
 	if len(resp.Nodes) > limits.MaxReferrals {
 		return nil, fmt.Errorf("DHT response exceeds %d referrals", limits.MaxReferrals)
@@ -1258,7 +1259,7 @@ func (s *Server) queryValueOnce(ctx context.Context, addr, key string, limits Lo
 	setLookupConnDeadline(ctx, conn, limits.PeerTimeout)
 
 	typ, target := lookupRequestTarget(key)
-	req := proto.DHTRequest{Type: typ, Action: "find_value", Target: target}
+	req := proto.DHTRequest{Version: proto.DHTWireVersion, Type: typ, Action: "find_value", Target: target}
 	if err := req.Validate(); err != nil {
 		return "", nil, err
 	}
@@ -1280,11 +1281,11 @@ func (s *Server) queryValueOnce(ctx context.Context, addr, key string, limits Lo
 		return "", nil, err
 	}
 	var resp proto.DHTResponse
-	if err := json.Unmarshal(resPayload, &resp); err != nil {
+	if err := strictjson.Decode(resPayload, &resp); err != nil {
 		return "", nil, err
 	}
-	if resp.Type != req.Type {
-		return "", nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	if resp.Version != req.Version || resp.Type != req.Type {
+		return "", nil, fmt.Errorf("DHT response version/type (%d, %q) does not match request (%d, %q)", resp.Version, resp.Type, req.Version, req.Type)
 	}
 	if len(resp.Nodes) > limits.MaxReferrals {
 		return "", nil, fmt.Errorf("DHT response exceeds %d referrals", limits.MaxReferrals)

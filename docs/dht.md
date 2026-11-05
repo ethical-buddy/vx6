@@ -340,8 +340,14 @@ otherwise consume unbounded network, CPU, and memory. The exact termination,
 negative-result, and resource-limit policy needs its own follow-up design.
 
 The DHT wire schema defines operation types such as `bootstrap`, `update`,
-`lookup_name`, and `lookup_key`; current requests validate the type against
-their action and target before processing. The complete first-join lifecycle,
+`lookup_name`, and `lookup_key`; requests and responses carry wire version `1`.
+Both sides reject missing or unsupported versions. DHT JSON decoding rejects
+unknown fields, duplicate object keys, and trailing values; SHA-256 lookup
+coordinates must be full-length lowercase hexadecimal strings. Invalid node
+names do not produce a fallback lookup hash. This intentionally means older
+unversioned peers cannot exchange DHT messages with this version.
+
+The complete first-join lifecycle,
 where a seed only gives starter contacts and the joining node then performs
 its own lookup and publication, remains tracked separately in #64. Bootstrap
 is not a network-wide trust decision. IKE authentication proves possession of

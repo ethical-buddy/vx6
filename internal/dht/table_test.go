@@ -241,7 +241,7 @@ func TestFindNodeWireTypesFollowRequestedCoordinate(t *testing.T) {
 	if nameType != proto.DHTTypeLookupName || nameTarget != nameHash {
 		t.Fatalf("name lookup wire request = (%q, %q)", nameType, nameTarget)
 	}
-	if err := (proto.DHTRequest{Type: nameType, Action: "find_node", Target: nameTarget}).Validate(); err != nil {
+	if err := (proto.DHTRequest{Version: proto.DHTWireVersion, Type: nameType, Action: "find_node", Target: nameTarget}).Validate(); err != nil {
 		t.Fatalf("valid name-coordinate find_node rejected: %v", err)
 	}
 	nodeID := "vx6_" + strings.Repeat("b", 64)
@@ -249,7 +249,7 @@ func TestFindNodeWireTypesFollowRequestedCoordinate(t *testing.T) {
 	if keyType != proto.DHTTypeLookupKey || keyTarget != nodeID {
 		t.Fatalf("identity lookup wire request = (%q, %q)", keyType, keyTarget)
 	}
-	if err := (proto.DHTRequest{Type: keyType, Action: "find_node", Target: keyTarget}).Validate(); err != nil {
+	if err := (proto.DHTRequest{Version: proto.DHTWireVersion, Type: keyType, Action: "find_node", Target: keyTarget}).Validate(); err != nil {
 		t.Fatalf("valid identity-coordinate find_node rejected: %v", err)
 	}
 }

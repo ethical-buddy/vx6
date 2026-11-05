@@ -32,6 +32,17 @@ func TestNodeNameKeyUsesCanonicalDomainSeparatedFullHash(t *testing.T) {
 	}
 }
 
+func TestInvalidNodeNameDoesNotProduceLookupCoordinate(t *testing.T) {
+	for _, name := range []string{"", "A", "not valid", "-BAD", "BAD-"} {
+		if got := NodeNameHash(name); got != "" {
+			t.Errorf("NodeNameHash(%q) = %q, want empty for invalid name", name, got)
+		}
+		if got := NodeNameKey(name); got != "node/name/" {
+			t.Errorf("NodeNameKey(%q) = %q, want an invalid key rejected by request validation", name, got)
+		}
+	}
+}
+
 func TestPublicKeyLookupKeyMatchesFullNodeIDHashAndDiffersFromNameKey(t *testing.T) {
 	id, err := identity.Generate()
 	if err != nil {

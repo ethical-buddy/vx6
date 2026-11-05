@@ -163,12 +163,12 @@ func TestHandleDHTReturnsAtMostFourClosestReferrals(t *testing.T) {
 		if json.Unmarshal(payload, &response) != nil {
 			return
 		}
-		_ = server.HandleDHT(context.Background(), peer, proto.DHTRequest{Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
+		_ = server.HandleDHT(context.Background(), peer, proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
 	}()
 	if err := proto.WriteHeader(client, proto.KindDHT); err != nil {
 		t.Fatal(err)
 	}
-	payload, _ := json.Marshal(proto.DHTRequest{Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
+	payload, _ := json.Marshal(proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
 	if err := proto.WriteLengthPrefixed(client, payload); err != nil {
 		t.Fatal(err)
 	}
