@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vx6/vx6/internal/proto"
@@ -24,6 +25,7 @@ const (
 	peerActiveIndexName    = "active-v1"
 	peerProbationIndexName = "probation-v1"
 	peerInactiveIndexName  = "inactive-v1"
+	peerValuesBucketName   = "values-v1"
 	peerStoreFileMode      = 0o600
 	peerStoreDirMode       = 0o700
 	peerHistoryTTL         = 30 * 24 * time.Hour
@@ -63,12 +65,53 @@ func OpenPeerStore(path string) (*PeerStore, error) {
 				return err
 			}
 		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(peerValuesBucketName)); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize DHT peer store: %w", err)
 	}
 	return &PeerStore{db: db}, nil
+}
+
+// PutValue persists a validated, non-hidden DHT value. The caller performs
+// signature/key validation before writing; reads validate again on restart.
+func (s *PeerStore) PutValue(key, value string) error {
+	if s == nil || s.db == nil || strings.HasPrefix(key, "hidden-desc/v1/") {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(peerValuesBucketName)).Put([]byte(key), []byte(value))
+	})
+}
+
+// LoadValues returns raw rows for the DHT layer to cryptographically validate.
+func (s *PeerStore) LoadValues() (map[string]string, error) {
+	values := make(map[string]string)
+	if s == nil || s.db == nil {
+		return values, nil
+	}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(peerValuesBucketName)).ForEach(func(key, value []byte) error {
+			values[string(key)] = string(value)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read persisted DHT values: %w", err)
+	}
+	return values, nil
+}
+
+func (s *PeerStore) DeleteValue(key string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(peerValuesBucketName)).Delete([]byte(key))
+	})
 }
 
 func (s *PeerStore) Close() error {

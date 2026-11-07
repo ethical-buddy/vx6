@@ -151,7 +151,7 @@ func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 	waitForShutdown(t, onionDone)
 }
 
-func TestDirectIPv6ServiceWithoutBootstrap(t *testing.T) {
+func TestPublicDirectIPv6ServiceDoesNotRequireOwnerDHTIdentity(t *testing.T) {
 	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
@@ -178,12 +178,12 @@ func TestDirectIPv6ServiceWithoutBootstrap(t *testing.T) {
 		})
 	}()
 
-	assertEchoEventually(t, directAddr, "direct service without bootstrap")
+	assertEchoEventually(t, directAddr, "public service caller absent from owner DHT")
 	directCancel()
 	waitForShutdown(t, directDone)
 }
 
-func TestSyncOnlyBootstrapClientLearnsAndUsesRemoteService(t *testing.T) {
+func TestSyncOnlyBootstrapClientCanOpenPublicServiceWithoutDHTIdentityLookup(t *testing.T) {
 	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
@@ -238,7 +238,7 @@ func TestSyncOnlyBootstrapClientLearnsAndUsesRemoteService(t *testing.T) {
 			return d.DialContext(ctx, "tcp6", serviceRec.Address)
 		})
 	}()
-	assertEchoEventually(t, directAddr, "sync-only client direct service path")
+	assertEchoEventually(t, directAddr, "public service without owner-side DHT identity lookup")
 	directCancel()
 	waitForShutdown(t, directDone)
 
@@ -938,7 +938,12 @@ func (integrationIPsec) EnsurePeer(_ context.Context, peer record.EndpointRecord
 
 func (integrationIPsec) RegisterProbePort(context.Context, string) error { return nil }
 
-func (integrationIPsec) AcceptPeer(context.Context, string) bool { return true }
+// The integration double models a successful IKE-authenticated transport;
+// its empty peer record lets tests exercise public service access without a
+// DHT identity known to the service owner.
+func (integrationIPsec) AuthenticatePeer(context.Context, string) (record.EndpointRecord, bool) {
+	return record.EndpointRecord{}, true
+}
 
 var signedTestEndpoints = struct {
 	sync.RWMutex

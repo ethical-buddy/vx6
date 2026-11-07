@@ -252,34 +252,42 @@ func (m *Manager) saRecentlyVerified(nodeID string) bool {
 	return ok && time.Since(verifiedAt) < saVerificationCache
 }
 
-// AcceptPeer closes the application-layer side of the listener unless the
-// remote IPv6 endpoint maps to a verified peer with an installed CHILD_SA.
-func (m *Manager) AcceptPeer(ctx context.Context, remoteAddress string) bool {
+// AuthenticatePeer returns the verified peer record only when the remote IPv6
+// endpoint maps to a configured peer with an installed inbound CHILD_SA.
+func (m *Manager) AuthenticatePeer(ctx context.Context, remoteAddress string) (record.EndpointRecord, bool) {
 	host, _, err := net.SplitHostPort(remoteAddress)
 	if err != nil {
-		return false
+		return record.EndpointRecord{}, false
 	}
 	remoteIP := net.ParseIP(host)
 	if remoteIP == nil || remoteIP.To4() != nil {
-		return false
+		return record.EndpointRecord{}, false
 	}
 	m.mu.Lock()
-	var peer record.EndpointRecord
+	peers := make([]record.EndpointRecord, 0, len(m.peers))
 	for _, candidate := range m.peers {
 		peerHost, _, splitErr := net.SplitHostPort(candidate.Address)
 		if splitErr == nil && net.ParseIP(peerHost).Equal(remoteIP) && record.VerifyEndpointRecord(candidate, time.Now()) == nil {
 			if _, revoked := m.revoked[candidate.NodeID]; revoked {
 				continue
 			}
-			peer = candidate
-			break
+			peers = append(peers, candidate)
 		}
 	}
 	m.mu.Unlock()
-	if peer.NodeID == "" {
-		return false
+	for _, peer := range peers {
+		if m.childInstalled(ctx, peer, inboundChild(connectionName(peer.NodeID))) {
+			return peer, true
+		}
 	}
-	return m.childInstalled(ctx, peer, inboundChild(connectionName(peer.NodeID)))
+	return record.EndpointRecord{}, false
+}
+
+// AcceptPeer preserves the boolean admission API for callers that only need
+// to reject connections without consuming the authenticated identity.
+func (m *Manager) AcceptPeer(ctx context.Context, remoteAddress string) bool {
+	_, ok := m.AuthenticatePeer(ctx, remoteAddress)
+	return ok
 }
 
 func (m *Manager) saInstalled(ctx context.Context, peer record.EndpointRecord) bool {

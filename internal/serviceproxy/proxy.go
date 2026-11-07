@@ -10,19 +10,41 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/secure"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 const maxRequestSize = 4 * 1024
 
 type ConnectRequest struct {
+	Version     uint8  `json:"version"`
+	Action      string `json:"action"`
 	ServiceName string `json:"service_name"`
+}
+
+func (r ConnectRequest) Validate() error {
+	if r.Version != 1 || r.Action != "open" {
+		return errors.New("unsupported service request version or action")
+	}
+	return record.ValidateServiceName(r.ServiceName)
+}
+
+type ServicePolicy struct {
+	Target         string
+	Private        bool
+	AllowedNodeIDs []string
+}
+
+func (p ServicePolicy) Allows(nodeID string) bool {
+	return !p.Private || (nodeID != "" && slices.Contains(p.AllowedNodeIDs, nodeID))
 }
 
 func HandleInbound(conn net.Conn, id identity.Identity, services map[string]string) error {
@@ -61,6 +83,41 @@ func HandleInbound(conn net.Conn, id identity.Identity, services map[string]stri
 
 	fmt.Printf("[PROXY] Linked %s <-> %s (%s)\n", conn.RemoteAddr(), target, req.ServiceName)
 	return proxyDuplex(secureConn, targetConn)
+}
+
+// HandleInboundWithPolicy relies on the listener's authenticated IKE peer
+// record. Service data is not wrapped in a second application crypto session.
+func HandleInboundWithPolicy(conn net.Conn, services map[string]ServicePolicy, ikePeer record.EndpointRecord) error {
+	payload, err := proto.ReadLengthPrefixed(conn, maxRequestSize)
+	if err != nil {
+		return err
+	}
+	var req ConnectRequest
+	if err := strictjson.Decode(payload, &req); err != nil {
+		return fmt.Errorf("decode service request: %w", err)
+	}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("invalid service request name: %w", err)
+	}
+	policy, ok := services[req.ServiceName]
+	if !ok || policy.Target == "" {
+		return errors.New("service unavailable")
+	}
+	if policy.Private {
+		verifiedPeer, err := record.VerifyEndpoint(ikePeer, time.Now())
+		if err != nil {
+			return errors.New("service unavailable")
+		}
+		if !policy.Allows(verifiedPeer.Endpoint().NodeID) {
+			return errors.New("service unavailable")
+		}
+	}
+	targetConn, err := net.Dial("tcp", policy.Target)
+	if err != nil {
+		return fmt.Errorf("connect local service target: %w", err)
+	}
+	defer targetConn.Close()
+	return proxyDuplex(conn, targetConn)
 }
 
 func ServeLocalForward(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, dialer func(context.Context) (net.Conn, error)) error {
@@ -106,19 +163,25 @@ func ServeLocalForwardWithUseObserver(ctx context.Context, localListen string, s
 			if err := proto.WriteHeader(remoteConn, proto.KindServiceConn); err != nil {
 				return
 			}
-			secureConn, err := secure.Client(remoteConn, proto.KindServiceConn, id)
-			if err != nil {
-				fmt.Printf("[TUNNEL] Handshake failed: %v\n", err)
-				return
+			var serviceConn io.ReadWriter = remoteConn
+			if !service.IsHidden {
+				// Normal services rely on the IKE-authenticated ESP tunnel.
+			} else {
+				secureConn, handshakeErr := secure.Client(remoteConn, proto.KindServiceConn, id)
+				if handshakeErr != nil {
+					fmt.Printf("[TUNNEL] Handshake failed: %v\n", handshakeErr)
+					return
+				}
+				serviceConn = secureConn
 			}
 
-			payload, _ := json.Marshal(ConnectRequest{ServiceName: service.ServiceName})
-			if err := proto.WriteLengthPrefixed(secureConn, payload); err != nil {
+			payload, _ := json.Marshal(ConnectRequest{Version: 1, Action: "open", ServiceName: service.ServiceName})
+			if err := proto.WriteLengthPrefixed(serviceConn, payload); err != nil {
 				return
 			}
 
 			fmt.Printf("[TUNNEL] Active: Local:%s <-> Remote:%s\n", localListen, service.NodeName)
-			_ = proxyDuplexObserved(localConn, secureConn, onUse)
+			_ = proxyDuplexObserved(localConn, serviceConn, onUse)
 		}()
 	}
 }

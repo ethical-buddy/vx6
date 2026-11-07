@@ -1,6 +1,9 @@
 package proto
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDHTRequestRequiresMatchingTypedPayload(t *testing.T) {
 	tests := []struct {
@@ -46,6 +49,16 @@ func TestDHTRequestRequiresMatchingTypedPayload(t *testing.T) {
 			req:  DHTRequest{Version: DHTWireVersion, Type: DHTTypeLookupOther, Action: "find_value", Target: "app/key", Data: "unexpected"},
 			bad:  true,
 		},
+		{
+			name: "unknown lookup keyspace rejected",
+			req:  DHTRequest{Version: DHTWireVersion, Type: DHTTypeLookupOther, Action: "find_value", Target: "app/key"},
+			bad:  true,
+		},
+		{
+			name: "unsupported store keyspace rejected",
+			req:  DHTRequest{Version: DHTWireVersion, Type: DHTTypeUpdate, Action: "store", Target: "app/key", Data: "value"},
+			bad:  true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -58,6 +71,23 @@ func TestDHTRequestRequiresMatchingTypedPayload(t *testing.T) {
 				t.Fatalf("unexpected validation error: %v", err)
 			}
 		})
+	}
+}
+
+func TestDHTRequestAcceptsOnlyTypedEndpointUpdate(t *testing.T) {
+	target := "node/id/vx6_" + strings.Repeat("a", 64)
+	request := DHTRequest{Version: DHTWireVersion, Type: DHTTypeUpdateIP, Action: "update_ip", Target: target, Data: "signed-endpoint-record"}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("valid endpoint update rejected: %v", err)
+	}
+	request.Target = "service/owner.api"
+	if err := request.Validate(); err == nil {
+		t.Fatal("endpoint update accepted an unrelated target key")
+	}
+	request.Target = target
+	request.Action = "store"
+	if err := request.Validate(); err == nil {
+		t.Fatal("endpoint update accepted a generic store action")
 	}
 }
 

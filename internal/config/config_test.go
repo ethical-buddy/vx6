@@ -41,6 +41,18 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPrivateServiceAllowlistRequiresCanonicalNodeID(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultFile()
+	cfg.Services["admin"] = ServiceEntry{Target: "127.0.0.1:9000", IsPrivate: true, AllowedNodeIDs: []string{"vx6_not-a-key"}}
+	if err := store.Save(cfg); err == nil {
+		t.Fatal("expected malformed allowed NodeID to be rejected")
+	}
+}
+
 func TestRuntimePIDPathUsesConfigDirectory(t *testing.T) {
 	t.Parallel()
 

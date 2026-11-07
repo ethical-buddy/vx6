@@ -159,6 +159,15 @@ eligible rows exist. They must be revalidated before returning to active
 routes. Reading a record from disk is never proof that its address is live.
 Inactive non-friend history expires after 30 days.
 
+Validated, non-hidden DHT values are kept in a separate `values-v1` bucket in
+the same bbolt database. Startup verifies each saved value again, removes
+invalid or expired rows, and loads valid rows as local cache observations. A
+saved value is not a live-peer check or enough evidence by itself to satisfy a
+network lookup; the normal lookup confirmation rules still apply. The node's
+regular publication loop republishes its currently configured signed records
+after startup and peer synchronization. Hidden-service descriptor persistence
+is outside this change.
+
 The CLI supports `vx6 peer friend --record ENDPOINT.json` and
 `vx6 peer unfriend --node-id ID`. Friend status is stored by NodeID and means
 “retain and retry this peer locally”; it does not reserve the advertised name
@@ -348,8 +357,13 @@ timeouts; unlimited traversal is intentionally not used because peers could
 otherwise consume unbounded network, CPU, and memory. The exact termination,
 negative-result, and resource-limit policy needs its own follow-up design.
 
-The DHT wire schema defines operation types such as `bootstrap`, `update`,
-`lookup_name`, and `lookup_key`; requests and responses carry wire version `1`.
+The DHT wire schema defines operation types such as `bootstrap`, signed
+`update_ip`, `lookup_name`, `lookup_key`, and service-record lookups; requests
+and responses carry wire version `1`. Generic `store` remains the internal
+replication operation for validated non-endpoint records. `update_ip` accepts
+only a signed endpoint record whose NodeID/name matches the requested lookup
+key; stale or invalid records are rejected by the existing record/version
+checks.
 Both sides reject missing or unsupported versions. DHT JSON decoding rejects
 unknown fields, duplicate object keys, and trailing values; SHA-256 lookup
 coordinates must be full-length lowercase hexadecimal strings. Invalid node

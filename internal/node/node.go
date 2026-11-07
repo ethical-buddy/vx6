@@ -66,36 +66,38 @@ type PeerTunnel interface {
 	PreparePeer(context.Context, record.EndpointRecord) error
 	EnsurePeer(context.Context, record.EndpointRecord) error
 	RegisterProbePort(context.Context, string) error
-	AcceptPeer(context.Context, string) bool
+	AuthenticatePeer(context.Context, string) (record.EndpointRecord, bool)
 }
 
 type Config struct {
-	Name                 string
-	NodeID               string
-	ListenAddr           string
-	AdvertiseAddr        string
-	AdvertiseExplicit    bool
-	TransportMode        string
-	HideEndpoint         bool
-	RelayMode            string
-	RelayResourcePercent int
-	MaxConcurrentConns   int
-	DataDir              string
-	ReceiveDir           string
-	FileReceiveMode      string
-	AllowedFileSenders   []string
-	ConfigPath           string
-	ControlInfoPath      string
-	RefreshServices      ServiceRefresher
-	PeerAddrs            []string
-	Services             map[string]string
-	Identity             identity.Identity
-	Registry             *discovery.Registry
-	DHT                  *dht.Server
-	IPsecTunnel          PeerTunnel
-	Reload               chan struct{}
-	livenessCache        *liveness.Cache
-	recordState          *endpointRecordState
+	Name                   string
+	NodeID                 string
+	ListenAddr             string
+	AdvertiseAddr          string
+	AdvertiseExplicit      bool
+	TransportMode          string
+	HideEndpoint           bool
+	RelayMode              string
+	RelayResourcePercent   int
+	MaxConcurrentConns     int
+	DataDir                string
+	ReceiveDir             string
+	FileReceiveMode        string
+	AllowedFileSenders     []string
+	ConfigPath             string
+	ControlInfoPath        string
+	RefreshServices        ServiceRefresher
+	RefreshServicePolicies func() map[string]serviceproxy.ServicePolicy
+	PeerAddrs              []string
+	Services               map[string]string
+	ServicePolicies        map[string]serviceproxy.ServicePolicy
+	Identity               identity.Identity
+	Registry               *discovery.Registry
+	DHT                    *dht.Server
+	IPsecTunnel            PeerTunnel
+	Reload                 chan struct{}
+	livenessCache          *liveness.Cache
+	recordState            *endpointRecordState
 }
 
 type endpointRecordState struct {
@@ -151,6 +153,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			return err
 		}
 		cfg.DHT.RT.RestoreCandidates(cached, time.Now())
+		if err := cfg.DHT.AttachValuePersistence(peerStore, time.Now()); err != nil {
+			return fmt.Errorf("restore validated DHT values: %w", err)
+		}
 	}
 	if cfg.ReceiveDir == "" {
 		cfg.ReceiveDir = defaultReceiveDir(cfg.DataDir)
@@ -416,7 +421,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			}
 			return fmt.Errorf("accept connection: %w", err)
 		}
-		if !peerTunnel.AcceptPeer(ctx, conn.RemoteAddr().String()) {
+		peerIdentity, authenticated := peerTunnel.AuthenticatePeer(ctx, conn.RemoteAddr().String())
+		if !authenticated {
 			_ = conn.Close()
 			continue
 		}
@@ -563,7 +569,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			case proto.KindServiceConn:
 
 				_ = conn.SetDeadline(time.Now().Add(serviceProxyDeadline))
-				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, runtimeServices(cfg)); err != nil {
+				if err := serviceproxy.HandleInboundWithPolicy(&bufferedConn{Conn: conn, reader: reader}, runtimeServicePolicies(cfg), peerIdentity); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			default:
@@ -1709,6 +1715,22 @@ func runtimeConfig(base Config) Config {
 
 func runtimeServices(base Config) map[string]string {
 	return runtimeConfig(base).Services
+}
+
+func runtimeServicePolicies(base Config) map[string]serviceproxy.ServicePolicy {
+	if base.RefreshServicePolicies != nil {
+		if policies := base.RefreshServicePolicies(); policies != nil {
+			return policies
+		}
+	}
+	if base.ServicePolicies != nil {
+		return base.ServicePolicies
+	}
+	policies := make(map[string]serviceproxy.ServicePolicy, len(base.Services))
+	for name, target := range base.Services {
+		policies[name] = serviceproxy.ServicePolicy{Target: target}
+	}
+	return policies
 }
 
 func persistKnownPeerMetadata(configPath string, records []record.EndpointRecord) {

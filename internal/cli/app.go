@@ -94,6 +94,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
+	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 --private --allow-node NODE_ID [--allow-node NODE_ID ...]")
 	fmt.Fprintln(w, "  vx6 service remove --name NAME")
 	fmt.Fprintln(w, "  vx6 connect --service NAME [--listen 127.0.0.1:2222] [--proxy] [--addr [ipv6]:port]")
 	fmt.Fprintln(w, "  vx6 send --file PATH (--to PEER | --addr [ipv6]:port) [--proxy]")
@@ -515,8 +516,10 @@ func runNode(ctx context.Context, args []string) error {
 	}()
 
 	services := make(map[string]string, len(cfgFile.Services))
+	servicePolicies := make(map[string]serviceproxy.ServicePolicy, len(cfgFile.Services))
 	for name, svc := range cfgFile.Services {
 		services[name] = svc.Target
+		servicePolicies[name] = serviceproxy.ServicePolicy{Target: svc.Target, Private: svc.IsPrivate, AllowedNodeIDs: append([]string(nil), svc.AllowedNodeIDs...)}
 	}
 	registry, err := discovery.NewRegistry(filepath.Join(*dataDir, "registry.json"))
 	if err != nil {
@@ -561,6 +564,7 @@ func runNode(ctx context.Context, args []string) error {
 		DHT:                  dht.NewServerWithIdentity(id),
 		PeerAddrs:            config.ConfiguredPeerAddresses(cfgFile),
 		Services:             services,
+		ServicePolicies:      servicePolicies,
 		Registry:             registry,
 		Reload:               reloadCh,
 		RefreshServices: func() map[string]string {
@@ -571,6 +575,17 @@ func runNode(ctx context.Context, args []string) error {
 			m := make(map[string]string, len(c.Services))
 			for k, v := range c.Services {
 				m[k] = v.Target
+			}
+			return m
+		},
+		RefreshServicePolicies: func() map[string]serviceproxy.ServicePolicy {
+			c, err := store.Load()
+			if err != nil {
+				return nil
+			}
+			m := make(map[string]serviceproxy.ServicePolicy, len(c.Services))
+			for k, v := range c.Services {
+				m[k] = serviceproxy.ServicePolicy{Target: v.Target, Private: v.IsPrivate, AllowedNodeIDs: append([]string(nil), v.AllowedNodeIDs...)}
 			}
 			return m
 		},
@@ -768,6 +783,8 @@ func runService(args []string) error {
 		name := fs.String("name", "", "local service name")
 		target := fs.String("target", "", "local TCP target")
 		private := fs.Bool("private", false, "publish only through per-user private catalog")
+		var allowedNodeIDs stringListFlag
+		fs.Var(&allowedNodeIDs, "allow-node", "NodeID allowed to use a private service; repeatable")
 		h := fs.Bool("hidden", false, "hidden")
 		alias := fs.String("alias", "", "hidden alias; defaults to the local service name")
 		profile := fs.String("profile", "fast", "hidden routing profile: fast or balanced")
@@ -788,16 +805,20 @@ func runService(args []string) error {
 			return err
 		}
 		entry := config.ServiceEntry{
-			Target:        *target,
-			IsPrivate:     *private,
-			IsHidden:      *h,
-			Alias:         *alias,
-			HiddenProfile: record.NormalizeHiddenProfile(*profile),
-			IntroMode:     "",
-			IntroNodes:    append([]string(nil), intros...),
+			Target:         *target,
+			IsPrivate:      *private,
+			AllowedNodeIDs: append([]string(nil), allowedNodeIDs...),
+			IsHidden:       *h,
+			Alias:          *alias,
+			HiddenProfile:  record.NormalizeHiddenProfile(*profile),
+			IntroMode:      "",
+			IntroNodes:     append([]string(nil), intros...),
 		}
 		if entry.IsPrivate && entry.IsHidden {
 			return errors.New("service cannot be both hidden and private")
+		}
+		if len(entry.AllowedNodeIDs) > 0 && !entry.IsPrivate {
+			return errors.New("--allow-node is only valid with --private")
 		}
 		if entry.IsHidden {
 			if entry.Alias == "" {

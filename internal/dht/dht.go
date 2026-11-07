@@ -28,9 +28,14 @@ import (
 )
 
 type Server struct {
-	RT                *RoutingTable
-	dialGuard         vxtransport.DialGuard
-	Values            map[string]string // The decentralized database
+	RT               *RoutingTable
+	dialGuard        vxtransport.DialGuard
+	Values           map[string]string // The decentralized database
+	valuePersistence interface {
+		PutValue(string, string) error
+		LoadValues() (map[string]string, error)
+		DeleteValue(string) error
+	}
 	publisher         identity.Identity
 	hidden            HiddenDescriptorPrivacyConfig
 	adaptive          AdaptiveConfig
@@ -46,6 +51,49 @@ type Server struct {
 	lookupEWMA        float64
 	hiddenAnomalyEWMA float64
 	mu                sync.RWMutex
+}
+
+// AttachValuePersistence loads saved values as local cache observations. Every
+// row is revalidated and expired or unsupported values are removed before use.
+func (s *Server) AttachValuePersistence(store interface {
+	PutValue(string, string) error
+	LoadValues() (map[string]string, error)
+	DeleteValue(string) error
+}, now time.Time) error {
+	if store == nil {
+		return nil
+	}
+	rows, err := store.LoadValues()
+	if err != nil {
+		return err
+	}
+	valid := make(map[string]string, len(rows))
+	for key, raw := range rows {
+		if strings.HasPrefix(key, "hidden-desc/v1/") {
+			if err := store.DeleteValue(key); err != nil {
+				return fmt.Errorf("remove non-persistable DHT value %q: %w", key, err)
+			}
+			continue
+		}
+		value, err := validateLookupValue(key, raw, now)
+		if err != nil || !value.verified {
+			if deleteErr := store.DeleteValue(key); deleteErr != nil {
+				return fmt.Errorf("remove invalid persisted DHT value %q: %w", key, deleteErr)
+			}
+			continue
+		}
+		valid[key] = raw
+	}
+	s.mu.Lock()
+	s.valuePersistence = store
+	for key, raw := range valid {
+		s.Values[key] = raw
+		if value, err := validateLookupValue(key, raw, now); err == nil {
+			s.versions[key] = StoredValueState{Current: storedVersionFromValidated(value)}
+		}
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Server) SetDialGuard(guard vxtransport.DialGuard) {
@@ -407,6 +455,31 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 	}
 
 	switch req.Action {
+	case "update_ip":
+		validated, err := validateLookupValue(req.Target, req.Data, time.Now())
+		if err != nil || !validated.verified {
+			if err == nil {
+				err = fmt.Errorf("endpoint update is not verified")
+			}
+			return fmt.Errorf("reject invalid signed endpoint update: %w", err)
+		}
+		var endpoint record.EndpointRecord
+		if err := strictjson.Decode([]byte(validated.raw), &endpoint); err != nil {
+			return fmt.Errorf("decode signed endpoint update: %w", err)
+		}
+		if err := record.VerifyEndpointRecord(endpoint, time.Now()); err != nil {
+			return fmt.Errorf("reject invalid signed endpoint update: %w", err)
+		}
+		validTarget := (req.Target == NodeIDKey(endpoint.NodeID) || req.Target == NodeNameKey(endpoint.NodeName))
+		if !validTarget {
+			return fmt.Errorf("endpoint update target does not match signed identity")
+		}
+		if err := s.admitStoreValue(conn.RemoteAddr().String(), req.Target, req.Data, time.Now()); err != nil {
+			return err
+		}
+		if _, _, err := s.storeValidated(req.Target, req.Data, time.Now()); err != nil {
+			return err
+		}
 	case "find_node":
 		limits := s.LookupLimits()
 		if req.Type == proto.DHTTypeBootstrap {
@@ -461,6 +534,9 @@ func (s *Server) StoreLocal(key, value string) {
 	s.Values[key] = value
 	if validated, err := validateLookupValue(key, value, time.Now()); err == nil {
 		s.versions[key] = StoredValueState{Current: storedVersionFromValidated(validated)}
+		if validated.verified && s.valuePersistence != nil && !strings.HasPrefix(key, "hidden-desc/v1/") {
+			_ = s.valuePersistence.PutValue(key, value)
+		}
 	}
 }
 
@@ -970,6 +1046,11 @@ func (s *Server) storeValidated(key, value string, now time.Time) (string, bool,
 		return current, false, err
 	}
 	if changed {
+		if s.valuePersistence != nil && incomingValue.verified && !strings.HasPrefix(key, "hidden-desc/v1/") {
+			if err := s.valuePersistence.PutValue(key, chosen); err != nil {
+				return current, false, fmt.Errorf("persist validated DHT value: %w", err)
+			}
+		}
 		s.Values[key] = chosen
 	}
 	s.recordVersionLocked(key, previousValue, incomingValue, changed)
@@ -985,6 +1066,14 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	req := proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeFor("store", key), Action: "store", Target: key, Data: value}
+	if strings.HasPrefix(key, "node/id/") || strings.HasPrefix(key, "node/name/") {
+		if envelope, ok, err := maybeDecodeEnvelope(value); err == nil && ok {
+			var endpoint record.EndpointRecord
+			if strictjson.Decode([]byte(envelope.Value), &endpoint) == nil && record.VerifyEndpointRecord(endpoint, time.Now()) == nil {
+				req = proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeUpdateIP, Action: "update_ip", Target: key, Data: value}
+			}
+		}
+	}
 	if err := req.Validate(); err != nil {
 		return err
 	}

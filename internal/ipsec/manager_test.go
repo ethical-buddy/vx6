@@ -251,14 +251,18 @@ func TestAcceptPeerRequiresCurrentlyInstalledSA(t *testing.T) {
 	if err := manager.PreparePeer(context.Background(), peer); err != nil {
 		t.Fatal(err)
 	}
-	if manager.AcceptPeer(context.Background(), "[2001:db8::2]:50000") {
+	if _, ok := manager.AuthenticatePeer(context.Background(), "[2001:db8::2]:50000"); ok {
 		t.Fatal("accepted inbound peer with no installed CHILD_SA")
 	}
 	installed = true
-	if !manager.AcceptPeer(context.Background(), "[2001:db8::2]:50000") {
+	authenticated, ok := manager.AuthenticatePeer(context.Background(), "[2001:db8::2]:50000")
+	if !ok {
 		t.Fatal("rejected peer after CHILD_SA became installed")
 	}
-	if manager.AcceptPeer(context.Background(), "[2001:db8::3]:50000") {
+	if authenticated.NodeID != remote.NodeID || authenticated.PublicKey != peer.PublicKey {
+		t.Fatalf("authenticated identity mismatch: got %s", authenticated.NodeID)
+	}
+	if _, ok := manager.AuthenticatePeer(context.Background(), "[2001:db8::3]:50000"); ok {
 		t.Fatal("accepted inbound traffic from an unrecognized address")
 	}
 }

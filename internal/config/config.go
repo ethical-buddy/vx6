@@ -6,6 +6,7 @@ package config
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,6 +90,7 @@ type ServiceEntry struct {
 	Target             string   `json:"target"`
 	IsHidden           bool     `json:"is_hidden"`
 	IsPrivate          bool     `json:"is_private,omitempty"`
+	AllowedNodeIDs     []string `json:"allowed_node_ids,omitempty"`
 	Alias              string   `json:"alias,omitempty"`
 	HiddenLookupSecret string   `json:"hidden_lookup_secret,omitempty"`
 	HiddenProfile      string   `json:"hidden_profile,omitempty"`
@@ -165,6 +167,9 @@ func (s *Store) Load() (File, error) {
 	if err := validatePinnedPeers(cfg.Node.PinnedPeers); err != nil {
 		return File{}, fmt.Errorf("validate pinned peers: %w", err)
 	}
+	if err := validateServicePolicies(cfg.Services); err != nil {
+		return File{}, err
+	}
 	normalize(&cfg)
 	return cfg, nil
 }
@@ -172,6 +177,9 @@ func (s *Store) Load() (File, error) {
 func (s *Store) Save(cfg File) error {
 	if err := validatePinnedPeers(cfg.Node.PinnedPeers); err != nil {
 		return fmt.Errorf("validate pinned peers: %w", err)
+	}
+	if err := validateServicePolicies(cfg.Services); err != nil {
+		return err
 	}
 	normalize(&cfg)
 
@@ -505,6 +513,7 @@ func normalize(cfg *File) {
 		cfg.Services = map[string]ServiceEntry{}
 	}
 	for name, svc := range cfg.Services {
+		svc.AllowedNodeIDs = uniqueSortedStrings(svc.AllowedNodeIDs)
 		if svc.IntroNodes == nil {
 			svc.IntroNodes = []string{}
 		}
@@ -535,6 +544,23 @@ func normalize(cfg *File) {
 		}
 		cfg.Services[name] = svc
 	}
+}
+
+func validateServicePolicies(services map[string]ServiceEntry) error {
+	for name, service := range services {
+		if service.IsHidden && len(service.AllowedNodeIDs) > 0 {
+			return fmt.Errorf("service %q: hidden-service authorization is not changed by the standard service policy", name)
+		}
+		for _, nodeID := range service.AllowedNodeIDs {
+			if len(nodeID) != 68 || !strings.HasPrefix(nodeID, "vx6_") || strings.ToLower(nodeID) != nodeID {
+				return fmt.Errorf("service %q: invalid allowed NodeID %q", name, nodeID)
+			}
+			if _, err := hex.DecodeString(strings.TrimPrefix(nodeID, "vx6_")); err != nil {
+				return fmt.Errorf("service %q: invalid allowed NodeID %q", name, nodeID)
+			}
+		}
+	}
+	return nil
 }
 
 func validatePinnedPeers(pins []PinnedPeer) error {
