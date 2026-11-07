@@ -529,11 +529,19 @@ func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, b
 	queries := 0
 	failures := 0
 	rounds := 0
+	diversityLoaded := false
 	for round := 0; round < limits.MaxRounds && queries < limits.MaxPeerQueries; round++ {
 		rounds = round + 1
 		batchLimit := min(limits.MaxConcurrent, limits.MaxPeerQueries-queries)
 		batch := closestUnqueried(known, queriedIDs, target, batchLimit)
 		if len(batch) == 0 {
+			if !diversityLoaded {
+				diversityLoaded = true
+				addDiversityFallback(known, s.RT.DiversityContacts())
+				if len(closestUnqueried(known, queriedIDs, target, 1)) > 0 {
+					continue
+				}
+			}
 			if len(matches) > 0 {
 				if failures > 0 {
 					return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w: %d peer queries failed; name conflicts may be missing", ErrLookupIncomplete, failures)
@@ -1040,6 +1048,7 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 	collector := newLookupCollector(key, time.Now())
 	queried := 0
 	failures := 0
+	diversityLoaded := false
 
 	s.mu.RLock()
 	if local, ok := s.Values[key]; ok && local != "" {
@@ -1051,6 +1060,19 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 		batchLimit := min(limits.MaxConcurrent, limits.MaxPeerQueries-queried)
 		batch := closestUnqueried(known, queriedIDs, key, batchLimit)
 		if len(batch) == 0 {
+			if !diversityLoaded {
+				diversityLoaded = true
+				for _, peer := range s.RT.DiversityContacts() {
+					if _, exists := known[peer.ID]; exists {
+						continue
+					}
+					known[peer.ID] = peer
+					branchByID[peer.ID] = len(branchByID) + 1
+				}
+				if len(closestUnqueried(known, queriedIDs, key, 1)) > 0 {
+					continue
+				}
+			}
 			break
 		}
 		type queryResult struct {
@@ -1136,6 +1158,14 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 	}
 	s.noteLookupResult(true)
 	return res, nil
+}
+
+func addDiversityFallback(known map[string]proto.NodeInfo, contacts []proto.NodeInfo) {
+	for _, peer := range contacts {
+		if _, exists := known[peer.ID]; !exists {
+			known[peer.ID] = peer
+		}
+	}
 }
 
 func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
@@ -1401,121 +1431,24 @@ func mergeCandidateNodes(existing, incoming []proto.NodeInfo, visited map[string
 }
 
 func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo {
-	if len(nodes) <= limit {
-		return append([]proto.NodeInfo(nil), nodes...)
+	if limit <= 0 {
+		return nil
 	}
+	if len(nodes) > limit {
+		nodes = nodes[:limit]
+	}
+	return append([]proto.NodeInfo(nil), nodes...)
+}
 
-	out := make([]proto.NodeInfo, 0, limit)
-	remaining := make([]proto.NodeInfo, 0, len(nodes))
-	seenASNs := map[string]int{}
-	seenProviders := map[string]struct{}{}
-	seenNetworks := map[string]struct{}{}
-	seenPrefixes := map[string]int{}
-	selected := map[string]struct{}{}
-
-	appendNode := func(node proto.NodeInfo) bool {
-		if _, ok := selected[node.ID]; ok {
-			return false
-		}
-		selected[node.ID] = struct{}{}
-		out = append(out, node)
-		if asn := (sourceObservation{addr: node.Addr}).asnKey(); asn != "" {
-			seenASNs[asn]++
-		}
-		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
-			seenProviders[provider] = struct{}{}
-		}
-		if network := (sourceObservation{addr: node.Addr}).networkKey(); network != "" {
-			seenNetworks[network] = struct{}{}
-		}
-		if prefix := ipv6Prefix48(node.Addr); prefix != "" {
-			seenPrefixes[prefix]++
-		}
-		return len(out) == limit
+func peerDiversityKeys(addr string) []string {
+	keys := make([]string, 0, 2)
+	if asn, ok := ResolveASNForAddr(addr); ok {
+		keys = append(keys, "asn:"+asn)
 	}
-
-	for _, node := range nodes {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		prefix := ipv6Prefix48(node.Addr)
-		if (prefix != "" && seenPrefixes[prefix] >= maxPrefixPeersPerBucket) ||
-			(asn != "" && seenASNs[asn] >= maxASNPeersPerBucket) {
-			remaining = append(remaining, node)
-			continue
-		}
-		if asn == "" {
-			remaining = append(remaining, node)
-			continue
-		}
-		if seenASNs[asn] > 0 {
-			remaining = append(remaining, node)
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
+	if prefix := ipv6Prefix48(addr); prefix != "" {
+		keys = append(keys, "prefix:"+prefix)
 	}
-
-	secondPass := remaining
-	remaining = remaining[:0]
-	for _, node := range secondPass {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
-			remaining = append(remaining, node)
-			continue
-		}
-		provider := (sourceObservation{addr: node.Addr}).providerKey()
-		if provider == "" {
-			remaining = append(remaining, node)
-			continue
-		}
-		if _, ok := seenProviders[provider]; ok {
-			remaining = append(remaining, node)
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
-	}
-
-	thirdPass := remaining
-	remaining = remaining[:0]
-	for _, node := range thirdPass {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
-			remaining = append(remaining, node)
-			continue
-		}
-		network := (sourceObservation{addr: node.Addr}).networkKey()
-		if network == "" {
-			remaining = append(remaining, node)
-			continue
-		}
-		if _, ok := seenNetworks[network]; ok {
-			remaining = append(remaining, node)
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
-	}
-
-	for _, node := range remaining {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
-	}
-	if len(out) < limit {
-		for _, node := range nodes {
-			if appendNode(node) {
-				break
-			}
-		}
-	}
-	return out
+	return keys
 }
 
 func ipv6Prefix48(address string) string {

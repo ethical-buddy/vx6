@@ -267,6 +267,61 @@ func TestRegistryImportReplacesOlderEndpointAddress(t *testing.T) {
 	}
 }
 
+func TestRegistryPublishNotifiesEndpointObserverAfterAcceptedUpdate(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := NewRegistry("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	oldRec, err := record.NewEndpointRecordV2(id, "ALPHA", "[2001:db8:1::1]:4242", 1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRec, err := record.NewEndpointRecordV2(id, "ALPHA", "[2001:db8:2::1]:4242", 2, time.Hour, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Import([]record.EndpointRecord{oldRec}, nil); err != nil {
+		t.Fatal(err)
+	}
+	observed := make(chan record.EndpointRecord, 1)
+	reg.SetEndpointObserver(func(rec record.EndpointRecord) { observed <- rec })
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- reg.HandleConn(serverConn) }()
+	payload, err := json.Marshal(request{Action: "publish", Record: newRec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proto.WriteLengthPrefixed(clientConn, payload); err != nil {
+		t.Fatal(err)
+	}
+	kind, err := proto.ReadHeader(clientConn)
+	if err != nil || kind != proto.KindDiscoveryRes {
+		t.Fatalf("unexpected discovery response kind %d: %v", kind, err)
+	}
+	if _, err := proto.ReadLengthPrefixed(clientConn, maxMessageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-observed:
+		if got.NodeID != id.NodeID || got.Address != newRec.Address || got.Sequence != newRec.Sequence {
+			t.Fatalf("observer received %+v, want accepted new endpoint %+v", got, newRec)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accepted endpoint publication did not notify the local observer")
+	}
+}
+
 func TestRegistryKeepsThreeLocalHistoricalAddressesAndCurrentOnlyInSnapshot(t *testing.T) {
 	id, err := identity.Generate()
 	if err != nil {

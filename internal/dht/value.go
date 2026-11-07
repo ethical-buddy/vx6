@@ -34,9 +34,6 @@ const (
 
 const (
 	minTrustedSupportingSources = 2
-	minTrustedASNGroups         = 2
-	minTrustedNetworkGroups     = 2
-	minTrustedProviderGroups    = 2
 	minTrustedConfirmationScore = 4
 	minTrustedLookupBranches    = 2
 )
@@ -329,19 +326,7 @@ func (c *candidateObservation) confirmed() bool {
 	if !c.onlyLoopbackNetworks() && len(c.exactBranches) < minTrustedLookupBranches {
 		return false
 	}
-	if !c.onlyLoopbackNetworks() {
-		if len(c.exactASNs) > 0 {
-			if len(c.exactASNs) < minTrustedASNGroups && len(c.exactProviders) < minTrustedProviderGroups {
-				return false
-			}
-		} else if len(c.exactProviders) < minTrustedProviderGroups {
-			return false
-		}
-	}
-	if len(c.exactNetworks) >= minTrustedNetworkGroups {
-		return true
-	}
-	return c.onlyLoopbackNetworks()
+	return true
 }
 
 func (c *candidateObservation) onlyLoopbackNetworks() bool {

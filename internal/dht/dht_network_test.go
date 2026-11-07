@@ -794,7 +794,7 @@ func TestLookupCollectorRequiresBranchDiversityForNonLoopbackSources(t *testing.
 	}
 }
 
-func TestLookupCollectorRequiresProviderDiversityForNonLoopbackSources(t *testing.T) {
+func TestLookupCollectorDoesNotRequireProviderDiversityForNonLoopbackSources(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -808,8 +808,8 @@ func TestLookupCollectorRequiresProviderDiversityForNonLoopbackSources(t *testin
 	collector := newLookupCollector(NodeNameKey("owner"), now)
 	collector.Observe(sourceObservation{nodeID: "a", addr: "198.51.10.1:4242", trust: 1, branch: 1}, payload)
 	collector.Observe(sourceObservation{nodeID: "b", addr: "198.51.20.1:4242", trust: 1, branch: 2}, payload)
-	if _, err := collector.Resolve(2); err == nil || !errors.Is(err, ErrInsufficientConfirmation) {
-		t.Fatalf("expected insufficient confirmation without provider diversity, got %v", err)
+	if _, err := collector.Resolve(2); err != nil {
+		t.Fatalf("same-provider peers on independent lookup branches should confirm, got %v", err)
 	}
 
 	collector = newLookupCollector(NodeNameKey("owner"), now)
@@ -1026,7 +1026,7 @@ func TestRecursiveFindValueDetailedReportsConflictCandidates(t *testing.T) {
 	}
 }
 
-func TestSelectReplicationNodesPrefersDistinctProvidersAndNetworks(t *testing.T) {
+func TestSelectReplicationNodesKeepsXORCandidateOrder(t *testing.T) {
 	t.Parallel()
 
 	nodes := []proto.NodeInfo{
@@ -1043,22 +1043,10 @@ func TestSelectReplicationNodesPrefersDistinctProvidersAndNetworks(t *testing.T)
 		t.Fatalf("expected 4 selected nodes, got %d", len(selected))
 	}
 
-	seenProviders := map[string]struct{}{}
-	seenNetworks := map[string]struct{}{}
-	for _, node := range selected {
-		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
-			seenProviders[provider] = struct{}{}
+	for i := range selected {
+		if selected[i].ID != nodes[i].ID {
+			t.Fatalf("candidate %d reordered: got %q want %q", i, selected[i].ID, nodes[i].ID)
 		}
-		network := sourceObservation{addr: node.Addr}.networkKey()
-		if network != "" {
-			seenNetworks[network] = struct{}{}
-		}
-	}
-	if len(seenProviders) < 3 {
-		t.Fatalf("expected provider spread, got %d providers from %+v", len(seenProviders), selected)
-	}
-	if len(seenNetworks) < 4 {
-		t.Fatalf("expected diverse replicas, got %d networks from %+v", len(seenNetworks), selected)
 	}
 }
 
@@ -1248,9 +1236,13 @@ func TestHiddenDescriptorLookupRateLimit(t *testing.T) {
 }
 
 func startDHTListener(t *testing.T, ctx context.Context, srv *Server) string {
+	return startDHTListenerOn(t, ctx, srv, "tcp6", "[::1]:0")
+}
+
+func startDHTListenerOn(t *testing.T, ctx context.Context, srv *Server, network, address string) string {
 	t.Helper()
 
-	ln, err := net.Listen("tcp6", "[::1]:0")
+	ln, err := net.Listen(network, address)
 	if err != nil {
 		t.Fatalf("listen dht: %v", err)
 	}

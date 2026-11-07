@@ -32,10 +32,10 @@ VPN/IKEv2 and SDK integration. See the [platform packaging plan](packaging-plan.
   proof that a name is globally unique
 - signed metadata and record semantics (#63), bootstrap/liveness (#64), and
   adversarial churn/eclipse simulation (#65)
-- DHT routing implementation #62 is closed; configurable diversity caps,
-  adversarial/restart tests, and memory/churn benchmarks remain in #71. The
-  current 20-active, 10-replacement, 512-candidate defaults are starting
-  points, not validated large-network settings.
+- DHT routing implementation #62 is closed. Diversity is a supplemental local
+  contact index and does not reorder XOR routes or gate peers. Adversarial,
+  restart, churn, and memory tests remain in #71; current bounds are not
+  scale-validation results (`k=20` is a target, not a per-range cap).
 - deny-by-default service authorization and proof that every service path uses
   its required IPsec protection
 - production Linux package and first-install/upgrade/removal lifecycle
@@ -48,11 +48,8 @@ VPN/IKEv2 and SDK integration. See the [platform packaging plan](packaging-plan.
 
 ## Recent Verification Note
 
-The latest full `go test ./... -count=1` run did not pass completely. DHT and
-node packages passed, but `TestHiddenServiceRendezvousPlainTCP` failed because
-two hidden rendezvous circuits reused one relay. The failure also reproduced
-when that integration test ran alone. It belongs to hidden-service relay
-selection, not the routing-table implementation, and remains an unresolved
-repository test failure. The DHT/node race tests and `go build ./...` passed.
+The latest full `go test ./... -count=1` and `go build ./...` runs passed.
+Containerized DHT validation was not run because the Docker daemon is stopped
+and starting it requires machine authentication unavailable in this session.
 
 For per-feature guarantees and limitations, start at [security.md](security.md).
