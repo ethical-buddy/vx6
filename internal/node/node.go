@@ -126,6 +126,11 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Registry == nil {
 		return errors.New("registry cannot be nil")
 	}
+	if cfg.DHT != nil && cfg.DHT.RT != nil {
+		cfg.Registry.SetEndpointObserver(func(rec record.EndpointRecord) {
+			cfg.DHT.RT.UpdateKnownNode(dht.NodeInfoFromEndpointRecord(rec))
+		})
+	}
 	cfg = refreshAdvertiseAddress(log, cfg)
 	if err := transfer.ValidateIPv6Address(cfg.ListenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
@@ -282,7 +287,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	go maintainIPsecPeers(ctx, log, cfg, peerTunnel)
 	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
 	if cfg.ControlInfoPath != "" {
-		controlServer, err := runtimectl.Start(cfg.ControlInfoPath, os.Getpid(), func() error {
+		controlServer, err := runtimectl.StartWithPeerHandlers(cfg.ControlInfoPath, os.Getpid(), func() error {
 			if cfg.Reload == nil {
 				return fmt.Errorf("reload channel is not configured")
 			}
@@ -328,6 +333,32 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				ASNResolverSource:               asnStatus.Source,
 				ASNResolverEntries:              asnStatus.Entries,
 			}
+		}, func(peer proto.NodeInfo) error {
+			if err := dht.VerifyNodeInfo(peer, time.Now()); err != nil {
+				return fmt.Errorf("reject invalid peer-use record: %w", err)
+			}
+			if cfg.DHT == nil || cfg.DHT.RT == nil || peerStore == nil {
+				return errors.New("DHT peer retention is unavailable")
+			}
+			cfg.DHT.RT.RecordUse(peer.ID, time.Now(), 0)
+			return peerStore.RecordUse(peer, time.Now())
+		}, func(peer proto.NodeInfo, friend bool) error {
+			if cfg.DHT == nil || cfg.DHT.RT == nil || peerStore == nil {
+				return errors.New("DHT peer retention is unavailable")
+			}
+			if friend {
+				if err := dht.VerifyNodeInfo(peer, time.Now()); err != nil {
+					return fmt.Errorf("reject invalid friend record: %w", err)
+				}
+				cfg.DHT.RT.AddCandidate(peer)
+			} else if peer.ID == "" {
+				return errors.New("friend removal requires NodeID")
+			}
+			cfg.DHT.RT.SetFriend(peer.ID, friend)
+			if friend {
+				return peerStore.SetFriend(peer, true, time.Now())
+			}
+			return peerStore.SetFriendByID(peer.ID, false)
 		})
 		if err != nil {
 			return err
@@ -719,6 +750,7 @@ func (s *endpointRecordState) Current(id identity.Identity, name, address string
 func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 	syncOnlyLogged := false
 	selfLookupDone := false
+	lastEndpointSequenceByPeer := make(map[string]uint64)
 
 	publishAndSync := func() {
 		liveCfg := runtimeConfig(cfg)
@@ -746,7 +778,7 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 		}
 
 		nodes, _ := liveCfg.Registry.Snapshot()
-		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), nodes)
+		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), nodes, lastEndpointSequenceByPeer)
 		if !selfLookupDone && liveCfg.DHT != nil && liveCfg.DHT.RT != nil && len(liveCfg.DHT.RT.Nodes()) > 0 {
 			lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			result, err := liveCfg.DHT.RecursiveFindValueDetailed(lookupCtx, dht.NodeIDKey(liveCfg.NodeID))
@@ -1095,7 +1127,7 @@ func registryRecords(registry *discovery.Registry, server *dht.Server) []record.
 		nodes, _ := registry.Snapshot()
 		for _, rec := range nodes {
 			if record.VerifyEndpointRecord(rec, time.Now()) == nil {
-				byID[rec.NodeID] = rec
+				preferEndpointRecord(byID, rec)
 			}
 		}
 	}
@@ -1110,7 +1142,7 @@ func registryRecords(registry *discovery.Registry, server *dht.Server) []record.
 				PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 				ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
 			}
-			byID[rec.NodeID] = rec
+			preferEndpointRecord(byID, rec)
 		}
 	}
 	out := make([]record.EndpointRecord, 0, len(byID))
@@ -1118,6 +1150,13 @@ func registryRecords(registry *discovery.Registry, server *dht.Server) []record.
 		out = append(out, rec)
 	}
 	return out
+}
+
+func preferEndpointRecord(records map[string]record.EndpointRecord, candidate record.EndpointRecord) {
+	current, exists := records[candidate.NodeID]
+	if !exists || record.EndpointRecordNewer(candidate, current) {
+		records[candidate.NodeID] = candidate
+	}
 }
 
 func maintainIPsecPeers(ctx context.Context, log io.Writer, cfg Config, manager PeerTunnel) {
@@ -1324,7 +1363,7 @@ func endpointRecordRef(ok bool, rec record.EndpointRecord) *record.EndpointRecor
 	return &out
 }
 
-func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, initialNodes []record.EndpointRecord) map[string]struct{} {
+func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, initialNodes []record.EndpointRecord, lastEndpointSequenceByPeer map[string]uint64) map[string]struct{} {
 	targets := map[string]struct{}{}
 	reachable := map[string]struct{}{}
 	for _, addr := range cfg.PeerAddrs {
@@ -1345,6 +1384,10 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.Endpoi
 		}
 		eligible := pending[:0]
 		for _, addr := range pending {
+			if rec != nil && !cfg.HideEndpoint && lastEndpointSequenceByPeer[addr] < rec.Sequence {
+				eligible = append(eligible, addr)
+				continue
+			}
 			if cfg.DHT != nil && cfg.DHT.RT != nil {
 				peer, known := cfg.DHT.RT.NodeByAddress(addr)
 				if known && !cfg.DHT.RT.ProbeAllowed(peer.ID, time.Now()) {
@@ -1368,6 +1411,9 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.Endpoi
 				continue
 			}
 			reachable[result.addr] = struct{}{}
+			if rec != nil && !cfg.HideEndpoint && rec.Sequence > 0 {
+				lastEndpointSequenceByPeer[result.addr] = rec.Sequence
+			}
 			if result.peer != nil {
 				_ = cfg.Registry.Import([]record.EndpointRecord{*result.peer}, nil)
 				seedDHTRouting(cfg.DHT, []record.EndpointRecord{*result.peer})
@@ -1517,6 +1563,8 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.Endp
 		cancel()
 		if err != nil {
 			fmt.Fprintf(log, "[SYNC] Publish to %s failed: %v\n", addr, err)
+			result.err = fmt.Errorf("publish signed endpoint update: %w", err)
+			return result
 		}
 	}
 

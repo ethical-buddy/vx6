@@ -78,14 +78,15 @@ Trusted keys use conservative store admission:
 - signed envelopes are required for trusted records
 - stale updates are rejected
 - repeated writes are throttled per source
-- ASN-aware diversity is used when a local ASN map exists
+- optional ASN/prefix groups are indexed as supplemental local lookup contacts;
+  they do not change XOR routing order or block peers
 
 Important point:
 
 - not every node stores every record
 - each record is stored only on a small responsible set of nodes
-- diversity checks can use an optional offline ASN map when operators provide one
-- if no ASN map exists, the DHT falls back to the existing prefix-based diversity logic
+- the optional offline ASN map enriches the local contact index
+- without it, IPv6-prefix grouping still provides supplemental contacts
 
 ## 6. Security layers
 
@@ -124,7 +125,7 @@ They do not change the protocol.
 
 The target direct-service flow is:
 
-1. The caller resolves an IPv6 endpoint and signed record, then applies its own conflict, pinning, expiry, and revocation policy to the key.
+1. The caller resolves an IPv6 endpoint and signed record, reports name conflicts, and applies local key-trust, expiry, and revocation checks to the NodeID/public key. A local key trust entry does not reserve the advertised name.
 2. IKEv2 mutually authenticates the expected keys and establishes an ESP tunnel using a maintained platform implementation.
 3. VX6 routes the peer traffic through the tunnel. Tunnel failure blocks that traffic; it never silently falls back to a clear connection.
 4. The receiving VX6 node authorizes the requested service before dialing only its configured local backend.

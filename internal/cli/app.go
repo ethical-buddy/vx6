@@ -106,7 +106,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 list [--user USER] [--hidden]")
 	fmt.Fprintln(w, "  vx6 peer add --record ENDPOINT.json")
 	fmt.Fprintln(w, "  vx6 peer add --addr [ipv6]:port [--name NAME] (address only; IPsec requires a signed record)")
-	fmt.Fprintln(w, "  vx6 peer pin --record ENDPOINT.json (trust this identity across record expiry)")
+	fmt.Fprintln(w, "  vx6 peer friend --record ENDPOINT.json (retain this identity locally)")
+	fmt.Fprintln(w, "  vx6 peer unfriend --node-id ID")
+	fmt.Fprintln(w, "  vx6 peer pin --record ENDPOINT.json (locally trust this public key; does not reserve its name)")
 	fmt.Fprintln(w, "  vx6 peer unpin --node-id ID")
 	fmt.Fprintln(w, "  vx6 peer revoke --node-id ID (local, persistent deny)")
 	fmt.Fprintln(w, "  vx6 identity")
@@ -664,9 +666,14 @@ func runConnect(ctx context.Context, args []string) error {
 		return err
 	}
 	ctx = vxtransport.WithDialGuard(ctx, guard)
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
 
 	requestServiceName := requestedServiceName(finalSvc)
 	serviceRec := record.ServiceRecord{}
+	var usedPeer proto.NodeInfo
 	if *addrFlag != "" {
 		if err := transfer.ValidateIPv6Address(*addrFlag); err != nil {
 			return err
@@ -694,6 +701,7 @@ func runConnect(ctx context.Context, args []string) error {
 		if err := registry.Import([]record.EndpointRecord{peer}, nil); err != nil {
 			return fmt.Errorf("cache verified peer identity: %w", err)
 		}
+		usedPeer = dht.NodeInfoFromEndpointRecord(peer)
 	}
 
 	dialer := func(rctx context.Context) (net.Conn, error) {
@@ -731,7 +739,16 @@ func runConnect(ctx context.Context, args []string) error {
 		return vxtransport.DialContext(rctx, cfg.Node.TransportMode, serviceRec.Address)
 	}
 	fmt.Printf("tunnel_active\t%s\t%s\n", *localListen, finalSvc)
-	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, dialer)
+	return serviceproxy.ServeLocalForwardWithUseObserver(ctx, *localListen, serviceRec, id, dialer, func() {
+		if usedPeer.ID == "" {
+			return
+		}
+		observeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := runtimectl.RecordPeerUse(observeCtx, controlPath, usedPeer); err != nil {
+			fmt.Fprintf(os.Stderr, "[DHT] could not record local service use: %v\n", err)
+		}
+	})
 }
 
 func extractLeadingConnectService(args []string) (string, []string) {
@@ -871,7 +888,85 @@ func runService(args []string) error {
 	return nil
 }
 
+func runPeerFriend(action string, args []string) error {
+	fs := flag.NewFlagSet("peer "+action, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	recordPath := fs.String("record", "", "verified signed endpoint record")
+	nodeID := fs.String("node-id", "", "NodeID to remove from local friends")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
+	if action == "friend" {
+		if *recordPath == "" {
+			return errors.New("peer friend requires --record")
+		}
+		data, err := os.ReadFile(*recordPath)
+		if err != nil {
+			return fmt.Errorf("read endpoint record: %w", err)
+		}
+		var endpoint record.EndpointRecord
+		if err := json.Unmarshal(data, &endpoint); err != nil {
+			return fmt.Errorf("decode endpoint record: %w", err)
+		}
+		if err := record.VerifyEndpointRecord(endpoint, time.Now()); err != nil {
+			return fmt.Errorf("reject endpoint record: %w", err)
+		}
+		peer := dht.NodeInfoFromEndpointRecord(endpoint)
+		if err := applyPeerFriend(cfg, controlPath, peer, true); err != nil {
+			return err
+		}
+		fmt.Printf("peer_friend_added\t%s\t%s\n", endpoint.NodeName, endpoint.NodeID)
+		return nil
+	}
+	if *nodeID == "" {
+		return errors.New("peer unfriend requires --node-id")
+	}
+	if err := applyPeerFriend(cfg, controlPath, proto.NodeInfo{ID: *nodeID}, false); err != nil {
+		return err
+	}
+	fmt.Printf("peer_friend_removed\t%s\n", *nodeID)
+	return nil
+}
+
+func applyPeerFriend(cfg config.File, controlPath string, peer proto.NodeInfo, friend bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var err error
+	if friend {
+		err = runtimectl.SetPeerFriend(ctx, controlPath, peer, true)
+	} else {
+		err = runtimectl.RemovePeerFriend(ctx, controlPath, peer.ID)
+	}
+	if err == nil {
+		return nil
+	}
+	store, openErr := dht.OpenPeerStore(filepath.Join(cfg.Node.DataDir, "dht-peers.db"))
+	if openErr != nil {
+		return fmt.Errorf("notify running node (%v); open local peer index: %w", err, openErr)
+	}
+	defer store.Close()
+	if friend {
+		return store.SetFriend(peer, true, time.Now())
+	}
+	return store.SetFriendByID(peer.ID, false)
+}
+
 func runPeer(args []string) error {
+	if len(args) > 0 && (args[0] == "friend" || args[0] == "unfriend") {
+		return runPeerFriend(args[0], args[1:])
+	}
 	if len(args) > 0 && args[0] == "pin" {
 		fs := flag.NewFlagSet("peer pin", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -900,7 +995,7 @@ func runPeer(args []string) error {
 		if err := store.PinPeer(peer, time.Now()); err != nil {
 			return err
 		}
-		fmt.Printf("peer_pinned\t%s\t%s\n", peer.NodeName, peer.NodeID)
+		fmt.Printf("peer_key_trusted\t%s\t%s\n", peer.NodeName, peer.NodeID)
 		return nil
 	}
 	if len(args) > 0 && args[0] == "unpin" {
@@ -920,7 +1015,7 @@ func runPeer(args []string) error {
 		if err := store.UnpinPeer(*nodeID); err != nil {
 			return err
 		}
-		fmt.Printf("peer_unpinned\t%s\n", *nodeID)
+		fmt.Printf("peer_key_untrusted\t%s\n", *nodeID)
 		return nil
 	}
 	if len(args) > 0 && args[0] == "revoke" {
@@ -1088,7 +1183,7 @@ func runPeer(args []string) error {
 	if len(knownPeers) == 0 {
 		fmt.Println("  (none)")
 	}
-	printSectionHeader("PINNED IDENTITIES", len(cfg.Node.PinnedPeers))
+	printSectionHeader("LOCALLY TRUSTED KEYS", len(cfg.Node.PinnedPeers))
 	for _, pin := range cfg.Node.PinnedPeers {
 		fmt.Printf("  %-16s %s\n", pin.NodeName, pin.NodeID)
 	}
@@ -2097,19 +2192,25 @@ func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (
 		return record.EndpointRecord{}, err
 	}
 	name = canonicalName
-	for _, pin := range cfg.Node.PinnedPeers {
-		if pin.NodeName == name {
-			return resolvePinnedNode(ctx, cfg, pin)
-		}
-	}
-
 	reg, _ := loadLocalRegistry(cfg.Node.DataDir)
 	if reg != nil {
 		nodes, _ := reg.Snapshot()
+		var matches []record.EndpointRecord
 		for _, n := range nodes {
 			if n.NodeName == name {
-				return n, nil
+				matches = append(matches, n)
 			}
+		}
+		if len(matches) == 1 {
+			return matches[0], nil
+		}
+		if len(matches) > 1 {
+			raw := make([]string, 0, len(matches))
+			for _, match := range matches {
+				data, _ := json.Marshal(match)
+				raw = append(raw, string(data))
+			}
+			return chooseEndpointConflict(name, raw)
 		}
 	}
 
@@ -2200,11 +2301,11 @@ func verifyPinnedEndpoint(rec record.EndpointRecord, pin config.PinnedPeer, now 
 
 func validatePinnedIdentity(cfg config.File, peer record.EndpointRecord) error {
 	for _, pin := range cfg.Node.PinnedPeers {
-		if peer.NodeID == pin.NodeID && peer.PublicKey == pin.PublicKey {
+		if peer.NodeID == pin.NodeID {
+			if peer.PublicKey != pin.PublicKey {
+				return fmt.Errorf("trusted identity key mismatch for NodeID %s", pin.NodeID)
+			}
 			return nil
-		}
-		if peer.NodeName == pin.NodeName {
-			return fmt.Errorf("peer name %s is pinned to %s; refusing identity %s", pin.NodeName, pin.NodeID, peer.NodeID)
 		}
 	}
 	return nil

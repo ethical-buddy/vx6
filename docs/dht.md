@@ -18,7 +18,7 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 - canonical node names: uppercase letters, digits, and middle hyphens; 3-16 characters
 - typed DHT RPC envelopes, validated before type-specific payload processing
 - iterative lookup fanout defaults to four closest peers
-- persistent local peer pins that bind a name to a full NodeID/public key
+- local identity trust checks keyed by NodeID and separate friend-retention preferences
 - conflict detection
 - conflict candidate reporting for same-name lookups
 - interactive user choice support in the CLI when multiple candidates are returned
@@ -26,7 +26,7 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 - adaptive replication target under churn/failure pressure
 - refresh tracking
 - conservative store admission with signed trusted writes, authoritative publisher checks, stale-write rejection, and per-source throttling
-- ASN-aware diversity when a local ASN map is present
+- optional ASN/prefix contact diversity kept separately from XOR routing
 - hidden descriptor caching, jittered refresh polling, and background cover lookups
 - tracked hidden-invite warmers to reduce purely on-demand lookup patterns
 - scheduled privacy traffic buckets (time-sliced baseline hidden descriptor cover activity)
@@ -69,28 +69,39 @@ The initial code defaults are:
 | Parallel lookup width | 4 | At most four peers queried at once. |
 | Referrals returned per lookup RPC | 4 | Closest active peers for the requested coordinate. |
 | Underfilled refresh threshold | 15 | A non-empty range below this value is eligible for refresh. |
-| Pending candidates per NodeID range | 10 | Referrals and restored peers waiting for validation. |
 | Pending candidates total | 512 | Global cap across not-yet-active referrals. |
-| Startup candidates restored | 512 | Most-recently-successful cached contacts; none start active. |
-| Active routing contacts | 10,000 | Local safety bound across both indexes; each peer is counted once. |
-| Persisted peer observations | 10,000 | bbolt snapshot bound, including offline history. |
-| New-peer probation | 2 hours | Non-pinned peers participate locally in memory but are not persisted yet. |
+| Startup candidates restored | 50 minimum, up to 512 | Eligible saved contacts are offered for revalidation; none start active. |
+| Active routing contacts | No fixed count ceiling | Authenticated peers are retained in dynamically growing slices/maps. |
+| Local peer-index rows | 512 unique identities | bbolt keeps one row per NodeID; the category indexes refer to those same rows. |
+| New-peer probation | 2 hours | Authenticated peers can route during probation; their probation state is persisted locally. |
 | Offline history retention | 30 days | Based on local `OfflineSince`; old unpinned history is pruned. |
 
 The arrays of ranges have fixed slice headers; peer slices grow only when
 contacts are learned. A fresh node does not allocate thousands of peer records
-merely because the coordinate space has 256 possible ranges. The normal target
-of 20 is a useful response/replication size, not a maximum for a range. Verified
-contacts can grow a range beyond 20 as the local view grows, up to the separate
-10,000-contact local safety bound.
+merely because the coordinate space has 256 possible ranges. A small network
+can retain every authenticated peer it learns; `k=20` is a normal closest-peer
+and replication target, not a maximum per range. There is no fixed global
+active-peer or database-row count ceiling. At restart, the node loads at least
+50 eligible saved contacts when that many are available, up to the 512-peer
+warm-start limit, and revalidates them before promoting them to active routes.
+The 512-row cap applies to the secondary local retention index, not the live
+XOR routing tables.
 
 New successful contacts move to the front of their local range. XOR distance,
 not recency or network location, determines which contacts are closest to a
-lookup target. IPv6-prefix and optional ASN diversity remain soft selection
-signals for replica placement; they are not identity proof and do not block an
-otherwise valid peer from being retained. There is no hard "20 peers per
-range" limit now. The 10,000-contact local cap is a memory/persistence safety
-limit, not a claim that a node should learn every network member.
+lookup target. All authenticated peers are retained locally, including peers
+sharing one prefix or ASN. There is no per-prefix, per-ASN, per-range, or fixed
+global active-peer count limit. The 512-entry pending limit applies only to
+unverified referrals and startup candidates, not authenticated peers.
+
+The peer database also keeps dynamic categories for friend identities, peers
+whose services were used, the closest 50 peers in each XOR coordinate, active
+contacts, probation, inactive history, and diversity representatives. These
+are indexes over the same capped NodeID rows, not duplicate records; one peer
+may belong to several categories. Friend/use preference affects local retention
+and candidate revalidation only. It does not change XOR distance, normal
+referral ordering, or replication. Diversity metadata is a reachability hint,
+not identity proof.
 
 ### Health, Retry, and Refresh
 
@@ -105,12 +116,12 @@ peer delays later checks; the five-minute interval is a minimum spacing per
 peer, not a promise that an arbitrarily large table is swept within five
 minutes.
 
-New non-pinned contacts have a two-hour in-memory probation period. They can
-participate in this node's routing during that period, but are not written to
-the durable peer snapshot yet. An unverified referral is not durable peer
-history at all; it must first complete the authenticated peer check. After
-probation, normal persistence applies. This is a local retention policy, not a
-network-wide admission vote or proof that a peer is honest.
+Newly authenticated contacts have a two-hour probation marker. They can
+participate in this node's routing after signed identity, IKE/IPsec, and
+protected liveness checks succeed. The marker and observations are saved in
+the local index; probation is not a network-wide admission vote or proof that
+a peer is honest. An unverified referral remains only a candidate until it
+passes those checks.
 
 Inactive contacts are excluded from ordinary lookup referrals. An explicit
 bootstrap lookup can include locally retained inactive contacts as address
@@ -140,30 +151,31 @@ transaction; peer values are JSON for inspectability, with a separate
 NameHash index. The database contains public peer metadata and local
 observations, not private identity keys. The file is created with mode `0600`.
 
-On restart, at most 512 recent records are loaded as candidates. The node must
-revalidate them before they return to active routes. Signed endpoint validity
-and a fresh authenticated tunnel exchange remain required; reading a record
-from disk is never proof that its address is live. Offline history is retained
-for up to 30 days. User identity pins and routing-table slots are separate
-concepts. The CLI's identity pins are not yet fully connected to the DHT
-peer-store preference metadata, and service-use history is not yet maintained
-as a separate durable contact category.
+The bbolt peer table is capped at 512 unique NodeIDs. On restart, saved rows
+are returned as candidates in preference order: friends, recently used peers,
+closest-coordinate peers, diversity representatives, then other active,
+probationary, and inactive contacts. At least 50 are offered when that many
+eligible rows exist. They must be revalidated before returning to active
+routes. Reading a record from disk is never proof that its address is live.
+Inactive non-friend history expires after 30 days.
 
-The local verified-node registry, including records encountered while
-resolving services, can seed a local DHT client. User-selected identity pins
-live in the config store. These are local convenience sources, not trust
-claims shared with the network. There is not yet a separate service-use score
-or dedicated diversity-contact list. First-seen time, successful-check count,
-last-success time, and pin status prioritize durable peer observations when
-the peer store reaches its limit. A signed name conflict is reported as
+The CLI supports `vx6 peer friend --record ENDPOINT.json` and
+`vx6 peer unfriend --node-id ID`. Friend status is stored by NodeID and means
+“retain and retry this peer locally”; it does not reserve the advertised name
+or grant service access. Successful direct-service traffic updates a local use
+count and last-used time through the authenticated loopback control channel.
+A local key pin is separate: it checks the public key for that exact NodeID
+and is not a global name claim. Name lookup still reports multiple signed
+identities sharing a name rather than silently selecting a locally pinned one.
+A signed name conflict is reported as
 multiple identities; it does not automatically evict one contact, because a
 single peer's conflict report is not a network-wide proof that one identity is
 the rightful owner.
 
 ### What Is Still Needed For #71
 
-- Make prefix and ASN diversity limits configurable while preserving
-  non-blocking behavior in sparse ranges.
+- Validate that the diversity index helps lookup reachability without changing
+  XOR ordering or excluding peers in sparse or organization-only networks.
 - Test that malformed/unverified referrals and an inbound contact flood cannot
   displace authenticated routes; test promotion only after fresh peer
   validation and test pinned state across restart.
@@ -224,17 +236,15 @@ These tests are intended to catch security-regression drift early without requir
 
 ## ASN Diversity
 
-VX6 can use an offline ASN map to improve DHT diversity checks.
+VX6 can use an optional offline ASN map to populate its local supplemental
+contact index. If the map is missing, IPv6 prefixes still provide grouping.
+These contacts are only lookup fallbacks after normal XOR candidates are
+exhausted; they do not change routing order, admission, or replica placement.
 
-When the map is present:
-
-- lookup confirmation prefers independent ASNs first
-- replica selection spreads records across ASNs before falling back to prefix diversity
-
-When the map is missing or incomplete:
-
-- VX6 falls back to the current prefix-based provider grouping
-- the DHT still works normally
+A signed value still needs multiple supporting sources and independent lookup
+branches. ASN, provider, and prefix counts do not gate acceptance, so peers in
+one organization or network can still resolve signed records. Diversity data
+is a reachability hint, not identity proof.
 
 This diversity is a local selection heuristic, not an identity proof. ASN,
 prefix, PTR, WHOIS, geography, or ISP-derived data can be missing, stale, or
@@ -278,23 +288,22 @@ No response is inconclusive: it cannot prove that nobody else uses the name.
 The CLI reports this state as `unconfirmed`, not `available`, and may continue
 publishing the node's signed claim. A conflicting claim blocks the name check.
 
-Users can explicitly pin a verified peer endpoint record with
-`vx6 peer pin --record ENDPOINT.json`. The local pin stores the canonical name, complete
-NodeID, and public key separately from the expiring address record. A pin
-survives endpoint expiry and restart; when resolving that name, VX6 looks up
-the pinned identity and rejects a different key rather than silently
-switching. `vx6 peer unpin --node-id ID` removes the local pin. A pin means
-“this is the key I trust for this local contact”; it is not proof of DHT-wide
-membership, global name ownership, or safety of that peer's services.
+`vx6 peer pin --record ENDPOINT.json` stores a local public-key trust check
+for that NodeID, and `vx6 peer unpin --node-id ID` removes it. This local choice
+does not reserve a name, override conflict display, prove DHT-wide membership,
+or authorize access to a service. Use `peer friend` separately for retention.
 
-## Target Peer-Local Maintenance Model
+## Peer-Local Maintenance Model
 
-Each node owns its own routing-table decisions. The planned table separates
-active closest-XOR contacts, replacement candidates, verified/recently useful
-peers, diversity candidates, and locally remembered offline contacts. These
-are selection classes and bounded quotas, not a second global DHT or a promise
-that every node has the same view. A peer must not be admitted just because it
-connects often or claims a desirable ASN.
+Each node owns its own routing-table decisions. The current table separates
+active XOR contacts, unverified candidates, offline history, and a persisted
+secondary index capped at 512 unique identities. That local index has friend,
+recent-use, closest-coordinate, diversity, active, probation, and inactive
+categories. The live active XOR table itself has no fixed count ceiling. The
+50-contact warm-start floor is a target when enough eligible records exist,
+not a requirement to invent or admit peers. The separate unverified-candidate
+queue is also capped at 512. Identity trust and friend retention are different
+local choices.
 
 Lookups should ask several independently selected peers, validate signatures
 and record freshness locally, compare conflicting answers, and continue via

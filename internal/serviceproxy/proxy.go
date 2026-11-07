@@ -64,6 +64,12 @@ func HandleInbound(conn net.Conn, id identity.Identity, services map[string]stri
 }
 
 func ServeLocalForward(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, dialer func(context.Context) (net.Conn, error)) error {
+	return ServeLocalForwardWithUseObserver(ctx, localListen, service, id, dialer, nil)
+}
+
+// ServeLocalForwardWithUseObserver reports use after application bytes pass
+// through the established VX6 channel. This is local bookkeeping only.
+func ServeLocalForwardWithUseObserver(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, dialer func(context.Context) (net.Conn, error), onUse func()) error {
 	listener, err := net.Listen("tcp", localListen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", localListen, err)
@@ -107,21 +113,34 @@ func ServeLocalForward(ctx context.Context, localListen string, service record.S
 			}
 
 			payload, _ := json.Marshal(ConnectRequest{ServiceName: service.ServiceName})
-			_ = proto.WriteLengthPrefixed(secureConn, payload)
+			if err := proto.WriteLengthPrefixed(secureConn, payload); err != nil {
+				return
+			}
 
 			fmt.Printf("[TUNNEL] Active: Local:%s <-> Remote:%s\n", localListen, service.NodeName)
-			_ = proxyDuplex(localConn, secureConn)
+			_ = proxyDuplexObserved(localConn, secureConn, onUse)
 		}()
 	}
 }
 
 func proxyDuplex(a, b io.ReadWriter) error {
+	return proxyDuplexObserved(a, b, nil)
+}
+
+func proxyDuplexObserved(a, b io.ReadWriter, onActivity func()) error {
 	var wg sync.WaitGroup
+	var activityOnce sync.Once
 	errCh := make(chan error, 2)
+	observed := func(dst io.Writer) io.Writer {
+		if onActivity == nil {
+			return dst
+		}
+		return activityWriter{dst: dst, once: &activityOnce, onActivity: onActivity}
+	}
 
 	copyPipe := func(dst io.Writer, src io.Reader) {
 		defer wg.Done()
-		_, err := io.Copy(dst, src)
+		_, err := io.Copy(observed(dst), src)
 		if closer, ok := dst.(io.Closer); ok {
 			_ = closer.Close()
 		}
@@ -143,6 +162,20 @@ func proxyDuplex(a, b io.ReadWriter) error {
 		}
 	}
 	return nil
+}
+
+type activityWriter struct {
+	dst        io.Writer
+	once       *sync.Once
+	onActivity func()
+}
+
+func (w activityWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 {
+		w.once.Do(w.onActivity)
+	}
+	return n, err
 }
 
 func isProxyCloseError(err error) bool {

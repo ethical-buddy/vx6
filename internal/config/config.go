@@ -61,8 +61,8 @@ type NodeConfig struct {
 	AllowedFileSenders   []string         `json:"allowed_file_senders,omitempty"`
 }
 
-// PinnedPeer is an explicit local trust decision binding a display name to a
-// cryptographic identity. Endpoint addresses remain in expiring signed records.
+// PinnedPeer is a local trust decision for one NodeID/public key. NodeName is
+// display metadata only and is not a network-wide name reservation.
 type PinnedPeer struct {
 	NodeID    string `json:"node_id"`
 	NodeName  string `json:"node_name"`
@@ -317,15 +317,18 @@ func (s *Store) PinPeer(rec record.EndpointRecord, now time.Time) error {
 			if pin.PublicKey != key {
 				return fmt.Errorf("peer ID %s is already pinned to a different public key", rec.NodeID)
 			}
-			if pin.NodeName != rec.NodeName {
-				return fmt.Errorf("peer ID %s is pinned under name %s; refusing silent rename", rec.NodeID, pin.NodeName)
+			cfg.Node.PinnedPeers = append([]PinnedPeer(nil), cfg.Node.PinnedPeers...)
+			for i := range cfg.Node.PinnedPeers {
+				if cfg.Node.PinnedPeers[i].NodeID == rec.NodeID {
+					cfg.Node.PinnedPeers[i].NodeName = rec.NodeName
+				}
 			}
 			found = true
 			continue
 		}
-		if pin.NodeName == rec.NodeName {
-			return fmt.Errorf("name %s is already pinned to identity %s", rec.NodeName, pin.NodeID)
-		}
+		// Local identity pins are keyed by NodeID. Different identities may
+		// legitimately advertise the same display name; the pin is not a global
+		// name reservation and must not hide such conflicts.
 	}
 	if !found {
 		cfg.Node.PinnedPeers = append(cfg.Node.PinnedPeers, PinnedPeer{NodeID: rec.NodeID, NodeName: rec.NodeName, PublicKey: key})
@@ -536,7 +539,6 @@ func normalize(cfg *File) {
 
 func validatePinnedPeers(pins []PinnedPeer) error {
 	seenIDs := make(map[string]struct{}, len(pins))
-	seenNames := make(map[string]struct{}, len(pins))
 	for _, pin := range pins {
 		if err := record.ValidateCanonicalNodeName(pin.NodeName); err != nil {
 			return fmt.Errorf("invalid pinned peer name: %w", err)
@@ -551,11 +553,7 @@ func validatePinnedPeers(pins []PinnedPeer) error {
 		if _, ok := seenIDs[pin.NodeID]; ok {
 			return fmt.Errorf("duplicate pinned peer NodeID %s", pin.NodeID)
 		}
-		if _, ok := seenNames[pin.NodeName]; ok {
-			return fmt.Errorf("duplicate pinned peer name %s", pin.NodeName)
-		}
 		seenIDs[pin.NodeID] = struct{}{}
-		seenNames[pin.NodeName] = struct{}{}
 	}
 	return nil
 }

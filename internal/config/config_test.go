@@ -368,14 +368,21 @@ func TestPinnedPeerPersistsIdentityAcrossEndpointExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PinPeer(other, time.Now()); err == nil {
-		t.Fatal("expected a different key to be rejected for an already pinned name")
+	if err := store.PinPeer(other, time.Now()); err != nil {
+		t.Fatalf("local identity trust must not reserve a network name: %v", err)
+	}
+	loaded, err = store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Node.PinnedPeers) != 2 {
+		t.Fatalf("same-name identities were hidden from local trust list: %+v", loaded.Node.PinnedPeers)
 	}
 	if err := store.UnpinPeer(id.NodeID); err != nil {
 		t.Fatalf("unpin peer: %v", err)
 	}
-	if _, found, err := store.PinnedPeerByName("ALICE"); err != nil || found {
-		t.Fatalf("pin should be gone after unpin: found=%v err=%v", found, err)
+	if _, found, err := store.PinnedPeerByName("ALICE"); err != nil || !found {
+		t.Fatalf("the other local identity with the same display name should remain: found=%v err=%v", found, err)
 	}
 }
 
