@@ -69,7 +69,7 @@ func usage() {
   vx6-release pin-root      -threshold 2 -key root1.key.json -key root2.key.json -key root3.key.json -out internal/release/pinned.go
   vx6-release sign-manifest -key root1.key.json -in manifest.json -out manifest.json
   vx6-release rotate-root   -key oldroot1.key.json -key oldroot2.key.json -root newroot.json -out signed-root.json
-  vx6-release verify        -root pinned-root.json -manifest manifest.json [-seq N] [-os linux -arch amd64]
+  vx6-release verify        -root pinned-root.json -manifest manifest.json -seq N [-os linux -arch amd64]
 
 Passphrase: VX6_RELEASE_PASSPHRASE env var, or interactive prompt. Never a flag.
 `)
@@ -285,6 +285,15 @@ func verify(args []string) error {
 	}
 	if *rootPath == "" || *manifestPath == "" {
 		return errors.New("-root and -manifest are required")
+	}
+	sequenceProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "seq" {
+			sequenceProvided = true
+		}
+	})
+	if !sequenceProvided {
+		return errors.New("-seq is required; rollback checking needs a trusted current sequence")
 	}
 	rootRaw, err := os.ReadFile(*rootPath)
 	if err != nil {

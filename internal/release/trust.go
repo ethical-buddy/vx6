@@ -6,7 +6,7 @@ package release
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -91,6 +91,13 @@ func (r TrustRoot) validateShape() error {
 	ids := map[string]bool{}
 	revoked := map[string]bool{}
 	for _, id := range r.Revoked {
+		decoded, err := hex.DecodeString(id)
+		if err != nil || len(decoded) != 16 || id != strings.ToLower(id) {
+			return fmt.Errorf("invalid revoked key id %q", id)
+		}
+		if revoked[id] {
+			return fmt.Errorf("duplicate revoked key id %s", id)
+		}
 		revoked[id] = true
 	}
 	active := 0
@@ -173,10 +180,17 @@ func (r TrustRoot) AdvanceTrust(data []byte, now time.Time) (TrustRoot, error) {
 	if len(data) == 0 || len(data) > maxManifestBytes {
 		return r, errors.New("invalid trust-root size")
 	}
-	dec := json.NewDecoder(strings.NewReader(string(data)))
-	dec.DisallowUnknownFields()
+	if err := r.validateShape(); err != nil {
+		return r, fmt.Errorf("current trust root invalid: %w", err)
+	}
+	if r.ExpiresAt != "" {
+		currentExpiry, err := time.Parse(time.RFC3339, r.ExpiresAt)
+		if err != nil || now.After(currentExpiry) {
+			return r, errors.New("current trust root is expired or invalid; refusing trust advancement")
+		}
+	}
 	var st SignedTrustRoot
-	if err := dec.Decode(&st); err != nil {
+	if err := decodeStrictJSON(data, &st); err != nil {
 		return r, fmt.Errorf("parse trust root: %w", err)
 	}
 	if err := st.Root.validateShape(); err != nil {

@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Installer stages a verified artifact to a non-executable file, then activates
@@ -25,12 +27,48 @@ type Installer struct {
 }
 
 func NewInstaller(dir string) (*Installer, error) {
+	if dir == "" {
+		return nil, errors.New("installer state directory is required")
+	}
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	dir = absolute
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := requirePrivateDirectory(dir); err != nil {
+		return nil, err
+	}
 	for _, sub := range []string{"", "staging", "versions"} {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+		path := filepath.Join(dir, sub)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return nil, err
+		}
+		if err := requirePrivateDirectory(path); err != nil {
 			return nil, err
 		}
 	}
 	return &Installer{dir: dir}, nil
+}
+
+func requirePrivateDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("installer path is not a real directory: %s", path)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("restrict installer directory permissions: %w", err)
+	}
+	secured, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, secured) || secured.Mode()&os.ModeSymlink != 0 || secured.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("installer directory changed while securing it: %s", path)
+	}
+	return nil
 }
 
 // Stage writes verified bytes to a non-executable staging file named by the
@@ -42,9 +80,7 @@ func (in *Installer) Stage(seq uint64, data []byte, art Artifact) (string, error
 		return "", err
 	}
 	name := filepath.Join(in.dir, "staging", fmt.Sprintf("vx6-%d.stage", seq))
-	// 0600 and no execute bit: a staged file is data, not a program, until
-	// activation deliberately makes it executable.
-	if err := os.WriteFile(name, data, 0o600); err != nil {
+	if err := writeExclusiveFile(name, data, 0o600); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -60,7 +96,7 @@ func (in *Installer) Stage(seq uint64, data []byte, art Artifact) (string, error
 // any system path outside in.dir; a service manager points at in.dir/current.
 func (in *Installer) Activate(seq, prevSeq uint64, art Artifact) (string, error) {
 	stage := filepath.Join(in.dir, "staging", fmt.Sprintf("vx6-%d.stage", seq))
-	data, err := os.ReadFile(stage)
+	data, err := readRegularFile(stage, maxArtifactBytes+1)
 	if err != nil {
 		return "", fmt.Errorf("read staged build: %w", err)
 	}
@@ -68,18 +104,47 @@ func (in *Installer) Activate(seq, prevSeq uint64, art Artifact) (string, error)
 		return "", fmt.Errorf("staged build failed re-verification: %w", err)
 	}
 	dst := filepath.Join(in.dir, "versions", fmt.Sprintf("vx6-%d", seq))
-	if err := os.WriteFile(dst, data, 0o755); err != nil {
+	if err := writeExclusiveFile(dst, data, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dst, 0o755); err != nil {
+		_ = os.Remove(dst)
 		return "", err
 	}
 	cur := filepath.Join(in.dir, "current")
 	// Record what we are replacing so RollBack can restore it.
 	if target, err := os.Readlink(cur); err == nil {
-		_ = os.WriteFile(filepath.Join(in.dir, "previous"), []byte(target), 0o644)
+		if !in.isVersionPath(target) {
+			_ = os.Remove(dst)
+			return "", errors.New("current symlink does not point inside the versions directory")
+		}
+		if _, err := readRegularFile(target, maxArtifactBytes+1); err != nil {
+			_ = os.Remove(dst)
+			return "", fmt.Errorf("current build is unavailable: %w", err)
+		}
+		if err := writeAtomicFile(filepath.Join(in.dir, "previous"), []byte(target), 0o600); err != nil {
+			_ = os.Remove(dst)
+			return "", err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("inspect current build link: %w", err)
 	} else if prevSeq != 0 {
-		_ = os.WriteFile(filepath.Join(in.dir, "previous"),
-			[]byte(filepath.Join(in.dir, "versions", fmt.Sprintf("vx6-%d", prevSeq))), 0o644)
+		previous := filepath.Join(in.dir, "versions", fmt.Sprintf("vx6-%d", prevSeq))
+		if _, err := readRegularFile(previous, maxArtifactBytes+1); err != nil {
+			_ = os.Remove(dst)
+			return "", fmt.Errorf("previous build is unavailable: %w", err)
+		}
+		if err := writeAtomicFile(filepath.Join(in.dir, "previous"), []byte(previous), 0o600); err != nil {
+			_ = os.Remove(dst)
+			return "", err
+		}
+	} else if err := os.Remove(filepath.Join(in.dir, "previous")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("clear stale rollback record: %w", err)
 	}
 	if err := atomicSymlink(dst, cur); err != nil {
+		_ = os.Remove(dst)
 		return "", err
 	}
 	_ = os.Remove(stage)
@@ -91,12 +156,15 @@ func (in *Installer) Activate(seq, prevSeq uint64, art Artifact) (string, error)
 // last-known-good to return to.
 func (in *Installer) RollBack() (string, error) {
 	prevFile := filepath.Join(in.dir, "previous")
-	target, err := os.ReadFile(prevFile)
+	target, err := readRegularFile(prevFile, 4096)
 	if err != nil {
 		return "", errors.New("no last-known-good build recorded; cannot roll back")
 	}
 	prev := string(target)
-	if _, err := os.Stat(prev); err != nil {
+	if !in.isVersionPath(prev) {
+		return "", errors.New("recorded rollback path is outside the versions directory")
+	}
+	if _, err := readRegularFile(prev, maxArtifactBytes+1); err != nil {
 		return "", fmt.Errorf("recorded previous build missing: %w", err)
 	}
 	if err := atomicSymlink(prev, filepath.Join(in.dir, "current")); err != nil {
@@ -108,10 +176,20 @@ func (in *Installer) RollBack() (string, error) {
 // Current resolves the active build path, if any.
 func (in *Installer) Current() (string, bool) {
 	t, err := os.Readlink(filepath.Join(in.dir, "current"))
-	if err != nil {
+	if err != nil || !in.isVersionPath(t) {
 		return "", false
 	}
 	return t, true
+}
+
+func (in *Installer) isVersionPath(path string) bool {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	root := filepath.Join(in.dir, "versions")
+	rel, err := filepath.Rel(root, absolute)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 // HealthCheck runs fn against the newly activated path and rolls back on
@@ -131,7 +209,7 @@ func (in *Installer) HealthCheck(activated string, fn func(path string) error) e
 
 // prune removes versions other than the activated and previous builds.
 func (in *Installer) prune(keep string) {
-	prev, _ := os.ReadFile(filepath.Join(in.dir, "previous"))
+	prev, _ := readRegularFile(filepath.Join(in.dir, "previous"), 4096)
 	entries, _ := os.ReadDir(filepath.Join(in.dir, "versions"))
 	for _, e := range entries {
 		p := filepath.Join(in.dir, "versions", e.Name())
@@ -145,8 +223,18 @@ func (in *Installer) prune(keep string) {
 // atomicSymlink points name at target by creating a temp link and renaming,
 // so a reader never sees a missing or half-written symlink.
 func atomicSymlink(target, name string) error {
-	tmp := name + ".tmp"
-	_ = os.Remove(tmp)
+	f, err := os.CreateTemp(filepath.Dir(name), ".vx6-link-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Remove(tmp); err != nil {
+		return err
+	}
 	if err := os.Symlink(target, tmp); err != nil {
 		return err
 	}
@@ -155,6 +243,73 @@ func atomicSymlink(target, name string) error {
 		return err
 	}
 	return nil
+}
+
+func writeExclusiveFile(path string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".vx6-state-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func readRegularFile(path string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, errors.New("installer state file is not a bounded regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, errors.New("installer state file changed while opening")
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
 }
 
 // VerifyArtifactBytes is VerifyArtifact for an in-memory artifact.

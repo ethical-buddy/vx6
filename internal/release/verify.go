@@ -81,6 +81,15 @@ func (v *Verifier) VerifyManifest(data []byte) (*VerifiedUpdate, error) {
 		return nil, err
 	}
 	now := v.now()
+	if v.trust.ExpiresAt != "" {
+		rootExpiry, err := time.Parse(time.RFC3339, v.trust.ExpiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid current trust-root expiry: %w", err)
+		}
+		if now.After(rootExpiry) {
+			return nil, fmt.Errorf("current release trust root expired at %s", v.trust.ExpiresAt)
+		}
+	}
 	if err := sm.Manifest.validateShape(now); err != nil {
 		return nil, err
 	}

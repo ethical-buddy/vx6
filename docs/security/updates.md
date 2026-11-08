@@ -20,6 +20,8 @@ checksum DB, Linux package repos, Sigstore), is:
   to publish — they verify signatures, they cannot create them.
 - **PRIVATE signing keys never ship.** They are generated offline with
   `vx6-release keygen` and stored encrypted (argon2id → XChaCha20-Poly1305).
+  The key reader accepts only the KDF parameters emitted by this schema, so a
+  modified key file cannot request unbounded memory or CPU before decryption.
   They live on maintainers' offline machines, ideally split across people/HSMs.
 - **Forging an update needs a threshold of those private keys.** Reverse-
   engineering the open-source client reveals nothing useful: the secrets are
@@ -61,6 +63,12 @@ tampered files. A peer's version/NodeID claims are never consulted.
 - leaves privileged placement (replacing a root-owned path, restarting the
   unit) to the OS/service manager, as #67 requires.
 
+Installer state is placed in a private directory (mode 0700). It rejects
+symlinked state directories, creates stage/version files exclusively, and
+allows rollback targets only from its own version store. This is a local state
+directory requirement, not a substitute for the not-yet-implemented service
+manager integration.
+
 ## Key rotation and revocation
 
 Trust moves forward only. A `SignedTrustRoot` names a new key set, threshold
@@ -88,8 +96,13 @@ vx6-release sign-manifest -key root1.key.json -in manifest.json
 vx6-release sign-manifest -key root2.key.json -in manifest.json
 
 # anyone can dry-run verify without secrets:
-vx6-release verify -root root.json -manifest manifest.json -seq <running> -os linux -arch amd64
+vx6-release verify -root root.json -manifest manifest.json -seq <trusted-running-sequence> -os linux -arch amd64
 ```
+
+The sequence argument is required: rollback checking is meaningful only when
+compared to a trusted sequence for the currently installed build. The present
+CLI is a verification tool; it does not yet read that sequence from an
+installed binary or persist accepted update state.
 
 ## Current status
 

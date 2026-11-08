@@ -41,7 +41,7 @@ func runUpdate(args []string) error {
 func printUpdateUsage(w io.Writer) {
 	fmt.Fprintln(w, "Update commands:")
 	fmt.Fprintln(w, "  vx6 update trust-info")
-	fmt.Fprintln(w, "  vx6 update verify --manifest FILE [--artifact FILE] [--current-seq N]")
+	fmt.Fprintln(w, "  vx6 update verify --manifest FILE --current-seq N [--artifact FILE]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The client verifies updates against release keys pinned in this binary.")
 	fmt.Fprintln(w, "A peer may carry bytes, but only a threshold-signed manifest authorizes them.")
@@ -88,6 +88,15 @@ func runUpdateVerify(args []string) error {
 	}
 	if *manifestPath == "" {
 		return errors.New("--manifest is required")
+	}
+	sequenceProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "current-seq" {
+			sequenceProvided = true
+		}
+	})
+	if !sequenceProvided {
+		return errors.New("--current-seq is required; rollback checking needs a trusted current sequence")
 	}
 	var root release.TrustRoot
 	var err error

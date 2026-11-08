@@ -20,6 +20,7 @@
 package release
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -27,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -38,6 +40,8 @@ const SchemaVersion = 1
 
 // maxManifestBytes bounds untrusted metadata before any parsing.
 const maxManifestBytes = 64 * 1024
+
+const maxManifestFutureSkew = 5 * time.Minute
 
 // Platform identifies a build target.
 type Platform struct {
@@ -149,6 +153,9 @@ func (m Manifest) validateShape(now time.Time) error {
 	if !expires.After(issued) {
 		return errors.New("expires_at must be after issued_at")
 	}
+	if issued.After(now.Add(maxManifestFutureSkew)) {
+		return fmt.Errorf("manifest issued_at is too far in the future: %s", m.IssuedAt)
+	}
 	if now.After(expires) {
 		return fmt.Errorf("manifest expired at %s (freeze/stale-metadata guard)", m.ExpiresAt)
 	}
@@ -170,8 +177,13 @@ func (m Manifest) validateShape(now time.Time) error {
 		if !isHex64(a.SHA256) {
 			return fmt.Errorf("artifact %s has invalid sha256", a.Platform)
 		}
-		if strings.ContainsAny(a.Filename, "/\\\x00") || len(a.Filename) > 128 {
+		if a.Filename == "" || len(a.Filename) > 128 || strings.ContainsAny(a.Filename, "/\\\x00\r\n\t") {
 			return fmt.Errorf("artifact %s has unsafe filename", a.Platform)
+		}
+		for _, r := range a.Filename {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("artifact %s has unsafe filename", a.Platform)
+			}
 		}
 	}
 	return nil
@@ -210,16 +222,105 @@ func ParseSignedManifest(data []byte) (*SignedManifest, error) {
 	if len(data) > maxManifestBytes {
 		return nil, fmt.Errorf("manifest too large (%d bytes)", len(data))
 	}
-	dec := json.NewDecoder(strings.NewReader(string(data)))
-	dec.DisallowUnknownFields()
 	var sm SignedManifest
-	if err := dec.Decode(&sm); err != nil {
+	if err := decodeStrictJSON(data, &sm); err != nil {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
 	if len(sm.Signatures) == 0 || len(sm.Signatures) > 32 {
 		return nil, fmt.Errorf("manifest must carry 1..32 signatures, has %d", len(sm.Signatures))
 	}
 	return &sm, nil
+}
+
+func decodeStrictJSON(data []byte, target any) error {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func rejectDuplicateJSONKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var readValue func(json.Token) error
+	readValue = func(tok json.Token) error {
+		delim, ok := tok.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := make(map[string]struct{})
+			for dec.More() {
+				keyToken, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("JSON object key is not a string")
+				}
+				if _, exists := seen[key]; exists {
+					return fmt.Errorf("duplicate JSON field %q", key)
+				}
+				seen[key] = struct{}{}
+				value, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				if err := readValue(value); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim('}') {
+				return errors.New("malformed JSON object")
+			}
+		case '[':
+			for dec.More() {
+				value, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				if err := readValue(value); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim(']') {
+				return errors.New("malformed JSON array")
+			}
+		default:
+			return errors.New("unexpected JSON delimiter")
+		}
+		return nil
+	}
+
+	first, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if err := readValue(first); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func decodeSig(s string) ([]byte, error) {

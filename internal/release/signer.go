@@ -70,6 +70,7 @@ func GenerateSignerKey(passphrase []byte) (*EncryptedSignerKey, ed25519.PublicKe
 	if err != nil {
 		return nil, nil, err
 	}
+	defer zero(priv)
 	seed := priv.Seed() // 32 bytes; the whole secret
 	enc, err := sealSeed(seed, pub, passphrase)
 	for i := range seed {
@@ -122,6 +123,9 @@ func (e *EncryptedSignerKey) Open(passphrase []byte) (*Signer, error) {
 	if e.KDF != "argon2id" {
 		return nil, fmt.Errorf("unsupported kdf %q", e.KDF)
 	}
+	if e.Time != argonTime || e.MemKiB != argonMemoryKiB || e.Threads != argonThreads {
+		return nil, errors.New("unsupported Argon2 parameters")
+	}
 	pubRaw, err := base64.StdEncoding.DecodeString(e.Public)
 	if err != nil || len(pubRaw) != ed25519.PublicKeySize {
 		return nil, errors.New("bad public key in key file")
@@ -142,11 +146,7 @@ func (e *EncryptedSignerKey) Open(passphrase []byte) (*Signer, error) {
 	if err != nil {
 		return nil, errors.New("bad ciphertext")
 	}
-	mem := e.MemKiB
-	if mem == 0 {
-		mem = argonMemoryKiB
-	}
-	key := argon2.IDKey(passphrase, salt, e.Time, mem, e.Threads, chacha20poly1305.KeySize)
+	key := argon2.IDKey(passphrase, salt, e.Time, e.MemKiB, e.Threads, chacha20poly1305.KeySize)
 	defer zero(key)
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
@@ -205,12 +205,16 @@ func (s *Signer) Close() {
 func (e *EncryptedSignerKey) Marshal() ([]byte, error) { return json.MarshalIndent(e, "", "  ") }
 
 func LoadEncryptedSignerKey(r io.Reader) (*EncryptedSignerKey, error) {
-	data, err := io.ReadAll(io.LimitReader(r, 1<<16))
+	const maxKeyFileBytes = 1 << 16
+	data, err := io.ReadAll(io.LimitReader(r, maxKeyFileBytes+1))
 	if err != nil {
 		return nil, err
 	}
+	if len(data) > maxKeyFileBytes {
+		return nil, errors.New("encrypted signer key file is too large")
+	}
 	var e EncryptedSignerKey
-	if err := json.Unmarshal(data, &e); err != nil {
+	if err := decodeStrictJSON(data, &e); err != nil {
 		return nil, err
 	}
 	return &e, nil
