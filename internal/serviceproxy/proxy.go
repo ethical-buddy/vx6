@@ -10,19 +10,93 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/secure"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 const maxRequestSize = 4 * 1024
 
 type ConnectRequest struct {
+	Version     uint8  `json:"version"`
+	Action      string `json:"action"`
 	ServiceName string `json:"service_name"`
+}
+
+func (r ConnectRequest) Validate() error {
+	if r.Version != 1 || r.Action != "open" {
+		return errors.New("unsupported service request version or action")
+	}
+	return record.ValidateServiceName(r.ServiceName)
+}
+
+type ServicePolicy struct {
+	Target         string
+	Protocol       string
+	Private        bool
+	AllowedNodeIDs []string
+}
+
+// SessionTracker closes already-open private streams when their live policy
+// no longer permits the authenticated peer.
+type SessionTracker struct {
+	mu       sync.Mutex
+	sessions map[*serviceSession]struct{}
+}
+
+type serviceSession struct {
+	service string
+	peerID  string
+	conn    net.Conn
+}
+
+func NewSessionTracker() *SessionTracker {
+	return &SessionTracker{sessions: make(map[*serviceSession]struct{})}
+}
+
+func (t *SessionTracker) track(service, peerID string, conn net.Conn) func() {
+	if t == nil || peerID == "" {
+		return func() {}
+	}
+	session := &serviceSession{service: service, peerID: peerID, conn: conn}
+	t.mu.Lock()
+	t.sessions[session] = struct{}{}
+	t.mu.Unlock()
+	return func() {
+		t.mu.Lock()
+		delete(t.sessions, session)
+		t.mu.Unlock()
+	}
+}
+
+func (t *SessionTracker) Reconcile(policies map[string]ServicePolicy) {
+	if t == nil {
+		return
+	}
+	var revoke []*serviceSession
+	t.mu.Lock()
+	for session := range t.sessions {
+		policy, exists := policies[session.service]
+		if !exists || policy.Target == "" || (policy.Private && !policy.Allows(session.peerID)) {
+			revoke = append(revoke, session)
+			delete(t.sessions, session)
+		}
+	}
+	t.mu.Unlock()
+	for _, session := range revoke {
+		_ = session.conn.Close()
+	}
+}
+
+func (p ServicePolicy) Allows(nodeID string) bool {
+	return !p.Private || (nodeID != "" && slices.Contains(p.AllowedNodeIDs, nodeID))
 }
 
 func HandleInbound(conn net.Conn, id identity.Identity, services map[string]string) error {
@@ -63,7 +137,56 @@ func HandleInbound(conn net.Conn, id identity.Identity, services map[string]stri
 	return proxyDuplex(secureConn, targetConn)
 }
 
+// HandleInboundWithPolicy relies on the listener's authenticated IKE peer
+// record. Service data is not wrapped in a second application crypto session.
+func HandleInboundWithPolicy(conn net.Conn, services map[string]ServicePolicy, ikePeer record.EndpointRecord) error {
+	return HandleInboundWithPolicyAndTracker(conn, services, ikePeer, nil)
+}
+
+func HandleInboundWithPolicyAndTracker(conn net.Conn, services map[string]ServicePolicy, ikePeer record.EndpointRecord, tracker *SessionTracker) error {
+	payload, err := proto.ReadLengthPrefixed(conn, maxRequestSize)
+	if err != nil {
+		return err
+	}
+	var req ConnectRequest
+	if err := strictjson.Decode(payload, &req); err != nil {
+		return fmt.Errorf("decode service request: %w", err)
+	}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("invalid service request name: %w", err)
+	}
+	policy, ok := services[req.ServiceName]
+	if !ok || policy.Target == "" || policy.Protocol == record.ServiceProtocolUDP {
+		return errors.New("service unavailable")
+	}
+	peerID := ""
+	if policy.Private {
+		verifiedPeer, err := record.VerifyEndpoint(ikePeer, time.Now())
+		if err != nil {
+			return errors.New("service unavailable")
+		}
+		peerID = verifiedPeer.Endpoint().NodeID
+		if !policy.Allows(peerID) {
+			return errors.New("service unavailable")
+		}
+	}
+	targetConn, err := net.Dial("tcp", policy.Target)
+	if err != nil {
+		return fmt.Errorf("connect local service target: %w", err)
+	}
+	defer targetConn.Close()
+	done := tracker.track(req.ServiceName, peerID, conn)
+	defer done()
+	return proxyDuplex(conn, targetConn)
+}
+
 func ServeLocalForward(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, dialer func(context.Context) (net.Conn, error)) error {
+	return ServeLocalForwardWithUseObserver(ctx, localListen, service, id, dialer, nil)
+}
+
+// ServeLocalForwardWithUseObserver reports use after application bytes pass
+// through the established VX6 channel. This is local bookkeeping only.
+func ServeLocalForwardWithUseObserver(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, dialer func(context.Context) (net.Conn, error), onUse func()) error {
 	listener, err := net.Listen("tcp", localListen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", localListen, err)
@@ -100,28 +223,47 @@ func ServeLocalForward(ctx context.Context, localListen string, service record.S
 			if err := proto.WriteHeader(remoteConn, proto.KindServiceConn); err != nil {
 				return
 			}
-			secureConn, err := secure.Client(remoteConn, proto.KindServiceConn, id)
-			if err != nil {
-				fmt.Printf("[TUNNEL] Handshake failed: %v\n", err)
+			var serviceConn io.ReadWriter = remoteConn
+			if !service.IsHidden {
+				// Normal services rely on the IKE-authenticated ESP tunnel.
+			} else {
+				secureConn, handshakeErr := secure.Client(remoteConn, proto.KindServiceConn, id)
+				if handshakeErr != nil {
+					fmt.Printf("[TUNNEL] Handshake failed: %v\n", handshakeErr)
+					return
+				}
+				serviceConn = secureConn
+			}
+
+			payload, _ := json.Marshal(ConnectRequest{Version: 1, Action: "open", ServiceName: service.ServiceName})
+			if err := proto.WriteLengthPrefixed(serviceConn, payload); err != nil {
 				return
 			}
 
-			payload, _ := json.Marshal(ConnectRequest{ServiceName: service.ServiceName})
-			_ = proto.WriteLengthPrefixed(secureConn, payload)
-
 			fmt.Printf("[TUNNEL] Active: Local:%s <-> Remote:%s\n", localListen, service.NodeName)
-			_ = proxyDuplex(localConn, secureConn)
+			_ = proxyDuplexObserved(localConn, serviceConn, onUse)
 		}()
 	}
 }
 
 func proxyDuplex(a, b io.ReadWriter) error {
+	return proxyDuplexObserved(a, b, nil)
+}
+
+func proxyDuplexObserved(a, b io.ReadWriter, onActivity func()) error {
 	var wg sync.WaitGroup
+	var activityOnce sync.Once
 	errCh := make(chan error, 2)
+	observed := func(dst io.Writer) io.Writer {
+		if onActivity == nil {
+			return dst
+		}
+		return activityWriter{dst: dst, once: &activityOnce, onActivity: onActivity}
+	}
 
 	copyPipe := func(dst io.Writer, src io.Reader) {
 		defer wg.Done()
-		_, err := io.Copy(dst, src)
+		_, err := io.Copy(observed(dst), src)
 		if closer, ok := dst.(io.Closer); ok {
 			_ = closer.Close()
 		}
@@ -143,6 +285,20 @@ func proxyDuplex(a, b io.ReadWriter) error {
 		}
 	}
 	return nil
+}
+
+type activityWriter struct {
+	dst        io.Writer
+	once       *sync.Once
+	onActivity func()
+}
+
+func (w activityWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 {
+		w.once.Do(w.onActivity)
+	}
+	return n, err
 }
 
 func isProxyCloseError(err error) bool {

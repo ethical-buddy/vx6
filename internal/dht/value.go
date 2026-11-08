@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 var (
@@ -33,9 +34,6 @@ const (
 
 const (
 	minTrustedSupportingSources = 2
-	minTrustedASNGroups         = 2
-	minTrustedNetworkGroups     = 2
-	minTrustedProviderGroups    = 2
 	minTrustedConfirmationScore = 4
 	minTrustedLookupBranches    = 2
 )
@@ -328,19 +326,7 @@ func (c *candidateObservation) confirmed() bool {
 	if !c.onlyLoopbackNetworks() && len(c.exactBranches) < minTrustedLookupBranches {
 		return false
 	}
-	if !c.onlyLoopbackNetworks() {
-		if len(c.exactASNs) > 0 {
-			if len(c.exactASNs) < minTrustedASNGroups && len(c.exactProviders) < minTrustedProviderGroups {
-				return false
-			}
-		} else if len(c.exactProviders) < minTrustedProviderGroups {
-			return false
-		}
-	}
-	if len(c.exactNetworks) >= minTrustedNetworkGroups {
-		return true
-	}
-	return c.onlyLoopbackNetworks()
+	return true
 }
 
 func (c *candidateObservation) onlyLoopbackNetworks() bool {
@@ -470,7 +456,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 	switch {
 	case strings.HasPrefix(key, "node/name/"):
 		var rec record.EndpointRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode endpoint record: %w", err)
 		}
 		if err := record.VerifyEndpointRecord(rec, now); err != nil {
@@ -499,7 +485,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 	case strings.HasPrefix(key, "node/id/"):
 		want := strings.TrimPrefix(key, "node/id/")
 		var rec record.EndpointRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode endpoint record: %w", err)
 		}
 		if err := record.VerifyEndpointRecord(rec, now); err != nil {

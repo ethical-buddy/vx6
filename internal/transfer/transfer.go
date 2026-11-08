@@ -15,7 +15,6 @@ import (
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
-	"github.com/vx6/vx6/internal/secure"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -99,16 +98,11 @@ func SendFileWithConn(ctx context.Context, conn net.Conn, req SendRequest) (Send
 	if err := proto.WriteHeader(conn, proto.KindFileTransfer); err != nil {
 		return SendResult{}, err
 	}
-	secureConn, err := secure.Client(conn, proto.KindFileTransfer, req.Identity)
-	if err != nil {
+	if err := writeMetadata(conn, meta); err != nil {
 		return SendResult{}, err
 	}
 
-	if err := writeMetadata(secureConn, meta); err != nil {
-		return SendResult{}, err
-	}
-
-	state, err := readResumeState(secureConn)
+	state, err := readResumeState(conn)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -121,7 +115,7 @@ func SendFileWithConn(ctx context.Context, conn net.Conn, req SendRequest) (Send
 		}
 	}
 
-	written, err := io.Copy(secureConn, file)
+	written, err := io.Copy(conn, file)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("stream file: %w", err)
 	}
@@ -165,20 +159,33 @@ func ReceiveFile(conn net.Conn, dataDir string) (ReceiveResult, error) {
 }
 
 func ReceiveFileWithPolicy(conn net.Conn, dataDir string, policy ReceivePolicy) (ReceiveResult, error) {
+	return receiveFileWithPeer(conn, dataDir, policy, "", "")
+}
+
+func ReceiveFileWithAuthenticatedPeer(conn net.Conn, dataDir string, policy ReceivePolicy, peerName, peerID string) (ReceiveResult, error) {
+	if peerName == "" || peerID == "" {
+		return ReceiveResult{}, fmt.Errorf("authenticated IKE peer identity is required")
+	}
+	return receiveFileWithPeer(conn, dataDir, policy, peerName, peerID)
+}
+
+func receiveFileWithPeer(conn net.Conn, dataDir string, policy ReceivePolicy, peerName, peerID string) (ReceiveResult, error) {
 	meta, err := readMetadata(conn)
 	if err != nil {
 		return ReceiveResult{}, err
 	}
-	if err := policy.authorize(meta.NodeName); err != nil {
+	senderName := meta.NodeName
+	senderID := "unknownid"
+	if peerID != "" {
+		senderName = peerName
+		senderID = peerID
+	}
+	if err := policy.authorize(senderName); err != nil {
 		_ = writeResumeState(conn, resumeState{Denied: err.Error()})
 		return ReceiveResult{}, err
 	}
 
-	senderID := "unknownid"
-	if secureConn, ok := conn.(*secure.Conn); ok {
-		senderID = secureConn.PeerNodeID()
-	}
-	receiverDir := filepath.Join(dataDir, sanitizeReceiverDirName(meta.NodeName, senderID))
+	receiverDir := filepath.Join(dataDir, sanitizeReceiverDirName(senderName, senderID))
 	if err := os.MkdirAll(receiverDir, 0755); err != nil {
 		return ReceiveResult{}, fmt.Errorf("create receiver directory: %w", err)
 	}
@@ -221,7 +228,7 @@ func ReceiveFileWithPolicy(conn net.Conn, dataDir string, policy ReceivePolicy) 
 	}
 
 	return ReceiveResult{
-		SenderNode:    meta.NodeName,
+		SenderNode:    senderName,
 		FileName:      meta.FileName,
 		BytesReceived: offset + n,
 		StoredPath:    filePath,

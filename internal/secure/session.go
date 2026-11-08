@@ -4,6 +4,7 @@
 package secure
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -37,14 +38,15 @@ type hello struct {
 
 type Conn struct {
 	net.Conn
-	aead        cipher.AEAD
-	readCounter uint64
-	writeCtr    uint64
-	readBuf     []byte
-	writeDir    byte
-	readDir     byte
-	localNodeID string
-	peerNodeID  string
+	aead          cipher.AEAD
+	readCounter   uint64
+	writeCtr      uint64
+	readBuf       []byte
+	writeDir      byte
+	readDir       byte
+	localNodeID   string
+	peerNodeID    string
+	peerPublicKey []byte
 }
 
 func Client(conn net.Conn, kind byte, id identity.Identity) (*Conn, error) {
@@ -53,6 +55,28 @@ func Client(conn net.Conn, kind byte, id identity.Identity) (*Conn, error) {
 
 func Server(conn net.Conn, kind byte, id identity.Identity) (*Conn, error) {
 	return handshake(conn, kind, id, false)
+}
+
+// ClientExpected uses the existing signed session handshake, then requires the
+// remote key to match the identity record resolved by the caller.
+func ClientExpected(conn net.Conn, kind byte, id identity.Identity, nodeID, publicKey string) (*Conn, error) {
+	c, err := Client(conn, kind, id)
+	if err != nil {
+		return nil, err
+	}
+	want, err := base64.StdEncoding.DecodeString(publicKey)
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("secure: invalid expected public key: %w", err)
+	}
+	if c.PeerNodeID() != nodeID || !bytes.Equal(c.PeerPublicKey(), want) {
+		_ = c.Close()
+		if c.PeerNodeID() != nodeID {
+			return nil, fmt.Errorf("secure: remote NodeID %s does not match expected DHT identity %s", c.PeerNodeID(), nodeID)
+		}
+		return nil, fmt.Errorf("secure: remote public key does not match expected DHT identity %s", nodeID)
+	}
+	return c, nil
 }
 
 func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (*Conn, error) {
@@ -125,10 +149,11 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 	}
 
 	c := &Conn{
-		Conn:        conn,
-		aead:        aead,
-		localNodeID: id.NodeID,
-		peerNodeID:  remoteHello.NodeID,
+		Conn:          conn,
+		aead:          aead,
+		localNodeID:   id.NodeID,
+		peerNodeID:    remoteHello.NodeID,
+		peerPublicKey: append([]byte(nil), remoteStaticPub...),
 	}
 	if initiator {
 		c.writeDir = 0
@@ -182,6 +207,10 @@ func (c *Conn) LocalNodeID() string {
 
 func (c *Conn) PeerNodeID() string {
 	return c.peerNodeID
+}
+
+func (c *Conn) PeerPublicKey() []byte {
+	return append([]byte(nil), c.peerPublicKey...)
 }
 
 func (c *Conn) Read(p []byte) (int, error) {

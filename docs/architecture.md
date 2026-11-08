@@ -78,14 +78,15 @@ Trusted keys use conservative store admission:
 - signed envelopes are required for trusted records
 - stale updates are rejected
 - repeated writes are throttled per source
-- ASN-aware diversity is used when a local ASN map exists
+- optional ASN/prefix groups are indexed as supplemental local lookup contacts;
+  they do not change XOR routing order or block peers
 
 Important point:
 
 - not every node stores every record
 - each record is stored only on a small responsible set of nodes
-- diversity checks can use an optional offline ASN map when operators provide one
-- if no ASN map exists, the DHT falls back to the existing prefix-based diversity logic
+- the optional offline ASN map enriches the local contact index
+- without it, IPv6-prefix grouping still provides supplemental contacts
 
 ## 6. Security layers
 
@@ -94,9 +95,17 @@ The CLI dataplane target is:
 - IKEv2 authenticates the expected peer using a locally verified and trusted key record, then establishes an IPsec ESP tunnel.
 - ESP tunnel mode protects the IPv6 packets routed through it, including inner addresses, transport headers, and VX6 payload. Do not add a custom packet encryption layer by default.
 
-Peer authentication and service authorization are distinct: IKE verifies the
-peer key; VX6 must still authorize each service before opening its configured
-backend. Linux IKEv2/IPsec is implemented. The target DHT trust model is
+Peer authentication and service authorization are distinct. A public service
+does not require the caller to be found in the owner's DHT or local identity
+registry. A private service requires the caller's locally verified public key
+and NodeID in `allowed_node_ids`; an empty list denies everyone. Both still
+arrive through the IPsec-gated listener. Important limitation: the current
+strongSwan manager creates inbound IKE connections from known signed peer
+records, so this change removes the per-caller DHT check at service opening but
+does not yet admit an arbitrary peer with no preconfigured IKE relationship.
+Do not describe that broader public-access behavior as implemented until the
+IKE admission model supports it securely. Linux IKEv2/IPsec is implemented.
+The target DHT trust model is
 peer-local validation, not a network-wide membership proof or committee. See [the current
 security status](security.md) and [the dataplane threat model](dataplane-threat-model.md).
 
@@ -124,10 +133,27 @@ They do not change the protocol.
 
 The target direct-service flow is:
 
-1. The caller resolves an IPv6 endpoint and signed record, then applies its own conflict, pinning, expiry, and revocation policy to the key.
+1. The caller resolves an IPv6 endpoint and signed record, reports name conflicts, and applies local key-trust, expiry, and revocation checks to the NodeID/public key. A local key trust entry does not reserve the advertised name.
 2. IKEv2 mutually authenticates the expected keys and establishes an ESP tunnel using a maintained platform implementation.
-3. VX6 routes the peer traffic through the tunnel. Tunnel failure blocks that traffic; it never silently falls back to a clear connection.
-4. The receiving VX6 node authorizes the requested service before dialing only its configured local backend.
+3. VX6 sends TCP streams to the peer's TCP endpoint and framed UDP datagrams to
+   UDP endpoint port `P+2`; `P+1` remains the liveness probe. Both service paths
+   are covered by the IPsec selectors. Tunnel failure blocks protected traffic
+   rather than silently falling back to a clear route.
+4. The receiving VX6 node checks private-service identity and allowlist policy
+   before forwarding to only its configured local backend. UDP is explicitly
+   selected per service and uses a bounded flow table. For public services, it
+   skips the per-service DHT lookup and relies on the accepted IPsec peer path.
+
+Use `vx6 service add --private --allow-node NODE_ID` to give a private service
+an explicit local allowlist; repeat `--allow-node` for additional peers. A
+service request carries a version, the `open` action, and one service name.
+Unknown fields and malformed requests are rejected. A public service skips the
+owner's DHT identity lookup and service allowlist, but still requires an
+IPsec-protected connection. The current strongSwan setup only admits peers for
+which a signed peer record has already configured an IKE relationship;
+arbitrary unknown-peer IKE admission is not implemented. Public does not mean
+that the service is exposed without IPsec. UDP services use a separate VX6
+datagram envelope; they are not raw IP forwarding.
 
 On Linux, the repository has a strongSwan-backed IKEv2/IPsec integration and a
 container packet-capture test for the ESP path. VX6 delegates privileged

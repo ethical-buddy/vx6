@@ -26,10 +26,11 @@ const (
 )
 
 type DHTRequest struct {
-	Type   DHTRequestType `json:"type"`
-	Action string         `json:"action"` // "find_node", "find_value", "store"
-	Target string         `json:"target"` // NodeID or Service Name we are looking for
-	Data   string         `json:"data"`   // The value to store (e.g. a signed record)
+	Version uint8          `json:"version"`
+	Type    DHTRequestType `json:"type"`
+	Action  string         `json:"action"` // "find_node", "find_value", "store"
+	Target  string         `json:"target"` // NodeID or Service Name we are looking for
+	Data    string         `json:"data"`   // The value to store (e.g. a signed record)
 }
 
 type DHTRequestType string
@@ -37,6 +38,7 @@ type DHTRequestType string
 const (
 	DHTTypeBootstrap   DHTRequestType = "bootstrap"
 	DHTTypeUpdate      DHTRequestType = "update"
+	DHTTypeUpdateIP    DHTRequestType = "update_ip"
 	DHTTypeLookupName  DHTRequestType = "lookup_name"
 	DHTTypeLookupKey   DHTRequestType = "lookup_key"
 	DHTTypeLookupSvc   DHTRequestType = "lookup_service"
@@ -46,12 +48,16 @@ const (
 )
 
 type DHTResponse struct {
-	Type  DHTRequestType `json:"type"`
-	Nodes []NodeInfo     `json:"nodes"` // Closest nodes to the target
-	Value string         `json:"value"` // Found address/descriptor (if any)
+	Version uint8          `json:"version"`
+	Type    DHTRequestType `json:"type"`
+	Nodes   []NodeInfo     `json:"nodes"` // Closest nodes to the target
+	Value   string         `json:"value"` // Found address/descriptor (if any)
 }
 
 func DHTTypeFor(action, target string) DHTRequestType {
+	if action == "update_ip" {
+		return DHTTypeUpdateIP
+	}
 	if action == "store" {
 		return DHTTypeUpdate
 	}
@@ -69,11 +75,14 @@ func DHTTypeFor(action, target string) DHTRequestType {
 	case action == "find_node":
 		return DHTTypeBootstrap
 	default:
-		return DHTTypeLookupOther
+		return ""
 	}
 }
 
 func (r DHTRequest) Validate() error {
+	if r.Version != DHTWireVersion {
+		return fmt.Errorf("unsupported DHT wire version %d", r.Version)
+	}
 	if r.Target == "" || len(r.Target) > 512 {
 		return fmt.Errorf("DHT request target is empty or too long")
 	}
@@ -90,14 +99,27 @@ func (r DHTRequest) Validate() error {
 			return fmt.Errorf("identity lookup target must contain a full NodeID")
 		}
 	case DHTTypeBootstrap:
-		if r.Action != "find_node" || !strings.HasPrefix(r.Target, "vx6_") || !isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")) {
-			return fmt.Errorf("bootstrap target NodeID must contain a full SHA-256 digest")
+		if r.Action != "find_node" || !(isSHA256Hex(r.Target) || (strings.HasPrefix(r.Target, "vx6_") && isSHA256Hex(strings.TrimPrefix(r.Target, "vx6_")))) {
+			return fmt.Errorf("bootstrap target must be a full name hash or NodeID")
 		}
-	case DHTTypeUpdate, DHTTypeLookupSvc, DHTTypeLookupPriv, DHTTypeLookupHid, DHTTypeLookupOther:
+	case DHTTypeUpdateIP:
+		if r.Action != "update_ip" || !validEndpointUpdateTarget(r.Target) {
+			return fmt.Errorf("endpoint update requires update_ip action and a node ID or name-hash key")
+		}
+	case DHTTypeUpdate:
+		if r.Action != "store" || !validDHTValueKey(r.Target) {
+			return fmt.Errorf("DHT store target is not a supported record key")
+		}
+	case DHTTypeLookupSvc, DHTTypeLookupPriv, DHTTypeLookupHid:
+		if r.Action != "find_value" {
+			return fmt.Errorf("service and descriptor lookups must use find_value")
+		}
+	case DHTTypeLookupOther:
+		return fmt.Errorf("unsupported DHT lookup target")
 	default:
 		return fmt.Errorf("unsupported DHT request type %q", r.Type)
 	}
-	if r.Type != DHTTypeLookupName && r.Type != DHTTypeLookupKey && r.Type != DHTTypeBootstrap &&
+	if r.Type != DHTTypeLookupName && r.Type != DHTTypeLookupKey && r.Type != DHTTypeBootstrap && r.Type != DHTTypeUpdateIP &&
 		r.Type != DHTTypeFor(r.Action, r.Target) {
 		return fmt.Errorf("DHT request type %q does not match action %q and target", r.Type, r.Action)
 	}
@@ -106,7 +128,7 @@ func (r DHTRequest) Validate() error {
 		if r.Data != "" {
 			return fmt.Errorf("DHT lookup request must not contain update data")
 		}
-	case "store":
+	case "store", "update_ip":
 		if r.Data == "" {
 			return fmt.Errorf("DHT update request has no data")
 		}
@@ -116,13 +138,49 @@ func (r DHTRequest) Validate() error {
 	return nil
 }
 
+func validEndpointUpdateTarget(target string) bool {
+	switch {
+	case strings.HasPrefix(target, "node/name/"):
+		return isSHA256Hex(strings.TrimPrefix(target, "node/name/"))
+	case strings.HasPrefix(target, "node/id/vx6_"):
+		return isSHA256Hex(strings.TrimPrefix(target, "node/id/vx6_"))
+	default:
+		return false
+	}
+}
+
+func validDHTValueKey(target string) bool {
+	if len(target) == 0 || len(target) > 512 || strings.ContainsAny(target, "\x00\r\n\t ") {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(target, "node/name/"):
+		return isSHA256Hex(strings.TrimPrefix(target, "node/name/"))
+	case strings.HasPrefix(target, "node/id/vx6_"):
+		return isSHA256Hex(strings.TrimPrefix(target, "node/id/vx6_"))
+	case strings.HasPrefix(target, "service/"):
+		return len(strings.TrimPrefix(target, "service/")) > 0
+	case strings.HasPrefix(target, "private-catalog/"):
+		return len(strings.TrimPrefix(target, "private-catalog/")) > 0
+	case strings.HasPrefix(target, "hidden-desc/v1/"):
+		return len(strings.TrimPrefix(target, "hidden-desc/v1/")) > 0
+	default:
+		return false
+	}
+}
+
 func isSHA256Hex(value string) bool {
 	if len(value) != 64 {
+		return false
+	}
+	if strings.ToLower(value) != value {
 		return false
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
 }
+
+const DHTWireVersion uint8 = 1
 
 type NodeInfo struct {
 	IdentityVersion   uint8  `json:"identity_version,omitempty"`

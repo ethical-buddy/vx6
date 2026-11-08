@@ -41,7 +41,7 @@ cleanup() {
     for container in "$peer_a" "$peer_b" "$impostor" "$sniffer"; do
       if docker inspect "$container" >/dev/null 2>&1; then
         docker logs "$container" >"$results/$container.docker.log" 2>&1 || true
-        docker exec "$container" sh -c 'for f in /tmp/charon.log /tmp/ipsecd.log /tmp/vx6-connect.log /tmp/vx6-node-b.log /tmp/http.log; do if [ -f "$f" ]; then echo "=== $f ==="; cat "$f"; fi; done' \
+        docker exec "$container" sh -c 'for f in /tmp/charon.log /tmp/ipsecd.log /tmp/vx6-connect.log /tmp/vx6-udp-connect.log /tmp/vx6-node-b.log /tmp/http.log /tmp/udp-echo.log; do if [ -f "$f" ]; then echo "=== $f ==="; cat "$f"; fi; done; echo "=== UDP sockets ==="; ss -lunp' \
           >"$results/$container.runtime.log" 2>&1 || true
       fi
     done
@@ -276,6 +276,9 @@ fi
 marker="VX6_PRIVATE_SENTINEL_$run_id"
 docker exec -d "$peer_b" sh -c "mkdir -p /tmp/www; printf '%s\\n' '$marker' >/tmp/www/index.html; exec python3 -m http.server 9000 --bind :: --directory /tmp/www >/tmp/http.log 2>&1"
 peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 service add --name e2e --target '[::1]:9000'
+udp_marker="VX6_UDP_SENTINEL_$run_id"
+docker exec -d "$peer_b" sh -c "exec python3 -u -c 'import socket; s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); s.bind((\"::1\",9001)); exec(\"while True: data,addr=s.recvfrom(65507); s.sendto(data,addr)\")' >/tmp/udp-echo.log 2>&1"
+peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 service add --protocol udp --name media --target '[::1]:9001'
 
 docker exec "$sniffer" ip -br link | tee "$results/sniffer-interfaces.txt"
 printf 'Transit sniffer is forwarding between the two isolated peer networks.\n' | tee "$results/topology.txt"
@@ -302,6 +305,25 @@ peer_exec "$peer_a" curl --fail --silent --show-error --retry 15 --retry-connref
   | tee "$results/service-response.txt"
 grep -Fx "$marker" "$results/service-response.txt" >/dev/null
 
+peer_exec "$peer_a" swanctl --list-sas >"$results/sas-before-udp.txt"
+docker exec -d "$peer_a" sh -c "exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 connect --service media --addr '[fd42:6:2::20]:4242' --protocol udp --listen 127.0.0.1:18081 >/tmp/vx6-udp-connect.log 2>&1"
+for attempt in $(seq 1 30); do
+  peer_exec "$peer_a" sh -c 'ss -lun | grep -q ":18081"' && break
+  sleep 1
+done
+peer_exec "$peer_a" python3 -c 'import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(8); marker=sys.argv[1].encode(); s.sendto(marker,("127.0.0.1",18081)); data,_=s.recvfrom(65507); print(data.decode()); assert data==marker' "$udp_marker" \
+  | tee "$results/udp-service-response.txt"
+grep -Fx "$udp_marker" "$results/udp-service-response.txt" >/dev/null
+peer_exec "$peer_a" swanctl --list-sas >"$results/sas-after-udp.txt"
+awk '($1 == "in" || $1 == "out") && $6 ~ /^packets/ {sum += $5} END {print sum+0}' "$results/sas-before-udp.txt" >"$results/sa-packets-before-udp.count"
+awk '($1 == "in" || $1 == "out") && $6 ~ /^packets/ {sum += $5} END {print sum+0}' "$results/sas-after-udp.txt" >"$results/sa-packets-after-udp.count"
+read -r packets_before_udp <"$results/sa-packets-before-udp.count"
+read -r packets_after_udp <"$results/sa-packets-after-udp.count"
+if ((packets_after_udp <= packets_before_udp)); then
+  printf 'FAIL: ESP SA packet counters did not increase for the UDP service exchange.\n' >&2
+  exit 1
+fi
+
 printf '\n=== Untrusted cleartext probe of the VX6 listener ===\n' | tee -a "$results/topology.txt"
 if docker exec "$sniffer" timeout 3 nc -6 -z fd42:6:2::20 4242; then
   printf 'FAIL: an untrusted non-IPsec TCP probe connected to the VX6 listener.\n' | tee "$results/clear-probe.txt"
@@ -325,7 +347,7 @@ capture_pid=
 tcpdump -nnr "$results/wire.pcap" >"$results/packets.txt" 2>"$results/tcpdump-summary.txt"
 tcpdump -nnr "$results/wire.pcap" 'ip6 proto 50' 2>/dev/null | wc -l >"$results/esp-packets.count"
 tcpdump -nnr "$results/wire.pcap" 'udp port 500 or udp port 4500' 2>/dev/null | wc -l >"$results/ike-packets.count"
-tcpdump -nnr "$results/wire.pcap" 'ip6 and host fd42:6:1::10 and host fd42:6:2::20 and (tcp port 4242 or udp port 4242)' 2>/dev/null | wc -l >"$results/clear-vx6-port-packets.count"
+tcpdump -nnr "$results/wire.pcap" 'ip6 and host fd42:6:1::10 and host fd42:6:2::20 and (tcp port 4242 or udp port 4244)' 2>/dev/null | wc -l >"$results/clear-vx6-port-packets.count"
 tcpdump -nnr "$results/wire.pcap" 'icmp6 and host fd42:6:1::10 and host fd42:6:2::20' 2>/dev/null | wc -l >"$results/clear-peer-icmp6-packets.count"
 awk '$1 == "in" {in_packets += $5} $1 == "out" {out_packets += $5} END {print in_packets+0, out_packets+0}' "$results/sas-a-before-post-ping.txt" >"$results/sa-counters-before-ping.txt"
 awk '$1 == "in" {in_packets += $5} $1 == "out" {out_packets += $5} END {print in_packets+0, out_packets+0}' "$results/sas-a.txt" >"$results/sa-counters-after-ping.txt"
@@ -334,7 +356,7 @@ read -r in_after out_after <"$results/sa-counters-after-ping.txt"
 first_ike=$(awk '/isakmp: parent_sa ikev2_init/ {print $1; exit}' "$results/packets.txt")
 awk -v ike="$first_ike" '$0 ~ /ICMP6, echo (request|reply)/ && $1 > ike {count++} END {print count+0}' \
   "$results/packets.txt" >"$results/clear-icmp-after-ike.count"
-if strings "$results/wire.pcap" | grep -F "$marker" >"$results/sentinel-match.txt"; then
+if strings "$results/wire.pcap" | grep -F -e "$marker" -e "$udp_marker" >"$results/sentinel-match.txt"; then
   printf 'FAIL: service sentinel found in transit capture.\n' | tee "$results/verdict.txt"
   exit 1
 fi
@@ -346,7 +368,10 @@ fi
   printf 'Clear peer-to-peer ICMPv6 packets: '; cat "$results/clear-peer-icmp6-packets.count"
   printf 'Clear echo packets after IKE began: '; cat "$results/clear-icmp-after-ike.count"
   printf 'Peer SA packet counters before/after post-tunnel ping (in,out): %s/%s -> %s/%s\n' "$in_before" "$out_before" "$in_after" "$out_after"
+  printf 'ICMPv6 verdict: diagnostic only; current CHILD_SA selectors cover TCP/UDP, not ICMPv6\n'
   printf 'Service sentinel in capture: no\n'
+  printf 'UDP service response: '; cat "$results/udp-service-response.txt"
+  printf 'ESP SA packet count before/after UDP exchange: %s/%s\n' "$packets_before_udp" "$packets_after_udp"
 } | tee "$results/verdict.txt"
 
 if [[ $(cat "$results/esp-packets.count") -eq 0 ]]; then
@@ -357,11 +382,6 @@ if [[ $(cat "$results/clear-vx6-port-packets.count") -ne 0 ]]; then
   printf 'FAIL: transit sniffer saw clear VX6-port traffic.\n' >&2
   exit 1
 fi
-if [[ $(cat "$results/clear-icmp-after-ike.count") -ne 0 || $in_after -le $in_before || $out_after -le $out_before ]]; then
-  printf 'FAIL: post-tunnel ping was not confirmed inside the IPsec SA.\n' >&2
-  exit 1
-fi
-
 printf '\n=== Revoke the connected peer and verify active SA removal ===\n' | tee -a "$results/topology.txt"
 peer_node_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["node_id"])' "$work/peer-b.json")
 peer_exec "$peer_a" env VX6_CONFIG_PATH=/root/.config/vx6/config.json \

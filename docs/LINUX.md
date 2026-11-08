@@ -85,8 +85,8 @@ If you want a user-level long-running service, see:
 ## Notes
 
 - VX6 still expects IPv6-capable node endpoints
-- service stream transport currently uses TCP; the active IPsec protection is
-  Linux-only
+- services currently support TCP streams and explicitly configured UDP
+  datagrams; the active IPsec protection is Linux-only
 - Windows and Android do not yet have equivalent VX6 tunnel integration
 - IPsec setup and packet-capture test: [IPsec guide](ipsec.md)
 - installation and multi-platform contribution direction: [packaging plan](packaging-plan.md)

@@ -12,13 +12,17 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/vx6/vx6/internal/proto"
 )
 
 const requestTimeout = 2 * time.Second
 
 const (
-	ActionStatus = "status"
-	ActionReload = "reload"
+	ActionStatus     = "status"
+	ActionReload     = "reload"
+	ActionPeerUse    = "peer_use"
+	ActionPeerFriend = "peer_friend"
 )
 
 type Info struct {
@@ -56,8 +60,11 @@ type Status struct {
 }
 
 type Request struct {
-	Token  string `json:"token"`
-	Action string `json:"action"`
+	Token  string         `json:"token"`
+	Action string         `json:"action"`
+	Peer   proto.NodeInfo `json:"peer,omitempty"`
+	NodeID string         `json:"node_id,omitempty"`
+	Friend bool           `json:"friend,omitempty"`
 }
 
 type Response struct {
@@ -67,16 +74,22 @@ type Response struct {
 }
 
 type Server struct {
-	infoPath  string
-	listener  net.Listener
-	token     string
-	pid       int
-	reloadFn  func() error
-	statusFn  func() Status
-	closeOnce sync.Once
+	infoPath     string
+	listener     net.Listener
+	token        string
+	pid          int
+	reloadFn     func() error
+	statusFn     func() Status
+	peerUseFn    func(proto.NodeInfo) error
+	peerFriendFn func(proto.NodeInfo, bool) error
+	closeOnce    sync.Once
 }
 
 func Start(infoPath string, pid int, reloadFn func() error, statusFn func() Status) (*Server, error) {
+	return StartWithPeerHandlers(infoPath, pid, reloadFn, statusFn, nil, nil)
+}
+
+func StartWithPeerHandlers(infoPath string, pid int, reloadFn func() error, statusFn func() Status, peerUseFn func(proto.NodeInfo) error, peerFriendFn func(proto.NodeInfo, bool) error) (*Server, error) {
 	if infoPath == "" {
 		return nil, fmt.Errorf("runtime control path is required")
 	}
@@ -98,12 +111,14 @@ func Start(infoPath string, pid int, reloadFn func() error, statusFn func() Stat
 	}
 
 	s := &Server{
-		infoPath: infoPath,
-		listener: listener,
-		token:    token,
-		pid:      pid,
-		reloadFn: reloadFn,
-		statusFn: statusFn,
+		infoPath:     infoPath,
+		listener:     listener,
+		token:        token,
+		pid:          pid,
+		reloadFn:     reloadFn,
+		statusFn:     statusFn,
+		peerUseFn:    peerUseFn,
+		peerFriendFn: peerFriendFn,
 	}
 	if err := s.writeInfoFile(); err != nil {
 		_ = listener.Close()
@@ -112,6 +127,53 @@ func Start(infoPath string, pid int, reloadFn func() error, statusFn func() Stat
 
 	go s.serve()
 	return s, nil
+}
+
+func RecordPeerUse(ctx context.Context, infoPath string, peer proto.NodeInfo) error {
+	return sendPeer(ctx, infoPath, Request{Action: ActionPeerUse, Peer: peer})
+}
+
+func SetPeerFriend(ctx context.Context, infoPath string, peer proto.NodeInfo, friend bool) error {
+	return sendPeer(ctx, infoPath, Request{Action: ActionPeerFriend, Peer: peer, NodeID: peer.ID, Friend: friend})
+}
+
+func RemovePeerFriend(ctx context.Context, infoPath, nodeID string) error {
+	return sendPeer(ctx, infoPath, Request{Action: ActionPeerFriend, NodeID: nodeID, Friend: false})
+}
+
+func sendPeer(ctx context.Context, infoPath string, req Request) error {
+	info, err := LoadInfo(infoPath)
+	if err != nil {
+		return err
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp4", info.Addr)
+	if err != nil {
+		return fmt.Errorf("dial runtime control: %w", err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	req.Token = info.Token
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("write runtime control request: %w", err)
+	}
+	var response Response
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		return fmt.Errorf("read runtime control response: %w", err)
+	}
+	if !response.OK {
+		if response.Error == "" {
+			response.Error = "runtime control rejected request"
+		}
+		return errors.New(response.Error)
+	}
+	return nil
 }
 
 func (s *Server) Close() error {
@@ -235,6 +297,29 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = json.NewEncoder(conn).Encode(Response{OK: true, Status: &status})
 	case ActionReload:
 		if err := s.reloadFn(); err != nil {
+			_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(Response{OK: true})
+	case ActionPeerUse:
+		if s.peerUseFn == nil {
+			_ = json.NewEncoder(conn).Encode(Response{Error: "peer-use updates are unavailable"})
+			return
+		}
+		if err := s.peerUseFn(req.Peer); err != nil {
+			_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(Response{OK: true})
+	case ActionPeerFriend:
+		if s.peerFriendFn == nil {
+			_ = json.NewEncoder(conn).Encode(Response{Error: "friend updates are unavailable"})
+			return
+		}
+		if req.Peer.ID == "" {
+			req.Peer.ID = req.NodeID
+		}
+		if err := s.peerFriendFn(req.Peer, req.Friend); err != nil {
 			_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
 			return
 		}

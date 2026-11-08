@@ -11,6 +11,7 @@ import (
 )
 
 type dialGuardKey struct{}
+type expectedPeerIDKey struct{}
 
 // DialGuard authenticates and establishes the peer's IPsec SA before VX6 opens
 // an application socket. A guard is attached to a node's context so multiple
@@ -19,6 +20,15 @@ type DialGuard func(context.Context, string) error
 
 func WithDialGuard(ctx context.Context, guard DialGuard) context.Context {
 	return context.WithValue(ctx, dialGuardKey{}, guard)
+}
+
+func WithExpectedPeerID(ctx context.Context, nodeID string) context.Context {
+	return context.WithValue(ctx, expectedPeerIDKey{}, nodeID)
+}
+
+func ExpectedPeerID(ctx context.Context) string {
+	value, _ := ctx.Value(expectedPeerIDKey{}).(string)
+	return value
 }
 
 const (
