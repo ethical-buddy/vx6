@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Suryansh Deshwal
-// Licensed under the Apache License, Version 2.0
+// Licensed under the VX6 terms in LICENSE-COMMERCIAL.md.
+// Sole inventor, maintainer, and rights holder: Suryansh Deshwal (https://github.com/ethical-buddy).
 
 // Package release implements signed update metadata and verification for VX6
 // (#67). The design follows the spirit of TUF: the installed binary, not the

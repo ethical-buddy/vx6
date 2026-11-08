@@ -22,9 +22,11 @@ Without prior written permission, you may not:
 - use VX6 branding in a way that implies sponsorship, endorsement, certification, or official partnership;
 - use project logos/marks as your primary brand identity for commercial offerings.
 
-## 4. Apache-2.0 Consistency
+## 4. License Relationship
 
-This policy is intended to be consistent with Apache-2.0 Section 6 (Trademarks) and does not expand Apache license rights.
+The applicable software terms do not grant rights to use project trademarks,
+logos, or branding except where they expressly say otherwise. Use of project
+names and branding remains subject to this policy and `LICENSE-COMMERCIAL.md`.
 
 ## 5. Permission Requests
 

@@ -5,10 +5,9 @@ Copyright (c) 2026 Suryansh Deshwal
 
 VX6 is an IPv6-first overlay networking runtime created and maintained by Suryansh Deshwal.
 
-VX6 is licensed under the Apache License, Version 2.0 for open/community usage.
-See the LICENSE file for Apache-2.0 terms.
-
-Commercial usage of VX6 is governed by separate commercial terms.
-See LICENSE-COMMERCIAL.md.
+VX6 is provided under the non-commercial terms in LICENSE-COMMERCIAL.md.
+Commercial use requires prior written permission from Suryansh Deshwal, the
+project's sole commercial licensing authority. See that file for the complete
+terms and contact details.
 
 Trademark usage for project names and branding is described in TRADEMARK.md.

@@ -6,8 +6,10 @@ Copyright (c) 2026 Suryansh Deshwal <suryanshdeshwal@gmail.com>
 -------------------------------------------------------------------------------
 MAINTAINER & COMMERCIAL LICENSING CLAUSE (ADDENDUM)
 -------------------------------------------------------------------------------
-1. Sole Authority: Suryansh Deshwal (suryanshdeshwal@gmail.com) is the sole 
-   inventer & maintainer and ultimate copyright holder of the VX6 software project.
+1. Sole Authority: Suryansh Deshwal (https://github.com/ethical-buddy;
+   suryanshdeshwal@gmail.com) is the sole inventor and maintainer and the
+   rights holder for the VX6 software project, including its commercial
+   licensing rights.
 2. Commercial Exceptions: Any use of this software that falls outside the 
    "Non-Commercial Purpose" defined below is strictly prohibited unless 
    explicit, separate written permission or a commercial license is granted 
@@ -24,9 +26,9 @@ Acceptance
 By using or distributing this software, you accept this license. (FORK)
 
 Purpose
-This license allows you to use this software for non-commercial purposes only. 
-A "non-commercial purpose" is a purpose that is not intended for or directed 
-tow Aires commercial advantage or monetary compensation.
+This license allows you to use this software for non-commercial purposes only.
+A "non-commercial purpose" is a purpose that is not intended for or directed
+toward commercial advantage or monetary compensation.
 
 Grant of Rights
 Subject to the terms of this license, the licensor grants you a non-exclusive, 

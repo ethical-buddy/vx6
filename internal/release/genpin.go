@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Suryansh Deshwal
-// Licensed under the Apache License, Version 2.0
+// Licensed under the VX6 terms in LICENSE-COMMERCIAL.md.
+// Sole inventor, maintainer, and rights holder: Suryansh Deshwal (https://github.com/ethical-buddy).
 
 package release
 
@@ -22,7 +23,8 @@ func RenderPinnedRoot(r TrustRoot) ([]byte, error) {
 	// Pretty form for review; the Go string is the compact JSON.
 	pretty, _ := json.MarshalIndent(r, "", "  ")
 	src := fmt.Sprintf(`// Copyright (c) 2026 Suryansh Deshwal
-// Licensed under the Apache License, Version 2.0
+// Licensed under the VX6 terms in LICENSE-COMMERCIAL.md.
+// Sole inventor, maintainer, and rights holder: Suryansh Deshwal (https://github.com/ethical-buddy).
 
 package release
 

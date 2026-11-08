@@ -102,3 +102,11 @@ Start with the [SDK guide](docs/sdk.md). Mobile binding experiments are document
 - [Contributing](CONTRIBUTING.md)
 
 Archived proposals, benchmark reports, and provenance material are kept outside the main reading path in `docs/archive/`.
+
+## License
+
+VX6 is provided under the non-commercial terms in
+[`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md). Commercial use requires prior
+written permission from the sole licensing authority, Suryansh Deshwal
+([GitHub](https://github.com/ethical-buddy),
+[email](mailto:suryanshdeshwal@gmail.com)).
