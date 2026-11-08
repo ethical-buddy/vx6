@@ -105,7 +105,7 @@ Archived proposals, benchmark reports, and provenance material are kept outside 
 
 ## License
 
-VX6 is provided under the non-commercial terms in
+VX6 is provided under the PolyForm terms in
 [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md). Commercial use requires prior
 written permission from the sole licensing authority, Suryansh Deshwal
 ([GitHub](https://github.com/ethical-buddy),
