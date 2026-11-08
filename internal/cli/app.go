@@ -75,6 +75,8 @@ func Run(ctx context.Context, args []string) error {
 		return runIdentity(ctx, args[1:])
 	case "debug":
 		return runDebug(ctx, args[1:])
+	case "update":
+		return runUpdate(args[1:])
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return nil
