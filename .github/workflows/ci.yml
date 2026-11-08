@@ -27,6 +27,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -36,7 +38,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxext-dev libxkbcommon-dev libgl1-mesa-dev libxxf86vm-dev
       - name: Check formatting
-        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            changed=$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- '*.go')
+          else
+            changed=$(git diff-tree --no-commit-id --name-only -r HEAD -- '*.go')
+          fi
+          if [[ -n "$changed" ]]; then
+            unformatted=$(printf '%s\n' "$changed" | xargs -r gofmt -l)
+            test -z "$unformatted"
+          fi
       - name: Vet
         run: go vet ./...
       - name: Test
