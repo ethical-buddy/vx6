@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/vx6/vx6/internal/strictjson"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -214,7 +215,7 @@ func LoadEncryptedSignerKey(r io.Reader) (*EncryptedSignerKey, error) {
 		return nil, errors.New("encrypted signer key file is too large")
 	}
 	var e EncryptedSignerKey
-	if err := decodeStrictJSON(data, &e); err != nil {
+	if err := strictjson.Decode(data, &e); err != nil {
 		return nil, err
 	}
 	return &e, nil

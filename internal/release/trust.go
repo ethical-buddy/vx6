@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 // RootKey is one pinned release root public key.
@@ -190,7 +192,7 @@ func (r TrustRoot) AdvanceTrust(data []byte, now time.Time) (TrustRoot, error) {
 		}
 	}
 	var st SignedTrustRoot
-	if err := decodeStrictJSON(data, &st); err != nil {
+	if err := strictjson.Decode(data, &st); err != nil {
 		return r, fmt.Errorf("parse trust root: %w", err)
 	}
 	if err := st.Root.validateShape(); err != nil {

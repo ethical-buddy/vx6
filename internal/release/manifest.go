@@ -20,18 +20,17 @@
 package release
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 // SchemaVersion is the manifest/root schema version. A client refuses a schema
@@ -223,104 +222,13 @@ func ParseSignedManifest(data []byte) (*SignedManifest, error) {
 		return nil, fmt.Errorf("manifest too large (%d bytes)", len(data))
 	}
 	var sm SignedManifest
-	if err := decodeStrictJSON(data, &sm); err != nil {
+	if err := strictjson.Decode(data, &sm); err != nil {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
 	if len(sm.Signatures) == 0 || len(sm.Signatures) > 32 {
 		return nil, fmt.Errorf("manifest must carry 1..32 signatures, has %d", len(sm.Signatures))
 	}
 	return &sm, nil
-}
-
-func decodeStrictJSON(data []byte, target any) error {
-	if err := rejectDuplicateJSONKeys(data); err != nil {
-		return err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(target); err != nil {
-		return err
-	}
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return errors.New("unexpected trailing JSON value")
-		}
-		return err
-	}
-	return nil
-}
-
-func rejectDuplicateJSONKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	var readValue func(json.Token) error
-	readValue = func(tok json.Token) error {
-		delim, ok := tok.(json.Delim)
-		if !ok {
-			return nil
-		}
-		switch delim {
-		case '{':
-			seen := make(map[string]struct{})
-			for dec.More() {
-				keyToken, err := dec.Token()
-				if err != nil {
-					return err
-				}
-				key, ok := keyToken.(string)
-				if !ok {
-					return errors.New("JSON object key is not a string")
-				}
-				if _, exists := seen[key]; exists {
-					return fmt.Errorf("duplicate JSON field %q", key)
-				}
-				seen[key] = struct{}{}
-				value, err := dec.Token()
-				if err != nil {
-					return err
-				}
-				if err := readValue(value); err != nil {
-					return err
-				}
-			}
-			end, err := dec.Token()
-			if err != nil || end != json.Delim('}') {
-				return errors.New("malformed JSON object")
-			}
-		case '[':
-			for dec.More() {
-				value, err := dec.Token()
-				if err != nil {
-					return err
-				}
-				if err := readValue(value); err != nil {
-					return err
-				}
-			}
-			end, err := dec.Token()
-			if err != nil || end != json.Delim(']') {
-				return errors.New("malformed JSON array")
-			}
-		default:
-			return errors.New("unexpected JSON delimiter")
-		}
-		return nil
-	}
-
-	first, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	if err := readValue(first); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		if err == nil {
-			return errors.New("unexpected trailing JSON value")
-		}
-		return err
-	}
-	return nil
 }
 
 func decodeSig(s string) ([]byte, error) {
