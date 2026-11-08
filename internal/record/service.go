@@ -80,6 +80,16 @@ func SignServiceRecord(id identity.Identity, rec *ServiceRecord) error {
 }
 
 func VerifyServiceRecord(rec ServiceRecord, now time.Time) error {
+	if len(rec.NodeID) > 80 || len(rec.NodeName) > MaxNodeNameLength || len(rec.ServiceName) > 128 || len(rec.Protocol) > 16 || len(rec.Alias) > 128 || len(rec.Address) > 128 || len(rec.HiddenProfile) > 32 || len(rec.PublicKey) > 44 || len(rec.Signature) > 88 || len(rec.IssuedAt) > 64 || len(rec.ExpiresAt) > 64 || len(rec.IntroPoints) > 16 || len(rec.StandbyIntroPoints) > 16 {
+		return fmt.Errorf("service record field exceeds its limit")
+	}
+	for _, points := range [][]string{rec.IntroPoints, rec.StandbyIntroPoints} {
+		for _, point := range points {
+			if len(point) == 0 || len(point) > 256 {
+				return fmt.Errorf("service record intro point is empty or too long")
+			}
+		}
+	}
 	if rec.NodeID == "" || rec.NodeName == "" || rec.ServiceName == "" {
 		return fmt.Errorf("service record missing required fields")
 	}
@@ -183,11 +193,14 @@ func ServiceLookupKey(rec ServiceRecord) string {
 }
 
 func ValidateServiceName(name string) error {
-	if name == "" {
+	if name == "" || len(name) > 128 {
 		return fmt.Errorf("service name cannot be empty")
 	}
 	if strings.Contains(name, ".") {
 		return fmt.Errorf("service name %q cannot contain dots", name)
+	}
+	if strings.ContainsAny(name, "\x00\r\n\t ") {
+		return fmt.Errorf("service name contains unsupported characters")
 	}
 	return nil
 }

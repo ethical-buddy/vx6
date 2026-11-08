@@ -22,6 +22,7 @@ import (
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 const maxHandshakeSize = 8 * 1024
@@ -269,8 +270,11 @@ func readHello(r io.Reader, kind byte) (hello, error) {
 	}
 
 	var h hello
-	if err := json.Unmarshal(payload, &h); err != nil {
+	if err := strictjson.Decode(payload, &h); err != nil {
 		return hello{}, fmt.Errorf("decode handshake: %w", err)
+	}
+	if h.Version != sessionVersion || len(h.NodeID) > 80 || len(h.PublicKey) != 44 || len(h.Ephemeral) > 64 || len(h.Signature) != 88 {
+		return hello{}, fmt.Errorf("invalid handshake field sizes or version")
 	}
 
 	pub, err := base64.StdEncoding.DecodeString(h.PublicKey)

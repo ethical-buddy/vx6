@@ -18,6 +18,7 @@ import (
 
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 	"github.com/vx6/vx6/internal/transfer"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
@@ -39,7 +40,20 @@ type Registry struct {
 	serviceByName    map[string]record.ServiceRecord
 	addressHistory   map[string][]addressObservation
 	endpointObserver func(record.EndpointRecord)
+	requestRates     map[string]requestRate
 }
+
+type requestRate struct {
+	start time.Time
+	count int
+}
+
+const (
+	requestRateWindow   = 10 * time.Second
+	requestRateBurst    = 120
+	requestRateMaxPeers = 4096
+	requestRateEntryTTL = time.Minute
+)
 
 type addressObservation struct {
 	Address  string    `json:"address"`
@@ -53,6 +67,7 @@ func NewRegistry(path string) (*Registry, error) {
 		byNode:         map[string]record.EndpointRecord{},
 		serviceByName:  map[string]record.ServiceRecord{},
 		addressHistory: map[string][]addressObservation{},
+		requestRates:   map[string]requestRate{},
 	}
 	if path != "" {
 		if err := r.load(); err != nil {
@@ -99,7 +114,20 @@ type response struct {
 }
 
 func (r *Registry) HandleConn(conn net.Conn) error {
+	return r.HandleConnFromPeer(conn, "")
+}
+
+func (r *Registry) HandleConnFromPeer(conn net.Conn, peerID string) error {
 	defer conn.Close()
+	if peerID == "" {
+		peerID = conn.RemoteAddr().String()
+		if host, _, err := net.SplitHostPort(peerID); err == nil {
+			peerID = host
+		}
+	}
+	if !r.allowRequest(peerID, time.Now()) {
+		return writeResponse(conn, response{Error: "discovery request rate limited"})
+	}
 
 	payload, err := proto.ReadLengthPrefixed(conn, maxMessageSize)
 	if err != nil {
@@ -107,8 +135,11 @@ func (r *Registry) HandleConn(conn net.Conn) error {
 	}
 
 	var req request
-	if err := json.Unmarshal(payload, &req); err != nil {
+	if err := strictjson.Decode(payload, &req); err != nil {
 		return writeResponse(conn, response{Error: fmt.Sprintf("decode request: %v", err)})
+	}
+	if err := req.validate(); err != nil {
+		return writeResponse(conn, response{Error: err.Error()})
 	}
 
 	switch req.Action {
@@ -125,6 +156,72 @@ func (r *Registry) HandleConn(conn net.Conn) error {
 	default:
 		return writeResponse(conn, response{Error: fmt.Sprintf("unknown action %q", req.Action)})
 	}
+}
+
+func (r *Registry) allowRequest(peerID string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.requestRates == nil {
+		r.requestRates = make(map[string]requestRate)
+	}
+	entry, exists := r.requestRates[peerID]
+	if !exists {
+		if len(r.requestRates) >= requestRateMaxPeers {
+			for key, old := range r.requestRates {
+				if now.Sub(old.start) > requestRateEntryTTL {
+					delete(r.requestRates, key)
+				}
+			}
+			if len(r.requestRates) >= requestRateMaxPeers {
+				return false
+			}
+		}
+		r.requestRates[peerID] = requestRate{start: now, count: 1}
+		return true
+	}
+	if now.Sub(entry.start) >= requestRateWindow {
+		r.requestRates[peerID] = requestRate{start: now, count: 1}
+		return true
+	}
+	if entry.count >= requestRateBurst {
+		return false
+	}
+	entry.count++
+	r.requestRates[peerID] = entry
+	return true
+}
+
+func (r request) validate() error {
+	hasRecord := r.Record.NodeID != "" || r.Record.NodeName != "" || r.Record.Address != "" || r.Record.PublicKey != "" || r.Record.Signature != ""
+	hasServiceRecord := r.ServiceRecord.NodeID != "" || r.ServiceRecord.NodeName != "" || r.ServiceRecord.ServiceName != "" || r.ServiceRecord.PublicKey != "" || r.ServiceRecord.Signature != ""
+	if len(r.Name) > 16 || len(r.NodeID) > 80 || len(r.Service) > 128 {
+		return errors.New("discovery request field exceeds its limit")
+	}
+	switch r.Action {
+	case "publish":
+		if !hasRecord || hasServiceRecord || r.Name != "" || r.NodeID != "" || r.Service != "" {
+			return errors.New("publish requires only an endpoint record")
+		}
+	case "publish_service":
+		if !hasServiceRecord || hasRecord || r.Name != "" || r.NodeID != "" || r.Service != "" {
+			return errors.New("publish_service requires only a service record")
+		}
+	case "resolve":
+		if hasRecord || hasServiceRecord || r.Service != "" || (r.Name == "") == (r.NodeID == "") {
+			return errors.New("resolve requires exactly one of name or node_id")
+		}
+	case "resolve_service":
+		if r.Service == "" || hasRecord || hasServiceRecord || r.Name != "" || r.NodeID != "" {
+			return errors.New("resolve_service requires only a service name")
+		}
+	case "snapshot":
+		if hasRecord || hasServiceRecord || r.Name != "" || r.NodeID != "" || r.Service != "" {
+			return errors.New("snapshot does not accept payload fields")
+		}
+	default:
+		return fmt.Errorf("unknown action %q", r.Action)
+	}
+	return nil
 }
 
 func (r *Registry) handlePublish(conn net.Conn, rec record.EndpointRecord) error {
@@ -616,7 +713,7 @@ func roundTrip(ctx context.Context, address string, req request) (response, erro
 	}
 
 	var resp response
-	if err := json.Unmarshal(reply, &resp); err != nil {
+	if err := strictjson.Decode(reply, &resp); err != nil {
 		return response{}, fmt.Errorf("decode response: %w", err)
 	}
 
@@ -633,6 +730,9 @@ func writeResponse(conn net.Conn, resp response) error {
 	payload, err := json.Marshal(resp)
 	if err != nil {
 		return fmt.Errorf("encode response: %w", err)
+	}
+	if len(payload) > maxMessageSize {
+		return fmt.Errorf("discovery response exceeds %d bytes", maxMessageSize)
 	}
 	return proto.WriteLengthPrefixed(conn, payload)
 }

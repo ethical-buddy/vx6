@@ -136,6 +136,31 @@ func TestUDPServiceDatagramRoundTripOverPeerSocket(t *testing.T) {
 	}
 }
 
+func TestUDPAuthenticationCacheHasHardEntryBound(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := record.NewEndpointRecord(id, "peer", "[2001:db8::1]:4242", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := make(map[string]peerAuthEntry, maxUDPAuthEntries)
+	for i := 0; i < maxUDPAuthEntries; i++ {
+		cache[fmt.Sprintf("2001:db8::%x", i+1)] = peerAuthEntry{peer: peer, expires: time.Now().Add(time.Minute)}
+	}
+	var mu sync.Mutex
+	authCalls := 0
+	remote := &net.UDPAddr{IP: net.ParseIP("2001:db8::ffff"), Port: 40000}
+	_, ok := cachedUDPIdentity(context.Background(), remote, cache, &mu, func(context.Context, string) (record.EndpointRecord, bool) {
+		authCalls++
+		return peer, true
+	})
+	if ok || authCalls != 0 || len(cache) != maxUDPAuthEntries {
+		t.Fatalf("full UDP auth cache was not fail-closed: ok=%v authCalls=%d entries=%d", ok, authCalls, len(cache))
+	}
+}
+
 func TestDecodeUDPServiceDatagramRejectsMalformedHeader(t *testing.T) {
 	for _, packet := range [][]byte{nil, []byte("notvx6"), []byte("VX6U\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")} {
 		if _, _, _, err := DecodeUDPServiceDatagram(packet); err == nil {

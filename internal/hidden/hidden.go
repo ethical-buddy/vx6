@@ -28,6 +28,7 @@ import (
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
+	"github.com/vx6/vx6/internal/strictjson"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -41,6 +42,7 @@ const (
 	maxActiveRendezvous        = 512
 	rendezvousJoinTimeout      = 8 * time.Second
 	maxControlReplayEntries    = 8192
+	maxHiddenRateEntries       = 16384
 
 	hiddenIntroRequestWindow   = 10 * time.Second
 	hiddenIntroRequestLimit    = 48
@@ -196,8 +198,9 @@ var (
 	controlReplayMu sync.Mutex
 	controlReplays  = map[string]time.Time{}
 
-	hiddenRateMu       sync.Mutex
-	hiddenRateCounters = map[string]windowCounter{}
+	hiddenRateMu        sync.Mutex
+	hiddenRateCounters  = map[string]windowCounter{}
+	hiddenRateCleanupAt time.Time
 )
 
 func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
@@ -1514,12 +1517,17 @@ func writeControl(conn net.Conn, msg Message) error {
 }
 
 func readControl(conn net.Conn) (Message, error) {
-	payload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+	if peerID, ok := controlPeerNodeID(conn); ok && peerID != "" {
+		if !allowHiddenAction("node:"+peerID, "raw_control_ingress", time.Second, 128, time.Now()) {
+			return Message{}, errors.New("hidden control ingress rate limited")
+		}
+	}
+	payload, err := proto.ReadLengthPrefixed(conn, maxHiddenControlMessage)
 	if err != nil {
 		return Message{}, err
 	}
 	var msg Message
-	if err := json.Unmarshal(payload, &msg); err != nil {
+	if err := strictjson.Decode(payload, &msg); err != nil {
 		return Message{}, err
 	}
 	return msg, nil
@@ -1622,6 +1630,9 @@ func stampControlMessage(conn net.Conn, msg Message) (Message, error) {
 }
 
 func validateControlMessage(conn net.Conn, msg Message) error {
+	if err := msg.validate(); err != nil {
+		return err
+	}
 	peerID, ok := controlPeerNodeID(conn)
 	if !ok || peerID == "" {
 		return nil
@@ -1648,6 +1659,62 @@ func validateControlMessage(conn net.Conn, msg Message) error {
 		return fmt.Errorf("hidden control rate limited")
 	}
 	return nil
+}
+
+const maxHiddenControlMessage = 64 * 1024
+
+func (msg Message) validate() error {
+	if len(msg.Action) > 32 || len(msg.Service) > 128 || len(msg.SenderNodeID) > 80 || len(msg.RendezvousID) > 128 || len(msg.CallbackID) > 128 || len(msg.Nonce) > 32 {
+		return errors.New("hidden control field exceeds its limit")
+	}
+	if len(msg.NotifyAddrs) > 16 || len(msg.RendezvousCandidates) > 16 || len(msg.RelayExcludes) > 32 {
+		return errors.New("hidden control list exceeds its limit")
+	}
+	for _, values := range [][]string{msg.NotifyAddrs, msg.RendezvousCandidates, msg.RelayExcludes} {
+		for _, value := range values {
+			if value == "" || len(value) > 256 {
+				return errors.New("hidden control address is empty or too long")
+			}
+		}
+	}
+	switch msg.Action {
+	case "intro_register":
+		if msg.Service == "" || len(msg.NotifyAddrs) == 0 || msg.CallbackID != "" || msg.RendezvousID != "" || len(msg.RendezvousCandidates) != 0 || msg.HopCount != 0 || len(msg.RelayExcludes) != 0 {
+			return errors.New("invalid intro_register fields")
+		}
+	case "guard_register":
+		if msg.Service == "" || msg.CallbackID == "" || len(msg.NotifyAddrs) != 0 || msg.RendezvousID != "" || len(msg.RendezvousCandidates) != 0 || msg.HopCount != 0 || len(msg.RelayExcludes) != 0 {
+			return errors.New("invalid guard_register fields")
+		}
+	case "intro_request", "guard_notify", "intro_notify":
+		if msg.Service == "" || msg.RendezvousID == "" || len(msg.RendezvousCandidates) == 0 || msg.HopCount < 0 || msg.HopCount > 8 || len(msg.NotifyAddrs) != 0 || msg.CallbackID != "" {
+			return fmt.Errorf("invalid %s fields", msg.Action)
+		}
+	case "rv_join", "rv_register":
+		if msg.RendezvousID == "" || msg.Service != "" || len(msg.NotifyAddrs) != 0 || msg.CallbackID != "" || len(msg.RendezvousCandidates) != 0 || msg.HopCount != 0 || len(msg.RelayExcludes) != 0 {
+			return fmt.Errorf("invalid %s fields", msg.Action)
+		}
+	case "rv_ready", "control_ping", "control_pong":
+		if msg.Service != "" || len(msg.NotifyAddrs) != 0 || msg.RendezvousID != "" || len(msg.RendezvousCandidates) != 0 || msg.HopCount != 0 || len(msg.RelayExcludes) != 0 || msg.CallbackID != "" {
+			return fmt.Errorf("invalid %s fields", msg.Action)
+		}
+	case "":
+		return errors.New("hidden control message missing action")
+	default:
+		return fmt.Errorf("unknown hidden control action %q", msg.Action)
+	}
+	if msg.SenderNodeID != "" && (msg.Epoch == 0 || !validControlNonce(msg.Nonce)) {
+		return errors.New("invalid hidden control authentication envelope")
+	}
+	return nil
+}
+
+func validControlNonce(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func newControlNonce() (string, error) {
@@ -1750,15 +1817,21 @@ func allowHiddenAction(actor, action string, window time.Duration, limit int, no
 	hiddenRateMu.Lock()
 	defer hiddenRateMu.Unlock()
 
-	for key, counter := range hiddenRateCounters {
-		if now.Sub(counter.WindowStart) > window*2 {
-			delete(hiddenRateCounters, key)
+	if hiddenRateCleanupAt.IsZero() || !now.Before(hiddenRateCleanupAt) {
+		for key, counter := range hiddenRateCounters {
+			if now.Sub(counter.WindowStart) > window*2 {
+				delete(hiddenRateCounters, key)
+			}
 		}
+		hiddenRateCleanupAt = now.Add(30 * time.Second)
 	}
 
 	key := action + "\n" + actor
 	counter := hiddenRateCounters[key]
 	if counter.WindowStart.IsZero() || now.Sub(counter.WindowStart) >= window {
+		if counter.WindowStart.IsZero() && len(hiddenRateCounters) >= maxHiddenRateEntries {
+			return false
+		}
 		counter = windowCounter{WindowStart: now, Count: 1}
 		hiddenRateCounters[key] = counter
 		return true

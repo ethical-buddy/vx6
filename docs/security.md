@@ -53,6 +53,9 @@ not a reason to stack another custom cipher over ESP.
 
 ## Visibility and remaining boundaries
 
+For application-layer frame limits, parser budgets, per-peer admission
+defaults, and the tests covering them, see [control ingress hardening](security/ingress-hardening.md).
+
 IPsec tunnel mode hides the inner IP header, TCP/UDP ports, and payload only
 while packets traverse the established tunnel. The outer IPv6 endpoints,
 ESP/IKE use, packet sizes, timing, and traffic volume remain visible. IKE

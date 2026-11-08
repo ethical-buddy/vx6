@@ -205,3 +205,39 @@ func TestEffectiveMaxConcurrentConns(t *testing.T) {
 		}
 	}
 }
+
+func TestPeerAuthenticationAdmissionIsBounded(t *testing.T) {
+	sem := make(chan struct{}, maxConcurrentPeerAuth)
+	accepted := 0
+	for i := 0; i < maxConcurrentPeerAuth*4; i++ {
+		if tryAcquire(sem) {
+			accepted++
+		}
+	}
+	if accepted != maxConcurrentPeerAuth || len(sem) != maxConcurrentPeerAuth {
+		t.Fatalf("auth admission accepted %d concurrent tasks, want cap %d", accepted, maxConcurrentPeerAuth)
+	}
+	<-sem
+	if !tryAcquire(sem) {
+		t.Fatal("released authentication slot was not reusable")
+	}
+}
+
+func TestAuthenticatedPeerIngressBudget(t *testing.T) {
+	limiter := newPeerIngressLimiter()
+	now := time.Unix(1_800_000_000, 0)
+	for i := 0; i < peerIngressBurst; i++ {
+		if !limiter.Allow("peer-a", now) {
+			t.Fatalf("limited peer before request %d", i+1)
+		}
+	}
+	if limiter.Allow("peer-a", now) {
+		t.Fatal("accepted request after per-peer budget was exhausted")
+	}
+	if !limiter.Allow("peer-b", now) {
+		t.Fatal("peer-a limit affected another peer")
+	}
+	if !limiter.Allow("peer-a", now.Add(peerIngressWindow)) {
+		t.Fatal("per-peer budget did not reset")
+	}
+}

@@ -104,6 +104,9 @@ func VerifyEndpointRecord(record EndpointRecord, now time.Time) error {
 // Verification proves only that the record is internally valid and signed
 // by the key it names; membership and uniqueness are separate trust decisions.
 func VerifyEndpoint(record EndpointRecord, now time.Time) (VerifiedEndpointRecord, error) {
+	if len(record.NodeID) > 80 || len(record.NodeName) > MaxNodeNameLength || len(record.Address) > 128 || len(record.PublicKey) != 44 || len(record.Signature) != 88 || len(record.IssuedAt) > 64 || len(record.ExpiresAt) > 64 {
+		return VerifiedEndpointRecord{}, fmt.Errorf("endpoint record field exceeds its limit")
+	}
 	if record.NodeID == "" || record.NodeName == "" || record.Address == "" {
 		return VerifiedEndpointRecord{}, fmt.Errorf("record missing required fields")
 	}

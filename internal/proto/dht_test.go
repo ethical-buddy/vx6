@@ -106,3 +106,16 @@ func TestDHTWireVersionAndCanonicalHashValidation(t *testing.T) {
 		t.Fatal("uppercase non-canonical hash accepted")
 	}
 }
+
+func TestDHTRequestEnforcesDataBudget(t *testing.T) {
+	req := DHTRequest{
+		Version: DHTWireVersion,
+		Type:    DHTTypeUpdate,
+		Action:  "store",
+		Target:  "service/NODE-A.web",
+		Data:    strings.Repeat("x", MaxDHTDataSize+1),
+	}
+	if err := req.Validate(); err == nil {
+		t.Fatal("accepted DHT data above the protocol budget")
+	}
+}

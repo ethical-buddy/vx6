@@ -7,9 +7,20 @@ import (
 	"io"
 )
 
+const (
+	maxDocumentBytes = 1 << 20
+	maxDepth         = 64
+	maxObjectFields  = 4096
+	maxArrayElements = 4096
+	maxTokens        = 32768
+)
+
 // Decode accepts exactly one JSON value, rejects duplicate object keys and
 // unknown struct fields, and leaves no trailing data unread.
 func Decode(data []byte, dst any) error {
+	if len(data) == 0 || len(data) > maxDocumentBytes {
+		return fmt.Errorf("JSON document size %d is outside the allowed range", len(data))
+	}
 	if err := rejectDuplicateKeys(data); err != nil {
 		return err
 	}
@@ -34,7 +45,8 @@ func rejectDuplicateKeys(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := scanValue(decoder, first); err != nil {
+	budget := scanBudget{}
+	if err := scanValue(decoder, first, 0, &budget); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); err != io.EOF {
@@ -46,15 +58,32 @@ func rejectDuplicateKeys(data []byte) error {
 	return nil
 }
 
-func scanValue(decoder *json.Decoder, token json.Token) error {
+type scanBudget struct {
+	fields int
+	items  int
+	tokens int
+}
+
+func scanValue(decoder *json.Decoder, token json.Token, depth int, budget *scanBudget) error {
+	budget.tokens++
+	if budget.tokens > maxTokens {
+		return fmt.Errorf("JSON token budget exceeded")
+	}
 	delim, ok := token.(json.Delim)
 	if !ok {
 		return nil
+	}
+	if depth >= maxDepth {
+		return fmt.Errorf("JSON nesting exceeds %d levels", maxDepth)
 	}
 	switch delim {
 	case '{':
 		seen := make(map[string]struct{})
 		for decoder.More() {
+			budget.fields++
+			if budget.fields > maxObjectFields {
+				return fmt.Errorf("JSON object field budget exceeded")
+			}
 			keyToken, err := decoder.Token()
 			if err != nil {
 				return err
@@ -71,7 +100,7 @@ func scanValue(decoder *json.Decoder, token json.Token) error {
 			if err != nil {
 				return err
 			}
-			if err := scanValue(decoder, value); err != nil {
+			if err := scanValue(decoder, value, depth+1, budget); err != nil {
 				return err
 			}
 		}
@@ -81,11 +110,15 @@ func scanValue(decoder *json.Decoder, token json.Token) error {
 		}
 	case '[':
 		for decoder.More() {
+			budget.items++
+			if budget.items > maxArrayElements {
+				return fmt.Errorf("JSON array element budget exceeded")
+			}
 			value, err := decoder.Token()
 			if err != nil {
 				return err
 			}
-			if err := scanValue(decoder, value); err != nil {
+			if err := scanValue(decoder, value, depth+1, budget); err != nil {
 				return err
 			}
 		}

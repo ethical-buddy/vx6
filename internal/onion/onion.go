@@ -20,6 +20,7 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -304,7 +305,7 @@ func extendCircuit(conn net.Conn, circuitID [16]byte, relay record.EndpointRecor
 	}
 	if cmd == relayCmdError {
 		var e errorCommand
-		if json.Unmarshal(payload, &e) == nil && e.Message != "" {
+		if strictjson.Decode(payload, &e) == nil && e.Message != "" {
 			return clientHop{}, errors.New(e.Message)
 		}
 		return clientHop{}, fmt.Errorf("relay extend failed")
@@ -333,7 +334,7 @@ func beginCircuit(conn net.Conn, circuitID [16]byte, targetAddr string, hops []c
 	}
 	if cmd == relayCmdError {
 		var e errorCommand
-		if json.Unmarshal(payload, &e) == nil && e.Message != "" {
+		if strictjson.Decode(payload, &e) == nil && e.Message != "" {
 			return errors.New(e.Message)
 		}
 		return fmt.Errorf("relay begin failed")
@@ -594,7 +595,7 @@ func (c *clientCircuitConn) readPump() {
 				return
 			case relayCmdError:
 				var e errorCommand
-				if json.Unmarshal(body, &e) == nil && e.Message != "" {
+				if strictjson.Decode(body, &e) == nil && e.Message != "" {
 					c.errCh <- errors.New(e.Message)
 				} else {
 					c.errCh <- fmt.Errorf("relay circuit closed with error")

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 const hiddenDescriptorPayloadTargetSize = 1024
@@ -118,7 +119,7 @@ func DecodeHiddenServiceRecord(lookupKey, storedValue, alias string, now time.Ti
 	var rec record.ServiceRecord
 	if payload, err := decodeHiddenDescriptorPayload(plaintext); err == nil {
 		rec = payload.Record
-	} else if err := json.Unmarshal(plaintext, &rec); err != nil {
+	} else if err := strictjson.Decode(plaintext, &rec); err != nil {
 		return record.ServiceRecord{}, fmt.Errorf("decode decrypted hidden record: %w", err)
 	}
 	if err := record.VerifyServiceRecord(rec, now); err != nil {
@@ -149,7 +150,7 @@ func extractHiddenDescriptor(lookupKey, storedValue string, now time.Time) (Hidd
 
 func parseHiddenDescriptor(raw string) (HiddenDescriptor, error) {
 	var desc HiddenDescriptor
-	if err := json.Unmarshal([]byte(raw), &desc); err != nil {
+	if err := strictjson.Decode([]byte(raw), &desc); err != nil {
 		return HiddenDescriptor{}, fmt.Errorf("decode hidden descriptor: %w", err)
 	}
 	if desc.NodeID == "" || desc.ServiceTag == "" || desc.IssuedAt == "" || desc.ExpiresAt == "" || desc.Nonce == "" || desc.Ciphertext == "" {
@@ -189,7 +190,7 @@ func decodeLegacyHiddenServiceRecord(lookupKey, storedValue, alias string, now t
 	}
 
 	var rec record.ServiceRecord
-	if err := json.Unmarshal([]byte(payload), &rec); err != nil {
+	if err := strictjson.Decode([]byte(payload), &rec); err != nil {
 		return record.ServiceRecord{}, fmt.Errorf("decode legacy hidden descriptor: %w", err)
 	}
 	if err := record.VerifyServiceRecord(rec, now); err != nil {
@@ -263,7 +264,7 @@ func marshalHiddenDescriptorPayload(rec record.ServiceRecord) ([]byte, error) {
 
 func decodeHiddenDescriptorPayload(plaintext []byte) (hiddenDescriptorPayload, error) {
 	var payload hiddenDescriptorPayload
-	if err := json.Unmarshal(plaintext, &payload); err != nil {
+	if err := strictjson.Decode(plaintext, &payload); err != nil {
 		return hiddenDescriptorPayload{}, err
 	}
 	if payload.Record.NodeID == "" || payload.Record.ServiceName == "" {

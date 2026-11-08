@@ -196,4 +196,3 @@ func RemoveFirewallException(port int) error {
 
 	return nil
 }
-

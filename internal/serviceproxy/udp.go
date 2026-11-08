@@ -22,6 +22,7 @@ const (
 	maxUDPDatagramLen = 65507
 	maxServiceNameLen = 64
 	maxUDPSessions    = 4096
+	maxUDPAuthEntries = 4096
 	udpSessionIdle    = time.Minute
 	peerAuthCacheTTL  = 2 * time.Second
 )
@@ -58,6 +59,9 @@ func UDPServicePort(endpoint string) (string, error) {
 }
 
 func EncodeUDPServiceDatagram(service string, flowID uint64, payload []byte) ([]byte, error) {
+	if flowID == 0 {
+		return nil, errors.New("invalid VX6 UDP flow id")
+	}
 	if err := record.ValidateServiceName(service); err != nil {
 		return nil, err
 	}
@@ -78,7 +82,7 @@ func EncodeUDPServiceDatagram(service string, flowID uint64, payload []byte) ([]
 }
 
 func DecodeUDPServiceDatagram(packet []byte) (string, uint64, []byte, error) {
-	if len(packet) < udpFixedHeader || string(packet[:4]) != udpMagic || packet[4] != udpVersion {
+	if len(packet) < udpFixedHeader || len(packet) > maxUDPDatagramLen || string(packet[:4]) != udpMagic || packet[4] != udpVersion {
 		return "", 0, nil, errors.New("invalid VX6 UDP envelope")
 	}
 	nameLen := int(packet[5])
@@ -89,7 +93,11 @@ func DecodeUDPServiceDatagram(packet []byte) (string, uint64, []byte, error) {
 	if err := record.ValidateServiceName(name); err != nil {
 		return "", 0, nil, err
 	}
-	return name, binary.BigEndian.Uint64(packet[6:14]), packet[udpFixedHeader+nameLen:], nil
+	flowID := binary.BigEndian.Uint64(packet[6:14])
+	if flowID == 0 {
+		return "", 0, nil, errors.New("invalid VX6 UDP flow id")
+	}
+	return name, flowID, packet[udpFixedHeader+nameLen:], nil
 }
 
 func ServeUDPServices(ctx context.Context, socket *net.UDPConn, policies func() map[string]ServicePolicy, authenticate UDPAuthenticator) error {
@@ -203,6 +211,22 @@ func cachedUDPIdentity(ctx context.Context, remote *net.UDPAddr, cache map[strin
 	ip := remote.IP.String()
 	mu.Lock()
 	entry, ok := cache[ip]
+	if ok && time.Now().After(entry.expires) {
+		delete(cache, ip)
+		ok = false
+	}
+	if !ok && len(cache) >= maxUDPAuthEntries {
+		now := time.Now()
+		for candidate, old := range cache {
+			if now.After(old.expires) {
+				delete(cache, candidate)
+			}
+		}
+		if len(cache) >= maxUDPAuthEntries {
+			mu.Unlock()
+			return record.EndpointRecord{}, false
+		}
+	}
 	mu.Unlock()
 	if ok && time.Now().Before(entry.expires) {
 		return entry.peer, true

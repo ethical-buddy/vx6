@@ -11,6 +11,7 @@ import (
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 type PrivateServiceCatalog struct {
@@ -108,7 +109,7 @@ func VerifyPrivateServiceCatalog(catalog PrivateServiceCatalog, now time.Time) e
 
 func DecodePrivateServiceCatalog(raw string, now time.Time) (PrivateServiceCatalog, error) {
 	var catalog PrivateServiceCatalog
-	if err := json.Unmarshal([]byte(raw), &catalog); err != nil {
+	if err := strictjson.Decode([]byte(raw), &catalog); err != nil {
 		return PrivateServiceCatalog{}, fmt.Errorf("decode private catalog: %w", err)
 	}
 	if err := VerifyPrivateServiceCatalog(catalog, now); err != nil {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 const (
@@ -126,7 +127,7 @@ func DecodeIdentity(data []byte) (record.EndpointRecord, error) {
 	if len(data) == 0 {
 		return endpoint, errors.New("identity probe has no sender identity")
 	}
-	if err := json.Unmarshal(data, &endpoint); err != nil {
+	if err := strictjson.Decode(data, &endpoint); err != nil {
 		return endpoint, fmt.Errorf("decode sender identity record: %w", err)
 	}
 	return endpoint, nil
@@ -189,7 +190,7 @@ func probe(ctx context.Context, endpoint string, own *record.EndpointRecord, wan
 			return nil, time.Since(started), errors.New("peer is live but did not provide its signed identity record")
 		}
 		var endpointRecord record.EndpointRecord
-		if err := json.Unmarshal(response.identityRecord, &endpointRecord); err != nil {
+		if err := strictjson.Decode(response.identityRecord, &endpointRecord); err != nil {
 			return nil, time.Since(started), fmt.Errorf("decode peer identity record: %w", err)
 		}
 		return &endpointRecord, time.Since(started), nil

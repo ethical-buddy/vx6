@@ -1266,7 +1266,7 @@ func startDHTListenerOn(t *testing.T, ctx context.Context, srv *Server, network,
 				if err != nil || kind != proto.KindDHT {
 					return
 				}
-				payload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+				payload, err := proto.ReadLengthPrefixed(conn, proto.MaxDHTFrameSize)
 				if err != nil {
 					return
 				}

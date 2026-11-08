@@ -47,6 +47,9 @@ const (
 	syncParallelTargets       = 6
 	dhtRefreshLead            = 5 * time.Minute
 	defaultMaxConcurrentConns = 1024
+	maxConcurrentPeerAuth     = 64
+	maxConcurrentDHTRequests  = 64
+	peerAuthDeadline          = 10 * time.Second
 	headerReadDeadline        = 10 * time.Second
 	handshakeDeadline         = 30 * time.Second
 	dhtPayloadDeadline        = 15 * time.Second
@@ -440,7 +443,11 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}()
 	connCap := effectiveMaxConcurrentConns(cfg.MaxConcurrentConns)
 	connSem := make(chan struct{}, connCap)
-	fmt.Fprintf(log, "connection cap: %d concurrent connections\n", connCap)
+	authSem := make(chan struct{}, maxConcurrentPeerAuth)
+	dhtSem := make(chan struct{}, maxConcurrentDHTRequests)
+	peerLimiter := newPeerIngressLimiter()
+	ingressLog := &rateLimitedLogger{writer: log, interval: time.Second, limit: 20}
+	fmt.Fprintf(log, "connection cap: %d; concurrent IKE identity checks: %d\n", connCap, maxConcurrentPeerAuth)
 
 	for {
 		conn, err := listener.Accept()
@@ -457,148 +464,238 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			}
 			return fmt.Errorf("accept connection: %w", err)
 		}
-		peerIdentity, authenticated := peerTunnel.AuthenticatePeer(ctx, conn.RemoteAddr().String())
-		if !authenticated {
-			_ = conn.Close()
-			continue
-		}
-
-		select {
-		case connSem <- struct{}{}:
-		default:
-			fmt.Fprintf(log, "connection cap saturated (%d/%d), dropping connection from %s\n", connCap, connCap, conn.RemoteAddr().String())
+		if !tryAcquire(authSem) {
 			_ = conn.Close()
 			continue
 		}
 
 		wg.Add(1)
 		go func() {
-			defer func() { <-connSem }()
 			defer wg.Done()
-			defer conn.Close()
-			done := make(chan struct{})
-			defer close(done)
+			defer func() { <-authSem }()
+			authCtx, cancelAuth := context.WithTimeout(ctx, peerAuthDeadline)
+			peerIdentity, authenticated := peerTunnel.AuthenticatePeer(authCtx, conn.RemoteAddr().String())
+			cancelAuth()
+			if !authenticated {
+				_ = conn.Close()
+				return
+			}
+			if !peerLimiter.Allow(peerIdentity.NodeID, time.Now()) {
+				_ = conn.Close()
+				return
+			}
+			if !tryAcquire(connSem) {
+				ingressLog.Printf("connection cap saturated (%d/%d), dropping authenticated connection from %s\n", connCap, connCap, conn.RemoteAddr().String())
+				_ = conn.Close()
+				return
+			}
+			wg.Add(1)
 			go func() {
-				select {
-				case <-ctx.Done():
-					_ = conn.Close()
-				case <-done:
+				defer func() { <-connSem }()
+				defer wg.Done()
+				defer conn.Close()
+				done := make(chan struct{})
+				defer close(done)
+				go func() {
+					select {
+					case <-ctx.Done():
+						_ = conn.Close()
+					case <-done:
+					}
+				}()
+
+				reader := bufio.NewReader(conn)
+
+				if err := conn.SetReadDeadline(time.Now().Add(headerReadDeadline)); err != nil {
+					ingressLog.Printf("failed to set header read deadline for %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+				kind, err := proto.ReadHeader(reader)
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						return
+					}
+					ingressLog.Printf("session error from %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+
+				if err := conn.SetReadDeadline(time.Time{}); err != nil {
+					ingressLog.Printf("failed to clear header deadline for %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+
+				liveCfg := runtimeConfig(cfg)
+				relayGovernor.Update(liveCfg.RelayMode, liveCfg.RelayResourcePercent)
+
+				switch kind {
+				case proto.KindLiveness:
+					_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
+					if err := liveness.HandleTunnelConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
+						ingressLog.Printf("tunnel liveness request from %s failed: %v\n", conn.RemoteAddr().String(), err)
+					}
+				case proto.KindFileTransfer:
+
+					_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
+					res, err := transfer.ReceiveFileWithAuthenticatedPeer(&bufferedConn{Conn: conn, reader: reader}, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg), peerIdentity.NodeName, peerIdentity.NodeID)
+					if err != nil {
+						ingressLog.Printf("receive error from %s: %v\n", conn.RemoteAddr().String(), err)
+						return
+					}
+					absPath, pathErr := filepath.Abs(res.StoredPath)
+					if pathErr != nil {
+						absPath = res.StoredPath
+					}
+					ingressLog.Printf("received %q (%d bytes) from node %q into %s\n", res.FileName, res.BytesReceived, res.SenderNode, absPath)
+				case proto.KindDiscoveryReq:
+
+					_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
+					if err := cfg.Registry.HandleConnFromPeer(&bufferedConn{Conn: conn, reader: reader}, peerIdentity.NodeID); err != nil {
+						ingressLog.Printf("discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
+						return
+					}
+					ingressLog.Printf("processed discovery request from %s\n", conn.RemoteAddr().String())
+				case proto.KindDHT:
+					if !tryAcquire(dhtSem) {
+						ingressLog.Printf("DHT request concurrency limit reached; dropping request from %s\n", conn.RemoteAddr().String())
+						return
+					}
+					defer func() { <-dhtSem }()
+
+					_ = conn.SetReadDeadline(time.Now().Add(dhtPayloadDeadline))
+					payload, err := proto.ReadLengthPrefixed(reader, proto.MaxDHTFrameSize)
+					if err != nil {
+						ingressLog.Printf("dht read error from %s: %v\n", conn.RemoteAddr().String(), err)
+						return
+					}
+
+					_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
+					if cfg.DHT != nil {
+						if err := cfg.DHT.HandleDHTPayload(ctx, conn, payload, peerIdentity.NodeID); err != nil {
+							ingressLog.Printf("dht error from %s: %v\n", conn.RemoteAddr().String(), err)
+						}
+					}
+				case proto.KindExtend:
+					release, err := relayGovernor.Acquire(kind)
+					if err != nil {
+						ingressLog.Printf("relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
+						return
+					}
+					defer release()
+
+					_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
+					if err := onion.HandleExtend(ctx, &bufferedConn{Conn: conn, reader: reader}, cfg.Identity); err != nil {
+						ingressLog.Printf("extend error from %s: %v\n", conn.RemoteAddr().String(), err)
+					}
+				case proto.KindRendezvous:
+					release, err := relayGovernor.Acquire(kind)
+					if err != nil {
+						ingressLog.Printf("relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
+						return
+					}
+					defer release()
+
+					_ = conn.SetDeadline(time.Now().Add(relayHandshakeDeadline))
+					liveServices := liveCfg.Services
+					if err := hidden.HandleConn(ctx, &bufferedConn{Conn: conn, reader: reader}, hidden.HandlerConfig{
+						Identity:      cfg.Identity,
+						AdvertiseAddr: liveCfg.AdvertiseAddr,
+						TransportMode: liveCfg.TransportMode,
+						Services:      liveServices,
+						HiddenAliases: hiddenAliasMap(cfg.ConfigPath),
+						Registry:      cfg.Registry,
+					}); err != nil {
+						ingressLog.Printf("hidden service error from %s: %v\n", conn.RemoteAddr().String(), err)
+					}
+				case proto.KindServiceConn:
+
+					_ = conn.SetDeadline(time.Now().Add(serviceProxyDeadline))
+					if err := serviceproxy.HandleInboundWithPolicyAndTracker(&bufferedConn{Conn: conn, reader: reader}, runtimeServicePolicies(cfg), peerIdentity, serviceSessions); err != nil {
+						ingressLog.Printf("service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
+					}
+				default:
+					ingressLog.Printf("session error from %s: unsupported kind %d\n", conn.RemoteAddr().String(), kind)
 				}
 			}()
-
-			reader := bufio.NewReader(conn)
-
-			if err := conn.SetReadDeadline(time.Now().Add(headerReadDeadline)); err != nil {
-				fmt.Fprintf(log, "failed to set header read deadline for %s: %v\n", conn.RemoteAddr().String(), err)
-				return
-			}
-			kind, err := proto.ReadHeader(reader)
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					return
-				}
-				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
-				return
-			}
-
-			if err := conn.SetReadDeadline(time.Time{}); err != nil {
-				fmt.Fprintf(log, "failed to clear header deadline for %s: %v\n", conn.RemoteAddr().String(), err)
-				return
-			}
-
-			liveCfg := runtimeConfig(cfg)
-			relayGovernor.Update(liveCfg.RelayMode, liveCfg.RelayResourcePercent)
-
-			switch kind {
-			case proto.KindLiveness:
-				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
-				if err := liveness.HandleTunnelConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
-					fmt.Fprintf(log, "tunnel liveness request from %s failed: %v\n", conn.RemoteAddr().String(), err)
-				}
-			case proto.KindFileTransfer:
-
-				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
-				res, err := transfer.ReceiveFileWithAuthenticatedPeer(&bufferedConn{Conn: conn, reader: reader}, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg), peerIdentity.NodeName, peerIdentity.NodeID)
-				if err != nil {
-					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-				absPath, pathErr := filepath.Abs(res.StoredPath)
-				if pathErr != nil {
-					absPath = res.StoredPath
-				}
-				fmt.Fprintf(log, "received %q (%d bytes) from node %q into %s\n", res.FileName, res.BytesReceived, res.SenderNode, absPath)
-			case proto.KindDiscoveryReq:
-
-				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
-				if err := cfg.Registry.HandleConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
-					fmt.Fprintf(log, "discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-				fmt.Fprintf(log, "processed discovery request from %s\n", conn.RemoteAddr().String())
-			case proto.KindDHT:
-
-				_ = conn.SetReadDeadline(time.Now().Add(dhtPayloadDeadline))
-				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
-				if err != nil {
-					fmt.Fprintf(log, "dht read error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-
-				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
-				var dr proto.DHTRequest
-				if err := strictjson.Decode(payload, &dr); err != nil {
-					fmt.Fprintf(log, "dht decode error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-				if cfg.DHT != nil {
-					if err := cfg.DHT.HandleDHT(ctx, conn, dr); err != nil {
-						fmt.Fprintf(log, "dht error from %s: %v\n", conn.RemoteAddr().String(), err)
-					}
-				}
-			case proto.KindExtend:
-				release, err := relayGovernor.Acquire(kind)
-				if err != nil {
-					fmt.Fprintf(log, "relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-				defer release()
-
-				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
-				if err := onion.HandleExtend(ctx, &bufferedConn{Conn: conn, reader: reader}, cfg.Identity); err != nil {
-					fmt.Fprintf(log, "extend error from %s: %v\n", conn.RemoteAddr().String(), err)
-				}
-			case proto.KindRendezvous:
-				release, err := relayGovernor.Acquire(kind)
-				if err != nil {
-					fmt.Fprintf(log, "relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-				defer release()
-
-				_ = conn.SetDeadline(time.Now().Add(relayHandshakeDeadline))
-				liveServices := liveCfg.Services
-				if err := hidden.HandleConn(ctx, &bufferedConn{Conn: conn, reader: reader}, hidden.HandlerConfig{
-					Identity:      cfg.Identity,
-					AdvertiseAddr: liveCfg.AdvertiseAddr,
-					TransportMode: liveCfg.TransportMode,
-					Services:      liveServices,
-					HiddenAliases: hiddenAliasMap(cfg.ConfigPath),
-					Registry:      cfg.Registry,
-				}); err != nil {
-					fmt.Fprintf(log, "hidden service error from %s: %v\n", conn.RemoteAddr().String(), err)
-				}
-			case proto.KindServiceConn:
-
-				_ = conn.SetDeadline(time.Now().Add(serviceProxyDeadline))
-				if err := serviceproxy.HandleInboundWithPolicyAndTracker(&bufferedConn{Conn: conn, reader: reader}, runtimeServicePolicies(cfg), peerIdentity, serviceSessions); err != nil {
-					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
-				}
-			default:
-				fmt.Fprintf(log, "session error from %s: unsupported kind %d\n", conn.RemoteAddr().String(), kind)
-			}
 		}()
 	}
+}
+
+type rateLimitedLogger struct {
+	mu       sync.Mutex
+	writer   io.Writer
+	interval time.Duration
+	limit    int
+	start    time.Time
+	count    int
+}
+
+func (l *rateLimitedLogger) Printf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if l.start.IsZero() || now.Sub(l.start) >= l.interval {
+		l.start = now
+		l.count = 0
+	}
+	if l.count >= l.limit {
+		return
+	}
+	l.count++
+	_, _ = fmt.Fprintf(l.writer, format, args...)
+}
+
+const (
+	peerIngressWindow   = 10 * time.Second
+	peerIngressBurst    = 600
+	peerIngressMaxPeers = 4096
+	peerIngressEntryTTL = time.Minute
+)
+
+type peerIngressLimiter struct {
+	mu      sync.Mutex
+	entries map[string]timeWindowCount
+}
+
+type timeWindowCount struct {
+	start time.Time
+	count int
+}
+
+func newPeerIngressLimiter() *peerIngressLimiter {
+	return &peerIngressLimiter{entries: make(map[string]timeWindowCount)}
+}
+
+func (l *peerIngressLimiter) Allow(peerID string, now time.Time) bool {
+	if peerID == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry, exists := l.entries[peerID]
+	if !exists {
+		if len(l.entries) >= peerIngressMaxPeers {
+			for key, old := range l.entries {
+				if now.Sub(old.start) > peerIngressEntryTTL {
+					delete(l.entries, key)
+				}
+			}
+			if len(l.entries) >= peerIngressMaxPeers {
+				return false
+			}
+		}
+		l.entries[peerID] = timeWindowCount{start: now, count: 1}
+		return true
+	}
+	if now.Sub(entry.start) >= peerIngressWindow {
+		l.entries[peerID] = timeWindowCount{start: now, count: 1}
+		return true
+	}
+	if entry.count >= peerIngressBurst {
+		return false
+	}
+	entry.count++
+	l.entries[peerID] = entry
+	return true
 }
 
 func endpointPublishMode(hidden bool) string {
@@ -613,6 +710,15 @@ func effectiveMaxConcurrentConns(configured int) int {
 		return configured
 	}
 	return defaultMaxConcurrentConns
+}
+
+func tryAcquire(semaphore chan struct{}) bool {
+	select {
+	case semaphore <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldRunPeerSyncTasks(cfg Config) bool {
@@ -656,7 +762,7 @@ func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
 				return
 			}
 			var info proto.NodeInfo
-			if err := json.Unmarshal(buf[:n], &info); err == nil && info.ID != cfg.NodeID {
+			if err := strictjson.Decode(buf[:n], &info); err == nil && info.ID != cfg.NodeID {
 				rec := record.EndpointRecord{
 					Version: info.IdentityVersion, Sequence: info.IdentitySequence,
 					NodeID: info.ID, NodeName: info.Name, Address: info.Addr,
@@ -1075,13 +1181,13 @@ func warnOnNodeNameConflict(ctx context.Context, log io.Writer, cfg Config) {
 	candidates := make([]record.EndpointRecord, 0, 2)
 	if result.Value != "" {
 		var rec record.EndpointRecord
-		if err := json.Unmarshal([]byte(result.Value), &rec); err == nil && rec.NodeName == cfg.Name {
+		if err := strictjson.Decode([]byte(result.Value), &rec); err == nil && rec.NodeName == cfg.Name {
 			candidates = append(candidates, rec)
 		}
 	}
 	for _, raw := range result.ConflictValues {
 		var rec record.EndpointRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			continue
 		}
 		if rec.NodeName != cfg.Name {

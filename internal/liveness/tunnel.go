@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/proto"
+	"github.com/vx6/vx6/internal/strictjson"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -60,10 +61,10 @@ func TunnelPing(ctx context.Context, mode, endpoint string, timeout time.Duratio
 		return err
 	}
 	var response tunnelMessage
-	if err := json.Unmarshal(payload, &response); err != nil {
+	if err := strictjson.Decode(payload, &response); err != nil {
 		return fmt.Errorf("decode tunnel health response: %w", err)
 	}
-	if response.Version != 1 || response.Type != "pong" || response.Nonce != challenge {
+	if response.Version != 1 || response.Type != "pong" || !validNonce(response.Nonce) || response.Nonce != challenge {
 		return errors.New("tunnel health response did not match the outstanding challenge")
 	}
 	return nil
@@ -77,7 +78,7 @@ func HandleTunnelConn(conn net.Conn) error {
 		return err
 	}
 	var request tunnelMessage
-	if err := json.Unmarshal(payload, &request); err != nil {
+	if err := strictjson.Decode(payload, &request); err != nil {
 		return fmt.Errorf("decode tunnel health request: %w", err)
 	}
 	if request.Version != 1 || request.Type != "ping" || !validNonce(request.Nonce) {

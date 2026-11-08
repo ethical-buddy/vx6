@@ -28,6 +28,14 @@ func TestCellRoundTrip(t *testing.T) {
 	}
 }
 
+func FuzzDecodeRelayEnvelope(f *testing.F) {
+	f.Add([]byte("vx6r\x01\x00"))
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _, _, _ = decodeRelayEnvelope(data)
+	})
+}
+
 func TestRelayEnvelopeRoundTrip(t *testing.T) {
 	t.Parallel()
 

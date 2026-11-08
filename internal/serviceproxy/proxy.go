@@ -45,35 +45,108 @@ type ServicePolicy struct {
 	AllowedNodeIDs []string
 }
 
-// SessionTracker closes already-open private streams when their live policy
-// no longer permits the authenticated peer.
+// SessionTracker enforces per-peer stream admission and closes active streams
+// when their live service policy no longer permits them.
 type SessionTracker struct {
-	mu       sync.Mutex
-	sessions map[*serviceSession]struct{}
+	mu          sync.Mutex
+	sessions    map[*serviceSession]struct{}
+	active      map[string]int
+	openWindows map[string]openWindow
 }
+
+type openWindow struct {
+	start time.Time
+	count int
+}
+
+const (
+	maxServiceSessionsPerPeer = 128
+	serviceOpenWindow         = 10 * time.Second
+	serviceOpenBurst          = 600
+	maxServiceQuotaPeers      = 4096
+)
 
 type serviceSession struct {
 	service string
 	peerID  string
 	conn    net.Conn
+	release func()
+	once    sync.Once
 }
 
 func NewSessionTracker() *SessionTracker {
-	return &SessionTracker{sessions: make(map[*serviceSession]struct{})}
+	return &SessionTracker{sessions: make(map[*serviceSession]struct{}), active: make(map[string]int), openWindows: make(map[string]openWindow)}
 }
 
-func (t *SessionTracker) track(service, peerID string, conn net.Conn) func() {
-	if t == nil || peerID == "" {
+func (t *SessionTracker) admit(peerID string, now time.Time) (func(), error) {
+	if t == nil {
+		return func() {}, nil
+	}
+	if peerID == "" {
+		return nil, errors.New("service request has no authenticated peer identity")
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.openWindows == nil {
+		t.openWindows = make(map[string]openWindow)
+	}
+	if t.active == nil {
+		t.active = make(map[string]int)
+	}
+	window, exists := t.openWindows[peerID]
+	if !exists {
+		if len(t.openWindows) >= maxServiceQuotaPeers {
+			for key, old := range t.openWindows {
+				if t.active[key] == 0 && now.Sub(old.start) >= serviceOpenWindow {
+					delete(t.openWindows, key)
+				}
+			}
+			if len(t.openWindows) >= maxServiceQuotaPeers {
+				return nil, errors.New("service admission capacity is full")
+			}
+		}
+		window = openWindow{start: now}
+	} else if now.Sub(window.start) >= serviceOpenWindow {
+		window = openWindow{start: now}
+	}
+	if window.count >= serviceOpenBurst || t.active[peerID] >= maxServiceSessionsPerPeer {
+		return nil, errors.New("service request rate or concurrency limit exceeded")
+	}
+	window.count++
+	t.openWindows[peerID] = window
+	t.active[peerID]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			if t.active[peerID] <= 1 {
+				delete(t.active, peerID)
+			} else {
+				t.active[peerID]--
+			}
+			t.mu.Unlock()
+		})
+	}, nil
+}
+
+func (t *SessionTracker) track(service, peerID string, conn net.Conn, release func()) func() {
+	if t == nil {
 		return func() {}
 	}
-	session := &serviceSession{service: service, peerID: peerID, conn: conn}
+	session := &serviceSession{service: service, peerID: peerID, conn: conn, release: release}
 	t.mu.Lock()
+	if t.sessions == nil {
+		t.sessions = make(map[*serviceSession]struct{})
+	}
 	t.sessions[session] = struct{}{}
 	t.mu.Unlock()
 	return func() {
-		t.mu.Lock()
-		delete(t.sessions, session)
-		t.mu.Unlock()
+		session.once.Do(func() {
+			t.mu.Lock()
+			delete(t.sessions, session)
+			t.mu.Unlock()
+			session.release()
+		})
 	}
 }
 
@@ -92,6 +165,7 @@ func (t *SessionTracker) Reconcile(policies map[string]ServicePolicy) {
 	}
 	t.mu.Unlock()
 	for _, session := range revoke {
+		session.once.Do(session.release)
 		_ = session.conn.Close()
 	}
 }
@@ -116,8 +190,11 @@ func HandleInbound(conn net.Conn, id identity.Identity, services map[string]stri
 	}
 
 	var req ConnectRequest
-	if err := json.Unmarshal(reqPayload, &req); err != nil {
+	if err := strictjson.Decode(reqPayload, &req); err != nil {
 		return fmt.Errorf("decode service request: %w", err)
+	}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("invalid service request: %w", err)
 	}
 
 	target, ok := services[req.ServiceName]
@@ -160,23 +237,36 @@ func HandleInboundWithPolicyAndTracker(conn net.Conn, services map[string]Servic
 	if !ok || policy.Target == "" || policy.Protocol == record.ServiceProtocolUDP {
 		return errors.New("service unavailable")
 	}
-	peerID := ""
+	peerID := conn.RemoteAddr().String()
+	verifiedPeer, verifyErr := record.VerifyEndpoint(ikePeer, time.Now())
+	if verifyErr == nil {
+		peerID = verifiedPeer.Endpoint().NodeID
+	}
 	if policy.Private {
-		verifiedPeer, err := record.VerifyEndpoint(ikePeer, time.Now())
-		if err != nil {
+		if verifyErr != nil {
 			return errors.New("service unavailable")
 		}
-		peerID = verifiedPeer.Endpoint().NodeID
 		if !policy.Allows(peerID) {
 			return errors.New("service unavailable")
 		}
 	}
+	releaseAdmission, err := tracker.admit(peerID, time.Now())
+	if err != nil {
+		return err
+	}
+	tracked := false
+	defer func() {
+		if !tracked {
+			releaseAdmission()
+		}
+	}()
 	targetConn, err := net.Dial("tcp", policy.Target)
 	if err != nil {
 		return fmt.Errorf("connect local service target: %w", err)
 	}
 	defer targetConn.Close()
-	done := tracker.track(req.ServiceName, peerID, conn)
+	done := tracker.track(req.ServiceName, peerID, conn, releaseAdmission)
+	tracked = true
 	defer done()
 	return proxyDuplex(conn, targetConn)
 }

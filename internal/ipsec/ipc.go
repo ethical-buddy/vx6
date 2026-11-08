@@ -6,6 +6,7 @@ package ipsec
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,10 +25,11 @@ import (
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 	"golang.org/x/sys/unix"
 )
 
-const maxIPCMessage = 1 << 20
+const maxIPCMessage = 64 * 1024
 
 type ipcRequest struct {
 	Action       string                `json:"action"`
@@ -126,11 +128,24 @@ func (c *Client) call(ctx context.Context, request ipcRequest) (ipcResponse, err
 		deadline = d
 	}
 	_ = conn.SetDeadline(deadline)
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
+	requestPayload, err := json.Marshal(request)
+	if err != nil || len(requestPayload) > maxIPCMessage {
+		return ipcResponse{}, fmt.Errorf("invalid IPsec service request size")
+	}
+	if err := writeIPCBytes(conn, append(requestPayload, '\n')); err != nil {
 		return ipcResponse{}, fmt.Errorf("send IPsec service request: %w", err)
 	}
+	if halfCloser, ok := conn.(interface{ CloseWrite() error }); ok {
+		if err := halfCloser.CloseWrite(); err != nil {
+			return ipcResponse{}, fmt.Errorf("finish IPsec service request: %w", err)
+		}
+	}
+	responsePayload, err := io.ReadAll(io.LimitReader(conn, maxIPCMessage+1))
+	if err != nil || len(responsePayload) > maxIPCMessage {
+		return ipcResponse{}, fmt.Errorf("read IPsec service response: invalid or oversized response")
+	}
 	var response ipcResponse
-	if err := json.NewDecoder(io.LimitReader(conn, maxIPCMessage)).Decode(&response); err != nil {
+	if err := strictjson.Decode(responsePayload, &response); err != nil {
 		return ipcResponse{}, fmt.Errorf("read IPsec service response: %w", err)
 	}
 	if !response.OK {
@@ -259,9 +274,17 @@ func serveIPCConn(ctx context.Context, conn net.Conn, allowed map[uint32]struct{
 		writeIPCError(conn, "local caller is not authorized")
 		return
 	}
-	decoder := json.NewDecoder(io.LimitReader(conn, maxIPCMessage))
+	requestPayload, err := io.ReadAll(io.LimitReader(conn, maxIPCMessage+1))
+	if err != nil || len(requestPayload) > maxIPCMessage {
+		writeIPCError(conn, "invalid request")
+		return
+	}
 	var req ipcRequest
-	if err := decoder.Decode(&req); err != nil {
+	if err := strictjson.Decode(requestPayload, &req); err != nil {
+		writeIPCError(conn, "invalid request")
+		return
+	}
+	if err := req.validate(); err != nil {
 		writeIPCError(conn, "invalid request")
 		return
 	}
@@ -312,7 +335,7 @@ func serveIPCConn(ctx context.Context, conn net.Conn, allowed map[uint32]struct{
 	switch req.Action {
 	case "check":
 		response.OK = true
-		_ = json.NewEncoder(conn).Encode(response)
+		_ = writeIPCResponse(conn, response)
 		return
 	case "register_probe_port":
 		err = firewall.RegisterProbePort(requestCtx, req.ProbePort)
@@ -333,7 +356,7 @@ func serveIPCConn(ctx context.Context, conn net.Conn, allowed map[uint32]struct{
 	} else {
 		response.OK = true
 	}
-	_ = json.NewEncoder(conn).Encode(response)
+	_ = writeIPCResponse(conn, response)
 }
 
 func localPort(address string) string {
@@ -353,7 +376,64 @@ func incrementUDPServicePort(port string) string {
 }
 
 func writeIPCError(conn net.Conn, message string) {
-	_ = json.NewEncoder(conn).Encode(ipcResponse{Error: message})
+	_ = writeIPCResponse(conn, ipcResponse{Error: message})
+}
+
+func writeIPCResponse(conn net.Conn, response ipcResponse) error {
+	payload, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	if len(payload) > maxIPCMessage {
+		return errors.New("IPsec service response exceeds size limit")
+	}
+	return writeIPCBytes(conn, append(payload, '\n'))
+}
+
+func writeIPCBytes(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func (request ipcRequest) validate() error {
+	if len(request.NodeID) > 80 || len(request.PublicKey) != ed25519.PublicKeySize || len(request.PrivateKey) != ed25519.PrivateKeySize || len(request.LocalAddress) > 128 {
+		return errors.New("IPsec request identity fields are invalid")
+	}
+	emptyPeer := record.EndpointRecord{}
+	switch request.Action {
+	case "check":
+		if request.Peer != emptyPeer || request.TargetPeer != emptyPeer || request.Remote != "" || request.ProbePort != "" {
+			return errors.New("check request contains unrelated fields")
+		}
+	case "prepare", "ensure":
+		if request.Peer == emptyPeer || request.TargetPeer != emptyPeer || request.Remote != "" || request.ProbePort != "" {
+			return errors.New("peer setup request has invalid fields")
+		}
+	case "revoke":
+		if request.TargetPeer == emptyPeer || request.Peer != emptyPeer || request.Remote != "" || request.ProbePort != "" {
+			return errors.New("peer revocation request has invalid fields")
+		}
+	case "authenticate":
+		if request.Remote == "" || len(request.Remote) > 128 || request.Peer != emptyPeer || request.TargetPeer != emptyPeer || request.ProbePort != "" {
+			return errors.New("peer authentication request has invalid fields")
+		}
+	case "register_probe_port":
+		if request.ProbePort == "" || len(request.ProbePort) > 5 || request.Peer != emptyPeer || request.TargetPeer != emptyPeer || request.Remote != "" {
+			return errors.New("probe registration request has invalid fields")
+		}
+	default:
+		return errors.New("unsupported IPsec service request")
+	}
+	return nil
 }
 
 func validateLocalAddress(address string) error {

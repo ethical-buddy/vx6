@@ -87,7 +87,7 @@ func (r DHTRequest) Validate() error {
 	if r.Target == "" || len(r.Target) > 512 {
 		return fmt.Errorf("DHT request target is empty or too long")
 	}
-	if len(r.Data) > 1024*1024 {
+	if len(r.Data) > MaxDHTDataSize {
 		return fmt.Errorf("DHT request data is too large")
 	}
 	switch r.Type {
@@ -183,6 +183,11 @@ func isSHA256Hex(value string) bool {
 
 const DHTWireVersion uint8 = 1
 
+const (
+	MaxDHTFrameSize = 1 << 20
+	MaxDHTDataSize  = 160 << 10
+)
+
 type NodeInfo struct {
 	IdentityVersion   uint8  `json:"identity_version,omitempty"`
 	IdentitySequence  uint64 `json:"identity_sequence,omitempty"`
@@ -209,10 +214,13 @@ type OnionHeader struct {
 }
 
 func WriteHeader(w io.Writer, kind byte) error {
+	if !validKind(kind) {
+		return fmt.Errorf("unsupported protocol kind %d", kind)
+	}
 	var header [5]byte
 	copy(header[:4], magic[:])
 	header[4] = kind
-	if _, err := w.Write(header[:]); err != nil {
+	if err := writeFull(w, header[:]); err != nil {
 		return fmt.Errorf("write protocol header: %w", err)
 	}
 	return nil
@@ -226,16 +234,40 @@ func ReadHeader(r io.Reader) (byte, error) {
 	if header[0] != magic[0] || header[1] != magic[1] || header[2] != magic[2] || header[3] != magic[3] {
 		return 0, fmt.Errorf("invalid protocol magic")
 	}
+	if !validKind(header[4]) {
+		return 0, fmt.Errorf("unsupported protocol kind %d", header[4])
+	}
 	return header[4], nil
 }
 
+func validKind(kind byte) bool {
+	return kind >= KindFileTransfer && kind <= KindLiveness
+}
+
+func writeFull(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
 func WriteLengthPrefixed(w io.Writer, payload []byte) error {
+	if len(payload) == 0 || uint64(len(payload)) > uint64(^uint32(0)) {
+		return fmt.Errorf("invalid payload size %d", len(payload))
+	}
 	var size [4]byte
 	binary.BigEndian.PutUint32(size[:], uint32(len(payload)))
-	if _, err := w.Write(size[:]); err != nil {
+	if err := writeFull(w, size[:]); err != nil {
 		return fmt.Errorf("write payload size: %w", err)
 	}
-	if _, err := w.Write(payload); err != nil {
+	if err := writeFull(w, payload); err != nil {
 		return fmt.Errorf("write payload: %w", err)
 	}
 	return nil

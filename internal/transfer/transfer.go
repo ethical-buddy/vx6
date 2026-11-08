@@ -16,6 +16,7 @@ import (
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
+	"github.com/vx6/vx6/internal/strictjson"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -278,17 +279,11 @@ func readMetadata(r io.Reader) (metadata, error) {
 		return metadata{}, err
 	}
 	var meta metadata
-	if err := json.Unmarshal(payload, &meta); err != nil {
+	if err := strictjson.Decode(payload, &meta); err != nil {
 		return metadata{}, err
 	}
-	if meta.NodeName == "" {
-		return metadata{}, fmt.Errorf("metadata missing node_name")
-	}
-	if meta.FileName == "" {
-		return metadata{}, fmt.Errorf("metadata missing file_name")
-	}
-	if meta.FileSize < 0 {
-		return metadata{}, fmt.Errorf("metadata contains invalid file_size")
+	if !validTransferNodeName(meta.NodeName) || !validFileName(meta.FileName) || meta.FileSize < 0 {
+		return metadata{}, fmt.Errorf("invalid transfer metadata")
 	}
 	return meta, nil
 }
@@ -307,16 +302,32 @@ func readResumeState(r io.Reader) (resumeState, error) {
 		return resumeState{}, err
 	}
 	var state resumeState
-	if err := json.Unmarshal(payload, &state); err != nil {
+	if err := strictjson.Decode(payload, &state); err != nil {
 		return resumeState{}, err
+	}
+	if state.Offset < 0 || len(state.Denied) > 512 {
+		return resumeState{}, fmt.Errorf("invalid transfer resume state")
 	}
 	if state.Denied != "" {
 		return resumeState{}, fmt.Errorf("transfer rejected: %s", state.Denied)
 	}
-	if state.Offset < 0 {
-		return resumeState{}, fmt.Errorf("resume state contains invalid offset")
-	}
 	return state, nil
+}
+
+func validTransferNodeName(value string) bool {
+	if len(value) < 3 || len(value) > 16 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= 'A' && char <= 'Z') && !(char >= '0' && char <= '9') && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validFileName(value string) bool {
+	return value != "" && value != "." && value != ".." && len(value) <= 255 && filepath.Base(value) == value && !strings.ContainsAny(value, "\x00\r\n/\\")
 }
 
 func ValidateIPv6Address(address string) error {

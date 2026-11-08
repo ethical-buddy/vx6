@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/strictjson"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -128,8 +129,11 @@ func (c *relayCircuit) handleRelayCell(ctx context.Context, payload []byte) erro
 	switch cmd {
 	case relayCmdExtend:
 		var req extendCommand
-		if err := json.Unmarshal(body, &req); err != nil {
+		if err := strictjson.Decode(body, &req); err != nil {
 			return c.sendBackwardError(fmt.Errorf("decode extend command: %w", err))
+		}
+		if len(req.NextHop) > 128 || len(req.ExpectedNodeID) > 80 || len(req.ClientPublicKey) != 44 {
+			return c.sendBackwardError(fmt.Errorf("invalid extend command field sizes"))
 		}
 		notifyInspect(InspectEvent{
 			NodeID:    c.nodeID,
@@ -140,8 +144,11 @@ func (c *relayCircuit) handleRelayCell(ctx context.Context, payload []byte) erro
 		return c.handleExtendCommand(ctx, req)
 	case relayCmdBegin:
 		var req beginCommand
-		if err := json.Unmarshal(body, &req); err != nil {
+		if err := strictjson.Decode(body, &req); err != nil {
 			return c.sendBackwardError(fmt.Errorf("decode begin command: %w", err))
+		}
+		if req.TargetAddr == "" || len(req.TargetAddr) > 512 {
+			return c.sendBackwardError(fmt.Errorf("invalid begin target"))
 		}
 		notifyInspect(InspectEvent{
 			NodeID:     c.nodeID,

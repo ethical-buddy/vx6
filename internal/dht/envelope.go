@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/strictjson"
 )
 
 type SignedEnvelope struct {
@@ -26,7 +27,7 @@ type SignedEnvelope struct {
 
 func maybeDecodeEnvelope(raw string) (SignedEnvelope, bool, error) {
 	var env SignedEnvelope
-	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+	if err := strictjson.Decode([]byte(raw), &env); err != nil {
 		return SignedEnvelope{}, false, nil
 	}
 	if env.Key == "" && env.Value == "" && env.PublisherNodeID == "" && env.Signature == "" {

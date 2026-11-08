@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,30 @@ func TestPrivateServicePolicyDefaultsToDeny(t *testing.T) {
 	}
 	if !(ServicePolicy{}).Allows("vx6_peer") {
 		t.Fatal("public service should not require a service allowlist")
+	}
+}
+
+func TestMalformedServiceRequestIsRejectedBeforeBackendDial(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- HandleInboundWithPolicyAndTracker(serverConn, map[string]ServicePolicy{
+			"web": {Target: "127.0.0.1:1"},
+		}, record.EndpointRecord{}, NewSessionTracker())
+	}()
+	payload := []byte(`{"version":1,"action":"open","service_name":"web","extra":true}`)
+	if err := proto.WriteLengthPrefixed(clientConn, payload); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "decode service request") {
+			t.Fatalf("expected strict parser rejection before backend dial, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("malformed request handler did not return")
 	}
 }
 

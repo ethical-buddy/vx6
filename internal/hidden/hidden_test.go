@@ -245,7 +245,8 @@ func TestControlEnvelopeValidationRejectsReplayAndWrongPeer(t *testing.T) {
 	sender := testControlConn{local: "node-a"}
 	receiver := testControlConn{peer: "node-a"}
 
-	msg, err := stampControlMessage(sender, Message{Action: "intro_request", Service: "ghost"})
+	request := Message{Action: "intro_request", Service: "ghost", RendezvousID: "rv-1", RendezvousCandidates: []string{"[2001:db8::1]:4242"}}
+	msg, err := stampControlMessage(sender, request)
 	if err != nil {
 		t.Fatalf("stamp control message: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestControlEnvelopeValidationRejectsReplayAndWrongPeer(t *testing.T) {
 		t.Fatalf("expected replay detection, got %v", err)
 	}
 
-	msg, err = stampControlMessage(sender, Message{Action: "intro_request", Service: "ghost"})
+	msg, err = stampControlMessage(sender, request)
 	if err != nil {
 		t.Fatalf("restamp control message: %v", err)
 	}
@@ -268,11 +269,13 @@ func TestControlEnvelopeValidationRejectsReplayAndWrongPeer(t *testing.T) {
 	}
 
 	expired := Message{
-		Action:       "intro_request",
-		Service:      "ghost",
-		SenderNodeID: "node-a",
-		Epoch:        controlEpoch(time.Now().Add(-2 * hiddenControlEpochDuration)),
-		Nonce:        "expired-nonce",
+		Action:               "intro_request",
+		Service:              "ghost",
+		RendezvousID:         "rv-2",
+		RendezvousCandidates: []string{"[2001:db8::2]:4242"},
+		SenderNodeID:         "node-a",
+		Epoch:                controlEpoch(time.Now().Add(-2 * hiddenControlEpochDuration)),
+		Nonce:                "0123456789abcdef0123456789abcdef",
 	}
 	if err := validateControlMessage(receiver, expired); err == nil || !strings.Contains(err.Error(), "epoch") {
 		t.Fatalf("expected expired epoch rejection, got %v", err)

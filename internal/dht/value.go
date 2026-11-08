@@ -3,7 +3,6 @@ package dht
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -514,7 +513,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 	case strings.HasPrefix(key, "service/"):
 		want := strings.TrimPrefix(key, "service/")
 		var rec record.ServiceRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode service record: %w", err)
 		}
 		if err := record.VerifyServiceRecord(rec, now); err != nil {
@@ -568,7 +567,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 	case strings.HasPrefix(key, "hidden/"):
 		want := strings.TrimPrefix(key, "hidden/")
 		var rec record.ServiceRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode hidden service record: %w", err)
 		}
 		if err := record.VerifyServiceRecord(rec, now); err != nil {
@@ -615,7 +614,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 		}
 
 		var rec record.ServiceRecord
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		if err := strictjson.Decode([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode hidden service descriptor: %w", err)
 		}
 		if err := record.VerifyServiceRecord(rec, now); err != nil {

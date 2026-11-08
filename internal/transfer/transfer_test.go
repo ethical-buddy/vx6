@@ -1,6 +1,8 @@
 package transfer
 
 import (
+	"bytes"
+	"encoding/binary"
 	"io"
 	"net"
 	"os"
@@ -38,6 +40,20 @@ func TestValidateIPv6Address(t *testing.T) {
 	}
 }
 
+func FuzzReadTransferMetadata(f *testing.F) {
+	f.Add([]byte(`{"node_name":"NODE-A","file_name":"file.txt","file_size":10}`))
+	f.Add([]byte(`{"node_name":"NODE-A","file_name":"..","file_size":10}`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) == 0 || len(data) > maxHeaderSize {
+			return
+		}
+		frame := make([]byte, 4+len(data))
+		binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+		copy(frame[4:], data)
+		_, _ = readMetadata(bytes.NewReader(frame))
+	})
+}
+
 func TestReceiveFile(t *testing.T) {
 	t.Parallel()
 
@@ -51,7 +67,7 @@ func TestReceiveFile(t *testing.T) {
 		defer clientConn.Close()
 
 		if err := writeMetadata(clientConn, metadata{
-			NodeName: "alpha",
+			NodeName: "ALPHA",
 			FileName: "hello.txt",
 			FileSize: int64(len(payload)),
 		}); err != nil {
@@ -77,7 +93,7 @@ func TestReceiveFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("receive file: %v", err)
 	}
-	if result.SenderNode != "alpha" {
+	if result.SenderNode != "ALPHA" {
 		t.Fatalf("unexpected sender node %q", result.SenderNode)
 	}
 	if result.FileName != "hello.txt" {
@@ -87,7 +103,7 @@ func TestReceiveFile(t *testing.T) {
 		t.Fatalf("unexpected bytes received: %d", result.BytesReceived)
 	}
 
-	receivedPath := filepath.Join(receiveDir, "alpha_unknownid_vx6", "hello.txt")
+	receivedPath := filepath.Join(receiveDir, "ALPHA_unknownid_vx6", "hello.txt")
 	received, err := os.ReadFile(receivedPath)
 	if err != nil {
 		t.Fatalf("read received file: %v", err)
@@ -110,7 +126,7 @@ func TestReceiveFileRejectsUnauthorizedSender(t *testing.T) {
 		defer clientConn.Close()
 
 		if err := writeMetadata(clientConn, metadata{
-			NodeName: "alpha",
+			NodeName: "ALPHA",
 			FileName: "blocked.txt",
 			FileSize: 32,
 		}); err != nil {
@@ -127,7 +143,7 @@ func TestReceiveFileRejectsUnauthorizedSender(t *testing.T) {
 			"beta": {},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), `file transfer from "alpha" is not allowed`) {
+	if err == nil || !strings.Contains(err.Error(), `file transfer from "ALPHA" is not allowed`) {
 		t.Fatalf("unexpected receive error %v", err)
 	}
 
@@ -145,7 +161,7 @@ func TestReceiveFileResumesPartialDownload(t *testing.T) {
 
 	payload := []byte("vx6 resumable transfer payload")
 	receiveDir := t.TempDir()
-	receiverDir := filepath.Join(receiveDir, "alpha_unknownid_vx6")
+	receiverDir := filepath.Join(receiveDir, "ALPHA_unknownid_vx6")
 	if err := os.MkdirAll(receiverDir, 0o755); err != nil {
 		t.Fatalf("create receiver directory: %v", err)
 	}
@@ -162,7 +178,7 @@ func TestReceiveFileResumesPartialDownload(t *testing.T) {
 		defer clientConn.Close()
 
 		if err := writeMetadata(clientConn, metadata{
-			NodeName: "alpha",
+			NodeName: "ALPHA",
 			FileName: "resume.txt",
 			FileSize: int64(len(payload)),
 		}); err != nil {
@@ -192,13 +208,21 @@ func TestReceiveFileResumesPartialDownload(t *testing.T) {
 		t.Fatalf("unexpected bytes received %d", result.BytesReceived)
 	}
 
-	receivedPath := filepath.Join(receiveDir, "alpha_unknownid_vx6", "resume.txt")
+	receivedPath := filepath.Join(receiveDir, "ALPHA_unknownid_vx6", "resume.txt")
 	received, err := os.ReadFile(receivedPath)
 	if err != nil {
 		t.Fatalf("read resumed file: %v", err)
 	}
 	if string(received) != string(payload) {
 		t.Fatalf("unexpected resumed payload %q", string(received))
+	}
+}
+
+func TestTransferMetadataRejectsTraversalFileNames(t *testing.T) {
+	for _, name := range []string{"..", ".", "../outside", `..\\outside`} {
+		if validFileName(name) {
+			t.Errorf("accepted unsafe file name %q", name)
+		}
 	}
 }
 

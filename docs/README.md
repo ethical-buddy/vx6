@@ -15,6 +15,7 @@ docs/
 |   `-- systemd.md               user service workflow
 |-- Security and Networking
 |   |-- security.md              implemented protections and limitations
+|   |-- security/ingress-hardening.md frame limits, parser budgets, peer admission
 |   |-- dataplane-threat-model.md threat model, acceptance checks, issue mapping
 |   |-- ipsec.md                 Linux IKEv2/IPsec setup, operation, tests
 |   |-- identity.md              node identity and signed records

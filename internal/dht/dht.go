@@ -49,6 +49,7 @@ type Server struct {
 	hiddenCoverOn     bool
 	hiddenRates       map[string]rateWindow
 	storeRates        map[string]rateWindow
+	ingressRates      map[string]rateWindow
 	lookupEWMA        float64
 	hiddenAnomalyEWMA float64
 	mu                sync.RWMutex
@@ -127,7 +128,7 @@ const (
 	defaultLookupPeerTimeout         = 2 * time.Second
 	defaultLookupTotalTimeout        = 10 * time.Second
 	defaultLookupReferralLimit       = 4
-	defaultLookupResponseLimit       = 1024 * 1024
+	defaultLookupResponseLimit       = proto.MaxDHTFrameSize
 	defaultReplicationFactor         = 5
 	lookupAlpha                      = defaultLookupAlpha
 	lookupQueryBudget                = defaultLookupQueryBudget
@@ -374,6 +375,7 @@ func NewServer(selfID string) *Server {
 		hiddenTracked: make(map[string]struct{}),
 		hiddenRates:   make(map[string]rateWindow),
 		storeRates:    make(map[string]rateWindow),
+		ingressRates:  make(map[string]rateWindow),
 	}
 }
 
@@ -441,17 +443,53 @@ func (s *Server) LookupState(key string) (StoredValueState, bool) {
 
 // HandleDHT processes an incoming DHT request from a peer.
 func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequest) error {
+	return s.HandleDHTFromPeer(ctx, conn, req, "")
+}
+
+// HandleDHTFromPeer applies a bounded authenticated-peer request budget before
+// validating or executing the requested DHT operation.
+func (s *Server) HandleDHTFromPeer(ctx context.Context, conn net.Conn, req proto.DHTRequest, peerID string) error {
+	peerID = normalizeIngressPeerID(conn, peerID)
+	if !s.allowDHTIngress(peerID, time.Now()) {
+		return fmt.Errorf("DHT request rate limited")
+	}
+	return s.handleDHT(ctx, conn, req)
+}
+
+// HandleDHTPayload limits requests before parsing attacker-controlled JSON.
+func (s *Server) HandleDHTPayload(ctx context.Context, conn net.Conn, payload []byte, peerID string) error {
+	if len(payload) == 0 || len(payload) > proto.MaxDHTFrameSize {
+		return fmt.Errorf("invalid DHT frame size")
+	}
+	peerID = normalizeIngressPeerID(conn, peerID)
+	if !s.allowDHTIngress(peerID, time.Now()) {
+		return fmt.Errorf("DHT request rate limited")
+	}
+	var req proto.DHTRequest
+	if err := strictjson.Decode(payload, &req); err != nil {
+		return fmt.Errorf("decode DHT request: %w", err)
+	}
+	return s.handleDHT(ctx, conn, req)
+}
+
+func normalizeIngressPeerID(conn net.Conn, peerID string) string {
+	if peerID == "" {
+		peerID = conn.RemoteAddr().String()
+		if host, _, err := net.SplitHostPort(peerID); err == nil {
+			peerID = host
+		}
+	}
+	return peerID
+}
+
+func (s *Server) handleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequest) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
 	resp := proto.DHTResponse{Version: proto.DHTWireVersion, Type: req.Type}
 	if stringsHasHiddenDescriptorKey(req.Target) {
 		if !s.allowHiddenDescriptorRequest(conn.RemoteAddr().String(), req.Action, time.Now()) {
-			payload, _ := json.Marshal(resp)
-			if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
-				return err
-			}
-			return proto.WriteLengthPrefixed(conn, payload)
+			return writeDHTResponse(conn, resp)
 		}
 	}
 
@@ -522,11 +560,61 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 		}
 	}
 
-	payload, _ := json.Marshal(resp)
+	return writeDHTResponse(conn, resp)
+}
+
+func writeDHTResponse(conn net.Conn, resp proto.DHTResponse) error {
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("encode DHT response: %w", err)
+	}
+	if len(payload) > proto.MaxDHTFrameSize {
+		return fmt.Errorf("DHT response exceeds %d-byte frame limit", proto.MaxDHTFrameSize)
+	}
 	if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
 		return err
 	}
 	return proto.WriteLengthPrefixed(conn, payload)
+}
+
+const (
+	dhtIngressWindow   = 10 * time.Second
+	dhtIngressBurst    = 24
+	dhtIngressMaxPeers = 4096
+	dhtIngressEntryTTL = time.Minute
+)
+
+func (s *Server) allowDHTIngress(peerID string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ingressRates == nil {
+		s.ingressRates = make(map[string]rateWindow)
+	}
+	entry, exists := s.ingressRates[peerID]
+	if !exists {
+		if len(s.ingressRates) >= dhtIngressMaxPeers {
+			for key, old := range s.ingressRates {
+				if now.Sub(old.WindowStart) > dhtIngressEntryTTL {
+					delete(s.ingressRates, key)
+				}
+			}
+			if len(s.ingressRates) >= dhtIngressMaxPeers {
+				return false
+			}
+		}
+		s.ingressRates[peerID] = rateWindow{WindowStart: now, Count: 1}
+		return true
+	}
+	if now.Sub(entry.WindowStart) >= dhtIngressWindow {
+		s.ingressRates[peerID] = rateWindow{WindowStart: now, Count: 1}
+		return true
+	}
+	if entry.Count >= dhtIngressBurst {
+		return false
+	}
+	entry.Count++
+	s.ingressRates[peerID] = entry
+	return true
 }
 
 func (s *Server) StoreLocal(key, value string) {
@@ -932,6 +1020,9 @@ func (s *Server) admitStoreValue(remoteAddr, key, value string, now time.Time) e
 		if err != nil {
 			return err
 		}
+		if incomingValue.verified && !incomingValue.enveloped {
+			return fmt.Errorf("trusted store requires a signed DHT envelope for key %q", key)
+		}
 		if incomingValue.verified && incomingValue.enveloped && !incomingValue.authoritativePublisher {
 			return fmt.Errorf("trusted store rejected for non-authoritative publisher on key %q", key)
 		}
@@ -1093,7 +1184,7 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 	if kind != proto.KindDHT {
 		return fmt.Errorf("invalid response")
 	}
-	resPayload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+	resPayload, err := proto.ReadLengthPrefixed(conn, proto.MaxDHTFrameSize)
 	if err != nil {
 		return err
 	}

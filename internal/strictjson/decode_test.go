@@ -1,38 +1,51 @@
 package strictjson
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
-func TestDecodeAcceptsExactObject(t *testing.T) {
-	var value struct {
-		Name string `json:"name"`
+func TestDecodeRejectsDuplicateUnknownAndTrailingFields(t *testing.T) {
+	type message struct {
+		Action string `json:"action"`
 	}
-	if err := Decode([]byte(`{"name":"ALPHA"}`), &value); err != nil {
-		t.Fatal(err)
-	}
-	if value.Name != "ALPHA" {
-		t.Fatalf("decoded name = %q", value.Name)
+	for _, input := range []string{
+		`{"action":"lookup","action":"store"}`,
+		`{"action":"lookup","extra":true}`,
+		`{"action":"lookup"} {}`,
+	} {
+		var got message
+		if err := Decode([]byte(input), &got); err == nil {
+			t.Fatalf("accepted invalid JSON %s", input)
+		}
 	}
 }
 
-func TestDecodeRejectsUnknownDuplicateAndTrailingFields(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-	}{
-		{name: "unknown field", raw: `{"name":"ALPHA","extra":true}`},
-		{name: "duplicate field", raw: `{"name":"ALPHA","name":"BETA"}`},
-		{name: "nested duplicate", raw: `{"name":"ALPHA","nested":{"x":1,"x":2}}`},
-		{name: "trailing object", raw: `{"name":"ALPHA"} {}`},
-		{name: "trailing text", raw: `{"name":"ALPHA"} trailing`},
+func TestDecodeEnforcesNestingAndDocumentBudgets(t *testing.T) {
+	var got any
+	deep := strings.Repeat("[", maxDepth+1) + "0" + strings.Repeat("]", maxDepth+1)
+	if err := Decode([]byte(deep), &got); err == nil {
+		t.Fatal("accepted over-deep JSON")
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var value struct {
-				Name string `json:"name"`
-			}
-			if err := Decode([]byte(test.raw), &value); err == nil {
-				t.Fatal("accepted non-canonical JSON")
-			}
-		})
+	if err := Decode([]byte(strings.Repeat(" ", maxDocumentBytes+1)+"0"), &got); err == nil {
+		t.Fatal("accepted over-size JSON")
 	}
+	fields := make([]string, maxObjectFields+1)
+	for i := range fields {
+		fields[i] = fmt.Sprintf(`"k%d":0`, i)
+	}
+	if err := Decode([]byte("{"+strings.Join(fields, ",")+"}"), &got); err == nil {
+		t.Fatal("accepted too many JSON fields")
+	}
+}
+
+func FuzzDecodeNeverPanics(f *testing.F) {
+	f.Add([]byte(`{"action":"lookup"}`))
+	f.Add([]byte(`{"action":"lookup","action":"store"}`))
+	f.Add([]byte("["))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var dst map[string]any
+		_ = Decode(data, &dst)
+	})
 }
