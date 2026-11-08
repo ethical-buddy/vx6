@@ -50,7 +50,12 @@ publishes them as 30-day workflow artifacts named
 `vx6-netsim-linux-amd64` and `vx6-netsim-linux-arm64`. Download the artifact
 from the PR's **Linux simulator binaries** checks. Each archive contains
 `vx6-netsim`, `vx6-simnode`, `SHA256SUMS`, and a short safety note. These are
-test binaries, not a VX6 release package.
+test binaries, not a VX6 release package. In the extracted artifact directory,
+verify both binaries before running them:
+
+```sh
+sha256sum -c SHA256SUMS
+```
 
 `plan`, `render`, and `run -dry-run` do not create namespaces. For a dry-run,
 use a new output directory:

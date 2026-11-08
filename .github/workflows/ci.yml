@@ -104,7 +104,11 @@ jobs:
           mkdir -p dist
           go build -o dist/vx6-simnode ./tests/netsim/simnode
           go build -ldflags="-X main.buildRevision=${GITHUB_SHA}" -o dist/vx6-netsim ./tests/netsim/netsim
-          sha256sum dist/vx6-simnode dist/vx6-netsim > dist/SHA256SUMS
+          (
+            cd dist
+            sha256sum vx6-simnode vx6-netsim > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
           printf '%s\n' \
             'VX6 DHT simulator test binaries' \
             'Target: Linux ${{ matrix.arch }}' \
