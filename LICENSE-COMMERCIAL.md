@@ -1,72 +1,57 @@
-# VX6 Commercial License Terms
+PolyForm Non-Commercial License 1.0.0
 
-This document defines commercial-use terms for VX6 that are separate from the Apache License 2.0 terms in `LICENSE`.
+Authentic Text & Licensing Authority Addendum for VX6
+Copyright (c) 2026 Suryansh Deshwal <suryanshdeshwal@gmail.com>
 
-## 1. Licensor
+-------------------------------------------------------------------------------
+MAINTAINER & COMMERCIAL LICENSING CLAUSE (ADDENDUM)
+-------------------------------------------------------------------------------
+1. Sole Authority: Suryansh Deshwal (suryanshdeshwal@gmail.com) is the sole 
+   inventer & maintainer and ultimate copyright holder of the VX6 software project.
+2. Commercial Exceptions: Any use of this software that falls outside the 
+   "Non-Commercial Purpose" defined below is strictly prohibited unless 
+   explicit, separate written permission or a commercial license is granted 
+   directly by Suryansh Deshwal.
+3. Terms of Commercial License: Commercial licenses will be granted solely 
+   at the discretion of the maintainer, under financial and operational 
+   conditions decided unilaterally by the maintainer at the time of request.
 
-The licensor for these commercial terms is:
+-------------------------------------------------------------------------------
+POLYFORM NON-COMMERCIAL LICENSE TEXT
+-------------------------------------------------------------------------------
 
-- **Suryansh Deshwal** ("Licensor")
+Acceptance
+By using or distributing this software, you accept this license. (FORK)
 
-## 2. Relationship to Apache-2.0
+Purpose
+This license allows you to use this software for non-commercial purposes only. 
+A "non-commercial purpose" is a purpose that is not intended for or directed 
+tow Aires commercial advantage or monetary compensation.
 
-VX6 is available under Apache-2.0 for open and community use as described in `LICENSE`.
+Grant of Rights
+Subject to the terms of this license, the licensor grants you a non-exclusive, 
+worldwide, royalty-free, copyright license to use, copy, modify, and 
+distribute this software for non-commercial purposes.
 
-Any use that qualifies as a **Commercial Use** under Section 3 of this document requires **prior written permission** from the Licensor under a separate commercial agreement.
+No Patent License
+This license does not grant you any patent license.
 
-## 3. Commercial Use Definition
+Distribution
+If you distribute this software, you must include this license, including the 
+Maintainer & Commercial Licensing Clause above, with every copy.
 
-"Commercial Use" includes, without limitation:
+Notices
+You must keep all copyright, patent, trademark, and attribution notices 
+intact. (MAINTAINER ALREADY POSESS PATENT)
 
-- deploying VX6 in production by or for a legal entity as part of internal business operations;
-- offering VX6 functionality as a hosted service or SaaS;
-- integrating VX6 into paid, subscription, enterprise, or revenue-generating products or offerings;
-- bundling, reselling, white-labeling, OEM distribution, or other paid redistribution of VX6;
-- packaging VX6 with paid support, managed operations, or other paid service bundles.
+No Trademarks
+This license does not grant you any trademark rights.
 
-## 4. Permission Requirement and Contact
+Termination
+Your rights under this license terminate immediately if you violate any of 
+its terms.
 
-Before any Commercial Use, you must obtain prior written permission from the Licensor.
-
-Commercial permission requests must be submitted through:
-
-- Email: **`suryanshdeshwal@gmail.com`**
-- GitHub: **https://github.com/ethical-buddy**
-
-No Commercial Use rights are granted unless and until a written commercial agreement is fully executed by the Licensor.
-
-## 5. Scope of Grant (If Approved)
-
-Any commercial grant is:
-
-- non-exclusive;
-- limited to the scope expressly written in the signed commercial agreement;
-- revocable at any time before the commercial agreement is fully executed.
-
-No implied rights are granted. All rights not expressly granted are reserved.
-
-## 6. Patent and Trademark
-
-This document does not grant any patent or trademark rights except as explicitly stated in a signed commercial agreement.
-
-Use of project names, logos, and branding is also subject to `TRADEMARK.md`.
-
-## 7. Attribution
-
-For approved Commercial Use, you must provide visible attribution to VX6 in applicable product documentation, legal notices, or About pages, unless a signed commercial agreement states otherwise.
-
-Minimum attribution text:
-
-- "This product includes VX6."
-
-## 8. Disclaimer of Warranty
-
-TO THE MAXIMUM EXTENT PERMITTED BY LAW, VX6 IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, WHETHER EXPRESS, IMPLIED, OR STATUTORY, INCLUDING WITHOUT LIMITATION ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, OR NON-INFRINGEMENT.
-
-## 9. Limitation of Liability
-
-TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR LOSS OF PROFITS, REVENUE, DATA, OR GOODWILL, ARISING FROM OR RELATED TO VX6 OR THESE TERMS, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
-
-## 10. Entire Commercial Understanding
-
-These terms define the baseline commercial permission gate. Any approved Commercial Use requires a separate signed written agreement that may provide additional terms.
+Disclaimer of Warranty
+The software is provided "as is", without warranty of any kind, express or 
+implied. In no event shall the authors or copyright holders be liable for any 
+claim, damages or other liability.
