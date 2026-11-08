@@ -215,6 +215,7 @@ func TestNewStoreForConfigUsesDistinctIdentityFilesForCustomConfigs(t *testing.T
 
 func TestDefaultPathUsesHomeConfigDirectory(t *testing.T) {
 	t.Setenv("HOME", "/tmp/vx6-home")
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	path, err := DefaultPath()
 	if err != nil {
@@ -222,5 +223,18 @@ func TestDefaultPathUsesHomeConfigDirectory(t *testing.T) {
 	}
 	if path != "/tmp/vx6-home/.config/vx6/identity.json" {
 		t.Fatalf("unexpected default identity path %q", path)
+	}
+}
+
+func TestDefaultPathUsesXDGConfigDirectoryWhenSet(t *testing.T) {
+	t.Setenv("HOME", "/tmp/vx6-home")
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/vx6-xdg")
+
+	path, err := DefaultPath()
+	if err != nil {
+		t.Fatalf("default path: %v", err)
+	}
+	if path != "/tmp/vx6-xdg/vx6/identity.json" {
+		t.Fatalf("unexpected XDG identity path %q", path)
 	}
 }

@@ -479,3 +479,80 @@ PASS
 ```
 
 **Result: PASS.** The containerized DHT IPv6 mesh scenarios passed.
+
+## DHT Docker Mesh Run 20261108T024404Z-364625
+
+- Source HEAD: `5fe295e718862f8b5d0a6c75f2feb25d348d5257`
+- Working tree source changes: present; this run includes them
+- Go: `go version go1.27.3-X:nodwarf5 linux/amd64`
+- Docker: `29.9.3`
+- Host kernel: `7.2.15-arch1-1`
+- Topology: 3-, 5-, and 10-peer DHT meshes using IPv6 TCP listeners in an isolated Docker network
+- Scope: DHT protocol/lookup behavior; not IKE/IPsec or separate-container process isolation
+
+Command: `bash tests/dht-validation/run-docker.sh`
+
+Test binary SHA-256: `514c4974d0de08d8d03ff460acd7458f3d57ba46c57946ae35602962383d0105`
+
+```text
+```
+
+Image ID: `sha256:3648e47332cb813168f8b39c1ab0fb8305ff52372ba18c44850801d0c5931700`
+
+```text
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  12.27MB
+Step 1/3 : FROM ubuntu:22.04
+ ---> eb29ed27b082
+Step 2/3 : COPY dht-validation.test /usr/local/bin/dht-validation.test
+ ---> Using cache
+ ---> 0e699b8555f4
+Step 3/3 : ENTRYPOINT ["/usr/local/bin/dht-validation.test", "-test.v", "-test.timeout=3m"]
+ ---> Using cache
+ ---> 3648e47332cb
+Successfully built 3648e47332cb
+Successfully tagged vx6-dht-validation:local
+```
+
+### Test output
+
+```text
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/name-hash
+    mesh_test.go:162: PASS peers=3 lookup=name-hash queried=2 rounds=3 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/node-id
+    mesh_test.go:162: PASS peers=3 lookup=node-id queried=1 rounds=1 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/name-hash
+    mesh_test.go:162: PASS peers=5 lookup=name-hash queried=4 rounds=5 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/node-id
+    mesh_test.go:162: PASS peers=5 lookup=node-id queried=3 rounds=3 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/name-hash
+    mesh_test.go:162: PASS peers=10 lookup=name-hash queried=9 rounds=10 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/node-id
+    mesh_test.go:162: PASS peers=10 lookup=node-id queried=8 rounds=8 matches=1
+--- PASS: TestThreeFiveTenPeerIPv6IterativeLookups (0.01s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/node-id (0.00s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/node-id (0.00s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/node-id (0.00s)
+=== RUN   TestFivePeerLookupReturnsIncompleteWhenOneBranchFails
+    mesh_test.go:189: PASS peers=5 reachable-match=FAULT-05 outcome=found_verified failed-branches=1
+--- PASS: TestFivePeerLookupReturnsIncompleteWhenOneBranchFails (0.00s)
+=== RUN   TestThreePeerLookupReturnsAllSignedNameConflicts
+    mesh_test.go:219: PASS name-conflict candidates=2
+--- PASS: TestThreePeerLookupReturnsAllSignedNameConflicts (0.00s)
+PASS
+```
+
+**Result: PASS.** The containerized DHT IPv6 mesh scenarios passed.
