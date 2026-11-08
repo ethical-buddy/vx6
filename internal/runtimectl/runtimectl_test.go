@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/vx6/vx6/internal/proto"
 )
 
 func TestServerStatusAndReload(t *testing.T) {
@@ -63,6 +65,38 @@ func TestServerStatusAndReload(t *testing.T) {
 	}
 	if reloads != 1 {
 		t.Fatalf("expected one reload request, got %d", reloads)
+	}
+}
+
+func TestPeerUseAndFriendActionsReachDaemonHandlers(t *testing.T) {
+	infoPath := filepath.Join(t.TempDir(), "node.control.json")
+	var useSeen, friendSeen, removeSeen bool
+	peer := proto.NodeInfo{ID: "vx6_test", Name: "FRIEND", Addr: "[2001:db8::1]:4242"}
+	server, err := StartWithPeerHandlers(infoPath, 99, nil, nil,
+		func(got proto.NodeInfo) error { useSeen = got.ID == peer.ID; return nil },
+		func(got proto.NodeInfo, friend bool) error {
+			if friend {
+				friendSeen = got.ID == peer.ID
+			} else {
+				removeSeen = got.ID == peer.ID
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	if err := RecordPeerUse(context.Background(), infoPath, peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerFriend(context.Background(), infoPath, peer, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemovePeerFriend(context.Background(), infoPath, peer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !useSeen || !friendSeen || !removeSeen {
+		t.Fatalf("daemon handlers saw use=%v friend=%v remove=%v", useSeen, friendSeen, removeSeen)
 	}
 }
 

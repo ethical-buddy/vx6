@@ -31,12 +31,13 @@ const (
 )
 
 type Registry struct {
-	mu             sync.RWMutex
-	path           string
-	byName         map[string]record.EndpointRecord
-	byNode         map[string]record.EndpointRecord
-	serviceByName  map[string]record.ServiceRecord
-	addressHistory map[string][]addressObservation
+	mu               sync.RWMutex
+	path             string
+	byName           map[string]record.EndpointRecord
+	byNode           map[string]record.EndpointRecord
+	serviceByName    map[string]record.ServiceRecord
+	addressHistory   map[string][]addressObservation
+	endpointObserver func(record.EndpointRecord)
 }
 
 type addressObservation struct {
@@ -58,6 +59,23 @@ func NewRegistry(path string) (*Registry, error) {
 		}
 	}
 	return r, nil
+}
+
+// SetEndpointObserver installs a local callback for newly accepted signed
+// endpoint versions. The callback runs after the registry lock is released.
+func (r *Registry) SetEndpointObserver(observer func(record.EndpointRecord)) {
+	r.mu.Lock()
+	r.endpointObserver = observer
+	r.mu.Unlock()
+}
+
+func (r *Registry) notifyEndpointObserver(rec record.EndpointRecord) {
+	r.mu.RLock()
+	observer := r.endpointObserver
+	r.mu.RUnlock()
+	if observer != nil {
+		observer(rec)
+	}
 }
 
 type request struct {
@@ -114,18 +132,21 @@ func (r *Registry) handlePublish(conn net.Conn, rec record.EndpointRecord) error
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if existing, ok := r.byNode[rec.NodeID]; ok {
 		if !record.EndpointRecordNewer(rec, existing) && record.Fingerprint(rec) != record.Fingerprint(existing) {
+			r.mu.Unlock()
 			return writeResponse(conn, response{Error: "new record does not advance the stored record sequence"})
 		}
 	}
 
 	r.upsertEndpointLocked(rec)
 	if err := r.saveLocked(); err != nil {
+		r.mu.Unlock()
 		return writeResponse(conn, response{Error: err.Error()})
 	}
+	r.mu.Unlock()
+	r.notifyEndpointObserver(rec)
 
 	return writeResponse(conn, response{OK: true, Record: rec})
 }
@@ -278,9 +299,9 @@ func (r *Registry) ResolveServiceLocal(fullName string) (record.ServiceRecord, e
 
 func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []record.ServiceRecord) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	changed := false
+	updatedEndpoints := make([]record.EndpointRecord, 0, len(records))
 	for _, rec := range records {
 		if err := record.VerifyEndpointRecord(rec, time.Now()); err != nil {
 			continue
@@ -293,6 +314,7 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 		}
 		r.upsertEndpointLocked(rec)
 		changed = true
+		updatedEndpoints = append(updatedEndpoints, rec)
 	}
 
 	for _, rec := range serviceRecords {
@@ -316,7 +338,14 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 	}
 
 	if changed {
-		return r.saveLocked()
+		if err := r.saveLocked(); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	r.mu.Unlock()
+	for _, rec := range updatedEndpoints {
+		r.notifyEndpointObserver(rec)
 	}
 	return nil
 }

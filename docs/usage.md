@@ -75,3 +75,10 @@ If you already know the other VX6 node address, you can skip discovery:
 ```bash
 vx6 connect --service web --addr '[2001:db8::10]:4242' --listen 127.0.0.1:8080
 ```
+
+For a direct UDP service, specify its protocol:
+
+```bash
+vx6 connect --service dns --addr '[2001:db8::10]:4242' \
+  --protocol udp --listen 127.0.0.1:15353
+```

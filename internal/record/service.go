@@ -18,6 +18,7 @@ type ServiceRecord struct {
 	NodeID             string   `json:"node_id"`
 	NodeName           string   `json:"node_name"`
 	ServiceName        string   `json:"service_name"`
+	Protocol           string   `json:"protocol,omitempty"`
 	Alias              string   `json:"alias,omitempty"`
 	Address            string   `json:"address,omitempty"` // Empty if hidden
 	IsHidden           bool     `json:"is_hidden"`         // If true, IP is masked
@@ -30,6 +31,11 @@ type ServiceRecord struct {
 	ExpiresAt          string   `json:"expires_at"`
 	Signature          string   `json:"signature"`
 }
+
+const (
+	ServiceProtocolTCP = "tcp"
+	ServiceProtocolUDP = "udp"
+)
 
 func NewServiceRecord(id identity.Identity, nodeName, serviceName, address string, ttl time.Duration, now time.Time) (ServiceRecord, error) {
 	canonicalName, err := NormalizeNodeName(nodeName)
@@ -55,6 +61,7 @@ func NewServiceRecord(id identity.Identity, nodeName, serviceName, address strin
 		NodeID:      id.NodeID,
 		NodeName:    canonicalName,
 		ServiceName: serviceName,
+		Protocol:    ServiceProtocolTCP,
 		Address:     address,
 		PublicKey:   base64.StdEncoding.EncodeToString(id.PublicKey),
 		IssuedAt:    now.UTC().Format(time.RFC3339),
@@ -93,6 +100,12 @@ func VerifyServiceRecord(rec ServiceRecord, now time.Time) error {
 	}
 	if rec.IsHidden && rec.IsPrivate {
 		return fmt.Errorf("service cannot be both hidden and private")
+	}
+	if rec.Protocol != "" && rec.Protocol != ServiceProtocolTCP && rec.Protocol != ServiceProtocolUDP {
+		return fmt.Errorf("unsupported service protocol %q", rec.Protocol)
+	}
+	if rec.IsHidden && rec.Protocol == ServiceProtocolUDP {
+		return fmt.Errorf("hidden services currently require TCP")
 	}
 	if rec.IsHidden {
 		if rec.Alias == "" {
@@ -178,6 +191,17 @@ func ValidateServiceName(name string) error {
 	return nil
 }
 
+func NormalizeServiceProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "", ServiceProtocolTCP:
+		return ServiceProtocolTCP
+	case ServiceProtocolUDP:
+		return ServiceProtocolUDP
+	default:
+		return ""
+	}
+}
+
 func ValidateHiddenAlias(alias string) error {
 	if alias == "" {
 		return fmt.Errorf("hidden alias cannot be empty")
@@ -212,19 +236,21 @@ func serviceSigningPayload(rec ServiceRecord) []byte {
 		privateStr = "true"
 	}
 
-	return []byte(
-		rec.NodeID + "\n" +
-			rec.NodeName + "\n" +
-			rec.ServiceName + "\n" +
-			rec.Alias + "\n" +
-			rec.Address + "\n" +
-			hiddenStr + "\n" +
-			privateStr + "\n" +
-			rec.HiddenProfile + "\n" +
-			intros + "\n" +
-			standbys + "\n" +
-			rec.PublicKey + "\n" +
-			rec.IssuedAt + "\n" +
-			rec.ExpiresAt + "\n",
-	)
+	payload := rec.NodeID + "\n" +
+		rec.NodeName + "\n" +
+		rec.ServiceName + "\n" +
+		rec.Alias + "\n" +
+		rec.Address + "\n" +
+		hiddenStr + "\n" +
+		privateStr + "\n" +
+		rec.HiddenProfile + "\n" +
+		intros + "\n" +
+		standbys + "\n" +
+		rec.PublicKey + "\n" +
+		rec.IssuedAt + "\n" +
+		rec.ExpiresAt + "\n"
+	if rec.Protocol != "" {
+		payload += "protocol:" + rec.Protocol + "\n"
+	}
+	return []byte(payload)
 }

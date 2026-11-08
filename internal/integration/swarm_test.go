@@ -151,7 +151,7 @@ func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 	waitForShutdown(t, onionDone)
 }
 
-func TestDirectIPv6ServiceWithoutBootstrap(t *testing.T) {
+func TestPublicDirectIPv6ServiceDoesNotRequireOwnerDHTIdentity(t *testing.T) {
 	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
@@ -178,12 +178,185 @@ func TestDirectIPv6ServiceWithoutBootstrap(t *testing.T) {
 		})
 	}()
 
-	assertEchoEventually(t, directAddr, "direct service without bootstrap")
+	assertEchoEventually(t, directAddr, "public service caller absent from owner DHT")
 	directCancel()
 	waitForShutdown(t, directDone)
 }
 
-func TestSyncOnlyBootstrapClientLearnsAndUsesRemoteService(t *testing.T) {
+func TestConcurrentNamedServicesShareOnePeerListener(t *testing.T) {
+	rootCtx, rootCancel := testRootContext()
+	defer rootCancel()
+	baseDir := t.TempDir()
+	services := make(map[string]string)
+	for _, name := range []string{"web", "ssh", "database"} {
+		addr := reserveTCPAddr(t, "127.0.0.1:0")
+		startTaggedEchoServer(t, rootCtx, addr, name)
+		services[name] = addr
+	}
+	owner := startVX6Node(t, rootCtx, filepath.Join(baseDir, "owner"), "owner", nil, services)
+	client := startVX6Node(t, rootCtx, filepath.Join(baseDir, "client"), "client", nil, nil)
+
+	type forward struct {
+		addr   string
+		cancel context.CancelFunc
+		done   chan error
+	}
+	forwards := make(map[string]forward, len(services))
+	for name := range services {
+		localAddr := reserveTCPAddr(t, "127.0.0.1:0")
+		ctx, cancel := context.WithCancel(rootCtx)
+		done := make(chan error, 1)
+		rec := record.ServiceRecord{NodeName: owner.name, ServiceName: name, Address: owner.listenAddr}
+		go func() {
+			done <- serviceproxy.ServeLocalForward(ctx, localAddr, rec, client.id, func(ctx context.Context) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp6", owner.listenAddr)
+			})
+		}()
+		forwards[name] = forward{addr: localAddr, cancel: cancel, done: done}
+	}
+	for name, item := range forwards {
+		waitForTCPListener(t, item.addr, name)
+	}
+	defer func() {
+		for _, item := range forwards {
+			item.cancel()
+			waitForShutdown(t, item.done)
+		}
+	}()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(services)*4)
+	for name, item := range forwards {
+		for i := 0; i < 4; i++ {
+			name, item, i := name, item, i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				message := fmt.Sprintf("%s-stream-%d", name, i)
+				conn, err := net.DialTimeout("tcp", item.addr, time.Second)
+				if err != nil {
+					errCh <- fmt.Errorf("dial %s: %w", name, err)
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+				marker := make([]byte, len(name)+1)
+				if _, err := io.ReadFull(conn, marker); err != nil {
+					errCh <- fmt.Errorf("read %s backend marker: %w", name, err)
+					return
+				}
+				if string(marker) != name+":" {
+					errCh <- fmt.Errorf("%s reached wrong backend %q", name, marker)
+					return
+				}
+				if _, err := io.WriteString(conn, message); err != nil {
+					errCh <- fmt.Errorf("write %s: %w", name, err)
+					return
+				}
+				got := make([]byte, len(message))
+				if _, err := io.ReadFull(conn, got); err != nil {
+					errCh <- fmt.Errorf("read %s: %w", name, err)
+					return
+				}
+				if string(got) != message {
+					errCh <- fmt.Errorf("service cross-routing: %s returned %q", name, got)
+				}
+			}()
+		}
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestUDPServicePassesThroughPeerNode(t *testing.T) {
+	rootCtx, rootCancel := testRootContext()
+	defer rootCancel()
+	baseDir := t.TempDir()
+	backend, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	go func() {
+		buffer := make([]byte, 2048)
+		for {
+			n, addr, err := backend.ReadFromUDP(buffer)
+			if err != nil {
+				return
+			}
+			_, _ = backend.WriteToUDP([]byte("udp:"+string(buffer[:n])), addr)
+		}
+	}()
+	owner := startVX6NodeWithOptions(t, rootCtx, nodeOptions{
+		dir: filepath.Join(baseDir, "owner"), name: "owner",
+		services:         map[string]string{"media": backend.LocalAddr().String()},
+		serviceProtocols: map[string]string{"media": record.ServiceProtocolUDP},
+	})
+	service := record.ServiceRecord{NodeName: owner.name, ServiceName: "media", Protocol: record.ServiceProtocolUDP, Address: owner.listenAddr}
+	forwardCtx, forwardCancel := context.WithCancel(rootCtx)
+	defer forwardCancel()
+	ready := make(chan net.Addr, 1)
+	forwardDone := make(chan error, 1)
+	go func() {
+		forwardDone <- serviceproxy.ServeLocalUDPForwardReady(forwardCtx, "127.0.0.1:0", service, func(ctx context.Context) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp6", owner.listenAddr)
+		}, ready)
+	}()
+	var localAddr net.Addr
+	select {
+	case localAddr = <-ready:
+	case err := <-forwardDone:
+		t.Fatalf("UDP forwarder exited: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("UDP forwarder did not start")
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		message := fmt.Sprintf("packet-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := net.DialTimeout("udp", localAddr.String(), time.Second)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+			if _, err := io.WriteString(conn, message); err != nil {
+				errCh <- err
+				return
+			}
+			buffer := make([]byte, 256)
+			n, err := conn.Read(buffer)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if got, want := string(buffer[:n]), "udp:"+message; got != want {
+				errCh <- fmt.Errorf("UDP service response %q, want %q", got, want)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	forwardCancel()
+	waitForShutdown(t, forwardDone)
+}
+
+func TestSyncOnlyBootstrapClientCanOpenPublicServiceWithoutDHTIdentityLookup(t *testing.T) {
 	rootCtx, rootCancel := testRootContext()
 	defer rootCancel()
 
@@ -238,7 +411,7 @@ func TestSyncOnlyBootstrapClientLearnsAndUsesRemoteService(t *testing.T) {
 			return d.DialContext(ctx, "tcp6", serviceRec.Address)
 		})
 	}()
-	assertEchoEventually(t, directAddr, "sync-only client direct service path")
+	assertEchoEventually(t, directAddr, "public service without owner-side DHT identity lookup")
 	directCancel()
 	waitForShutdown(t, directDone)
 
@@ -938,7 +1111,23 @@ func (integrationIPsec) EnsurePeer(_ context.Context, peer record.EndpointRecord
 
 func (integrationIPsec) RegisterProbePort(context.Context, string) error { return nil }
 
-func (integrationIPsec) AcceptPeer(context.Context, string) bool { return true }
+// The integration double models a successful IKE-authenticated transport;
+// its empty peer record lets tests exercise public service access without a
+// DHT identity known to the service owner.
+func (integrationIPsec) AuthenticatePeer(_ context.Context, remoteAddress string) (record.EndpointRecord, bool) {
+	host, _, err := net.SplitHostPort(remoteAddress)
+	if err == nil {
+		signedTestEndpoints.RLock()
+		defer signedTestEndpoints.RUnlock()
+		for address, peer := range signedTestEndpoints.byAddress {
+			peerHost, _, splitErr := net.SplitHostPort(address)
+			if splitErr == nil && peerHost == host {
+				return peer, true
+			}
+		}
+	}
+	return record.EndpointRecord{}, true
+}
 
 var signedTestEndpoints = struct {
 	sync.RWMutex
@@ -959,6 +1148,7 @@ type nodeOptions struct {
 	name                string
 	bootstraps          []string
 	services            map[string]string
+	serviceProtocols    map[string]string
 	advertiseAddr       string
 	disableAdvertise    bool
 	hiddenServices      map[string]bool
@@ -1038,11 +1228,16 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 	for serviceName, target := range opts.services {
 		cfgFile.Services[serviceName] = config.ServiceEntry{
 			Target:             target,
+			Protocol:           opts.serviceProtocols[serviceName],
 			IsHidden:           opts.hiddenServices[serviceName],
 			HiddenLookupSecret: opts.hiddenLookupSecrets[serviceName],
 			IntroNodes:         append([]string(nil), opts.hiddenIntroNodes[serviceName]...),
 			IsPrivate:          opts.privateServices[serviceName],
 		}
+	}
+	servicePolicies := make(map[string]serviceproxy.ServicePolicy, len(opts.services))
+	for name, target := range opts.services {
+		servicePolicies[name] = serviceproxy.ServicePolicy{Target: target, Protocol: opts.serviceProtocols[name], Private: opts.privateServices[name]}
 	}
 	if err := store.Save(cfgFile); err != nil {
 		t.Fatalf("save config for %s: %v", opts.name, err)
@@ -1050,19 +1245,20 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 
 	nodeCtx, cancel := context.WithCancel(parent)
 	cfg := node.Config{
-		Name:          opts.name,
-		NodeID:        id.NodeID,
-		ListenAddr:    listenAddr,
-		AdvertiseAddr: advertiseAddr,
-		HideEndpoint:  opts.hideEndpoint,
-		DataDir:       dataDir,
-		ConfigPath:    configPath,
-		PeerAddrs:     append([]string(nil), opts.bootstraps...),
-		Services:      cloneServices(opts.services),
-		DHT:           dht.NewServerWithIdentity(id),
-		Identity:      id,
-		Registry:      registry,
-		IPsecTunnel:   integrationIPsec{},
+		Name:            opts.name,
+		NodeID:          id.NodeID,
+		ListenAddr:      listenAddr,
+		AdvertiseAddr:   advertiseAddr,
+		HideEndpoint:    opts.hideEndpoint,
+		DataDir:         dataDir,
+		ConfigPath:      configPath,
+		PeerAddrs:       append([]string(nil), opts.bootstraps...),
+		Services:        cloneServices(opts.services),
+		ServicePolicies: servicePolicies,
+		DHT:             dht.NewServerWithIdentity(id),
+		Identity:        id,
+		Registry:        registry,
+		IPsecTunnel:     integrationIPsec{},
 		RefreshServices: func() map[string]string {
 			c, err := store.Load()
 			if err != nil {
@@ -1074,6 +1270,17 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 			}
 			return out
 		},
+		RefreshServicePolicies: func() map[string]serviceproxy.ServicePolicy {
+			c, err := store.Load()
+			if err != nil {
+				return nil
+			}
+			out := make(map[string]serviceproxy.ServicePolicy, len(c.Services))
+			for name, service := range c.Services {
+				out[name] = serviceproxy.ServicePolicy{Target: service.Target, Protocol: service.Protocol, Private: service.IsPrivate, AllowedNodeIDs: append([]string(nil), service.AllowedNodeIDs...)}
+			}
+			return out
+		},
 	}
 
 	done := make(chan error, 1)
@@ -1081,14 +1288,32 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		done <- node.Run(nodeCtx, io.Discard, cfg)
 	}()
 
-	waitForCondition(t, 3*time.Second, func() bool {
-		conn, err := net.DialTimeout("tcp6", listenAddr, 50*time.Millisecond)
-		if err != nil {
-			return false
+	listenerReady := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			done <- err
+			t.Fatalf("node %s exited during startup: %v", opts.name, err)
+		default:
 		}
-		_ = conn.Close()
-		return true
-	}, fmt.Sprintf("%s listener", opts.name))
+		conn, err := net.DialTimeout("tcp6", listenAddr, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			listenerReady = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !listenerReady {
+		select {
+		case err := <-done:
+			done <- err
+			t.Fatalf("node %s failed to start: %v", opts.name, err)
+		default:
+			t.Fatalf("timed out waiting for %s listener", opts.name)
+		}
+	}
 
 	t.Cleanup(func() {
 		cancel()
@@ -1114,6 +1339,20 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 	}
 }
 
+func waitForTCPListener(t *testing.T, addr, label string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("local service listener %s (%s) did not start", label, addr)
+}
+
 func startEchoServer(t *testing.T, ctx context.Context, addr string) {
 	t.Helper()
 
@@ -1135,6 +1374,31 @@ func startEchoServer(t *testing.T, ctx context.Context, addr string) {
 			}
 			go func(conn net.Conn) {
 				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(conn)
+		}
+	}()
+}
+
+func startTaggedEchoServer(t *testing.T, ctx context.Context, addr, tag string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("listen tagged echo server: %v", err)
+	}
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.WriteString(conn, tag+":")
 				_, _ = io.Copy(conn, conn)
 			}(conn)
 		}

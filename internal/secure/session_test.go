@@ -108,6 +108,25 @@ func TestSessionExposesPeerIdentity(t *testing.T) {
 	}
 }
 
+func TestClientExpectedRejectsDifferentHandshakeKey(t *testing.T) {
+	clientID, _ := identity.Generate()
+	serverID, _ := identity.Generate()
+	wrongID, _ := identity.Generate()
+	left, right := net.Pipe()
+	serverDone := make(chan error, 1)
+	go func() {
+		defer right.Close()
+		_, err := Server(right, proto.KindServiceConn, serverID)
+		serverDone <- err
+	}()
+	_, err := ClientExpected(left, proto.KindServiceConn, clientID, wrongID.NodeID, base64.StdEncoding.EncodeToString(wrongID.PublicKey))
+	_ = left.Close()
+	if err == nil {
+		t.Fatal("expected mismatched identity to be rejected")
+	}
+	<-serverDone
+}
+
 func TestTranscriptCanonical(t *testing.T) {
 	t.Parallel()
 

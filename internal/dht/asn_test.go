@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 )
 
@@ -39,7 +41,7 @@ func TestASNResolverLoadsAndResolves(t *testing.T) {
 	}
 }
 
-func TestCandidateConfirmationPrefersASNDiversity(t *testing.T) {
+func TestCandidateConfirmationTracksASNDiversity(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "asn-map.json")
 	writeASNMap(t, path, []ASNMapEntry{
@@ -69,6 +71,32 @@ func TestCandidateConfirmationPrefersASNDiversity(t *testing.T) {
 	}
 }
 
+func TestSameASNAndPrefixDoNotBlockSignedLookupConfirmation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "asn-map.json")
+	writeASNMap(t, path, []ASNMapEntry{{CIDR: "2001:db8:1::/48", ASN: "AS64500"}})
+	resolver, status, err := LoadASNResolver(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetASNResolver(resolver, status)
+	t.Cleanup(func() { SetASNResolver(noASNResolver{}, ASNResolverStatus{}) })
+
+	now := time.Now()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := mustEndpointRecordForIdentity(t, id, "owner", "[2001:db8:1::99]:4242", now)
+	key := NodeNameKey("owner")
+	payload := mustSignedValue(t, id, key, mustJSON(t, rec), now)
+	collector := newLookupCollector(key, now)
+	collector.Observe(sourceObservation{nodeID: "a", addr: "[2001:db8:1::1]:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "b", addr: "[2001:db8:1::2]:4242", trust: 1, branch: 2}, payload)
+	if _, err := collector.Resolve(2); err != nil {
+		t.Fatalf("signed record from separate lookup branches in one ASN/prefix was blocked: %v", err)
+	}
+}
+
 func TestCandidateConfirmationFallsBackWithoutASNData(t *testing.T) {
 	SetASNResolver(noASNResolver{}, ASNResolverStatus{})
 
@@ -85,7 +113,7 @@ func TestCandidateConfirmationFallsBackWithoutASNData(t *testing.T) {
 	})
 }
 
-func TestSelectReplicationNodesPrefersASNSpread(t *testing.T) {
+func TestSelectReplicationNodesPreservesXOROrderWithASNMap(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "asn-map.json")
 	writeASNMap(t, path, []ASNMapEntry{
@@ -111,16 +139,8 @@ func TestSelectReplicationNodesPrefersASNSpread(t *testing.T) {
 	if len(selected) != 2 {
 		t.Fatalf("expected 2 selected nodes, got %d", len(selected))
 	}
-	asns := map[string]struct{}{}
-	for _, node := range selected {
-		asn, ok := ResolveASNForAddr(node.Addr)
-		if !ok {
-			t.Fatalf("expected ASN mapping for %s", node.Addr)
-		}
-		asns[asn] = struct{}{}
-	}
-	if len(asns) != 2 {
-		t.Fatalf("expected ASN spread, got %+v", selected)
+	if selected[0].ID != nodes[0].ID || selected[1].ID != nodes[1].ID {
+		t.Fatalf("ASN metadata reordered XOR candidates: selected=%+v want first two=%+v", selected, nodes[:2])
 	}
 }
 

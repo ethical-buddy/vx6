@@ -19,7 +19,7 @@
 
 ## Important Notes
 
-- transport is TCP in this release
+- VX6 services support TCP by default and explicitly configured UDP services
 - `transport=quic` is not active
 - hidden services use invite-based lookup
 - private services are not published as public `service/...` records
@@ -47,10 +47,22 @@ Publish service:
 vx6 service add --name web --target 127.0.0.1:8080
 ```
 
+Publish a UDP service:
+
+```bash
+vx6 service add --protocol udp --name dns --target '[::1]:5353'
+```
+
 Open tunnel:
 
 ```bash
 vx6 connect --service alice.web --listen 127.0.0.1:8080
+```
+
+Connect to a UDP service:
+
+```bash
+vx6 connect --service alice.dns --listen 127.0.0.1:15353
 ```
 
 Open GUI:

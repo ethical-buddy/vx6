@@ -19,7 +19,6 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
-	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/transfer"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
@@ -208,20 +207,16 @@ func (c *Client) SendFileWithProgress(ctx context.Context, peerAddr, filePath st
 	if err := proto.WriteHeader(conn, proto.KindFileTransfer); err != nil {
 		return err
 	}
-	secureConn, err := secure.Client(conn, proto.KindFileTransfer, id)
-	if err != nil {
-		return err
-	}
 	meta := map[string]any{
 		"node_name": cfg.Node.Name,
 		"file_name": filepath.Base(filePath),
 		"file_size": total,
 	}
 	metaRaw, _ := json.Marshal(meta)
-	if err := proto.WriteLengthPrefixed(secureConn, metaRaw); err != nil {
+	if err := proto.WriteLengthPrefixed(conn, metaRaw); err != nil {
 		return err
 	}
-	resumeRaw, err := proto.ReadLengthPrefixed(secureConn, 4096)
+	resumeRaw, err := proto.ReadLengthPrefixed(conn, 4096)
 	if err != nil {
 		return err
 	}
@@ -248,7 +243,7 @@ func (c *Client) SendFileWithProgress(ctx context.Context, peerAddr, filePath st
 	for {
 		n, readErr := file.Read(buf)
 		if n > 0 {
-			if _, err := secureConn.Write(buf[:n]); err != nil {
+			if _, err := conn.Write(buf[:n]); err != nil {
 				return err
 			}
 			sent += int64(n)

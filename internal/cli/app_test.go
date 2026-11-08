@@ -221,7 +221,75 @@ func TestPeerPinCommandPersistsIdentityAndUnpinRemovesIt(t *testing.T) {
 	}
 }
 
-func TestVerifyPinnedEndpointRejectsDifferentIdentity(t *testing.T) {
+func TestPeerFriendIsLocalRetentionKeyedByNodeID(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("VX6_CONFIG_PATH", filepath.Join(root, "config.json"))
+	configStore, err := config.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := configStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Node.DataDir = filepath.Join(root, "data")
+	if err := configStore.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := record.NewEndpointRecord(id, "friend", "[2001:db8::24]:4242", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "friend.json")
+	data, err := record.JSON(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPeerFriend("friend", []string{"--record", path}); err != nil {
+		t.Fatalf("add friend: %v", err)
+	}
+
+	peerStore, err := dht.OpenPeerStore(filepath.Join(cfg.Node.DataDir, "dht-peers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := peerStore.LoadCandidates(time.Now(), 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || !rows[0].Friend || rows[0].Node.ID != id.NodeID {
+		t.Fatalf("unexpected local friend row: %+v", rows)
+	}
+	if err := peerStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runPeerFriend("unfriend", []string{"--node-id", id.NodeID}); err != nil {
+		t.Fatalf("remove friend: %v", err)
+	}
+	peerStore, err = dht.OpenPeerStore(filepath.Join(cfg.Node.DataDir, "dht-peers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerStore.Close()
+	rows, err = peerStore.LoadCandidates(time.Now(), 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Friend {
+		t.Fatalf("unfriend should remove the preference but may retain its endpoint: %+v", rows)
+	}
+}
+
+func TestVerifyPinnedEndpointAndLocalPinDoesNotReserveName(t *testing.T) {
 	t.Parallel()
 	trusted, err := identity.Generate()
 	if err != nil {
@@ -246,8 +314,8 @@ func TestVerifyPinnedEndpointRejectsDifferentIdentity(t *testing.T) {
 	if _, err := verifyPinnedEndpoint(otherRecord, pin, time.Now()); err == nil {
 		t.Fatal("different identity with same name was accepted")
 	}
-	if err := validatePinnedIdentity(config.File{Node: config.NodeConfig{PinnedPeers: []config.PinnedPeer{pin}}}, otherRecord); err == nil {
-		t.Fatal("dial guard accepted a different key claiming the pinned name")
+	if err := validatePinnedIdentity(config.File{Node: config.NodeConfig{PinnedPeers: []config.PinnedPeer{pin}}}, otherRecord); err != nil {
+		t.Fatalf("local identity pin incorrectly reserved a display name: %v", err)
 	}
 	if err := validatePinnedIdentity(config.File{Node: config.NodeConfig{PinnedPeers: []config.PinnedPeer{pin}}}, trustedRecord); err != nil {
 		t.Fatalf("dial guard rejected the pinned identity: %v", err)

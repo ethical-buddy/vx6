@@ -30,8 +30,8 @@ import (
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/runtimectl"
-	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
+	"github.com/vx6/vx6/internal/strictjson"
 	"github.com/vx6/vx6/internal/transfer"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
@@ -53,8 +53,8 @@ const (
 	relayHandshakeDeadline    = 60 * time.Second
 	serviceProxyDeadline      = 30 * time.Second
 	idleSessionDeadline       = 5 * time.Minute
-	dhtRouteRefreshInterval   = 10 * time.Minute
-	dhtRouteRefreshJitter     = 2 * time.Minute
+	dhtRouteRefreshInterval   = 5 * time.Minute
+	dhtRouteRefreshJitter     = time.Minute
 	dhtRefreshRoundLimit      = 2
 	dhtPeerStoreFlushInterval = time.Minute
 )
@@ -65,36 +65,38 @@ type PeerTunnel interface {
 	PreparePeer(context.Context, record.EndpointRecord) error
 	EnsurePeer(context.Context, record.EndpointRecord) error
 	RegisterProbePort(context.Context, string) error
-	AcceptPeer(context.Context, string) bool
+	AuthenticatePeer(context.Context, string) (record.EndpointRecord, bool)
 }
 
 type Config struct {
-	Name                 string
-	NodeID               string
-	ListenAddr           string
-	AdvertiseAddr        string
-	AdvertiseExplicit    bool
-	TransportMode        string
-	HideEndpoint         bool
-	RelayMode            string
-	RelayResourcePercent int
-	MaxConcurrentConns   int
-	DataDir              string
-	ReceiveDir           string
-	FileReceiveMode      string
-	AllowedFileSenders   []string
-	ConfigPath           string
-	ControlInfoPath      string
-	RefreshServices      ServiceRefresher
-	PeerAddrs            []string
-	Services             map[string]string
-	Identity             identity.Identity
-	Registry             *discovery.Registry
-	DHT                  *dht.Server
-	IPsecTunnel          PeerTunnel
-	Reload               chan struct{}
-	livenessCache        *liveness.Cache
-	recordState          *endpointRecordState
+	Name                   string
+	NodeID                 string
+	ListenAddr             string
+	AdvertiseAddr          string
+	AdvertiseExplicit      bool
+	TransportMode          string
+	HideEndpoint           bool
+	RelayMode              string
+	RelayResourcePercent   int
+	MaxConcurrentConns     int
+	DataDir                string
+	ReceiveDir             string
+	FileReceiveMode        string
+	AllowedFileSenders     []string
+	ConfigPath             string
+	ControlInfoPath        string
+	RefreshServices        ServiceRefresher
+	RefreshServicePolicies func() map[string]serviceproxy.ServicePolicy
+	PeerAddrs              []string
+	Services               map[string]string
+	ServicePolicies        map[string]serviceproxy.ServicePolicy
+	Identity               identity.Identity
+	Registry               *discovery.Registry
+	DHT                    *dht.Server
+	IPsecTunnel            PeerTunnel
+	Reload                 chan struct{}
+	livenessCache          *liveness.Cache
+	recordState            *endpointRecordState
 }
 
 type endpointRecordState struct {
@@ -125,6 +127,11 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Registry == nil {
 		return errors.New("registry cannot be nil")
 	}
+	if cfg.DHT != nil && cfg.DHT.RT != nil {
+		cfg.Registry.SetEndpointObserver(func(rec record.EndpointRecord) {
+			cfg.DHT.RT.UpdateKnownNode(dht.NodeInfoFromEndpointRecord(rec))
+		})
+	}
 	cfg = refreshAdvertiseAddress(log, cfg)
 	if err := transfer.ValidateIPv6Address(cfg.ListenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
@@ -145,6 +152,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			return err
 		}
 		cfg.DHT.RT.RestoreCandidates(cached, time.Now())
+		if err := cfg.DHT.AttachValuePersistence(peerStore, time.Now()); err != nil {
+			return fmt.Errorf("restore validated DHT values: %w", err)
+		}
 	}
 	if cfg.ReceiveDir == "" {
 		cfg.ReceiveDir = defaultReceiveDir(cfg.DataDir)
@@ -187,6 +197,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		}
 		if peer.NodeID == "" {
 			return fmt.Errorf("no verified signed DHT identity for endpoint")
+		}
+		if expected := vxtransport.ExpectedPeerID(dialCtx); expected != "" && peer.NodeID != expected {
+			return fmt.Errorf("signed peer identity mismatch at %s: got %s, want %s", addr, peer.NodeID, expected)
 		}
 		if !cfg.livenessCache.IsAlive(addr, time.Now()) {
 			if _, _, err := liveness.Probe(dialCtx, addr, false, syncProbeTimeout); err != nil {
@@ -242,6 +255,26 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer listener.Close()
+	udpServiceAddress, err := serviceproxy.UDPServicePort(cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("configure VX6 UDP service endpoint: %w", err)
+	}
+	udpServiceUDPAddr, err := net.ResolveUDPAddr("udp6", udpServiceAddress)
+	if err != nil {
+		return fmt.Errorf("resolve VX6 UDP service endpoint: %w", err)
+	}
+	udpServiceConn, err := net.ListenUDP("udp6", udpServiceUDPAddr)
+	if err != nil {
+		return fmt.Errorf("listen on VX6 UDP service endpoint %s: %w", udpServiceAddress, err)
+	}
+	defer udpServiceConn.Close()
+	go func() {
+		if err := serviceproxy.ServeUDPServices(ctx, udpServiceConn, func() map[string]serviceproxy.ServicePolicy {
+			return runtimeServicePolicies(cfg)
+		}, peerTunnel.AuthenticatePeer); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(log, "VX6 UDP services stopped: %v\n", err)
+		}
+	}()
 	if !cfg.HideEndpoint && cfg.AdvertiseAddr != "" {
 		probeListenAddr, err := livenessListenAddress(listener.Addr().String(), cfg.AdvertiseAddr)
 		if err != nil {
@@ -280,8 +313,21 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	go maintainIPsecPeers(ctx, log, cfg, peerTunnel)
 	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
+	serviceSessions := serviceproxy.NewSessionTracker()
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				serviceSessions.Reconcile(runtimeServicePolicies(cfg))
+			}
+		}
+	}()
 	if cfg.ControlInfoPath != "" {
-		controlServer, err := runtimectl.Start(cfg.ControlInfoPath, os.Getpid(), func() error {
+		controlServer, err := runtimectl.StartWithPeerHandlers(cfg.ControlInfoPath, os.Getpid(), func() error {
 			if cfg.Reload == nil {
 				return fmt.Errorf("reload channel is not configured")
 			}
@@ -327,6 +373,32 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				ASNResolverSource:               asnStatus.Source,
 				ASNResolverEntries:              asnStatus.Entries,
 			}
+		}, func(peer proto.NodeInfo) error {
+			if err := dht.VerifyNodeInfo(peer, time.Now()); err != nil {
+				return fmt.Errorf("reject invalid peer-use record: %w", err)
+			}
+			if cfg.DHT == nil || cfg.DHT.RT == nil || peerStore == nil {
+				return errors.New("DHT peer retention is unavailable")
+			}
+			cfg.DHT.RT.RecordUse(peer.ID, time.Now(), 0)
+			return peerStore.RecordUse(peer, time.Now())
+		}, func(peer proto.NodeInfo, friend bool) error {
+			if cfg.DHT == nil || cfg.DHT.RT == nil || peerStore == nil {
+				return errors.New("DHT peer retention is unavailable")
+			}
+			if friend {
+				if err := dht.VerifyNodeInfo(peer, time.Now()); err != nil {
+					return fmt.Errorf("reject invalid friend record: %w", err)
+				}
+				cfg.DHT.RT.AddCandidate(peer)
+			} else if peer.ID == "" {
+				return errors.New("friend removal requires NodeID")
+			}
+			cfg.DHT.RT.SetFriend(peer.ID, friend)
+			if friend {
+				return peerStore.SetFriend(peer, true, time.Now())
+			}
+			return peerStore.SetFriendByID(peer.ID, false)
 		})
 		if err != nil {
 			return err
@@ -384,7 +456,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			}
 			return fmt.Errorf("accept connection: %w", err)
 		}
-		if !peerTunnel.AcceptPeer(ctx, conn.RemoteAddr().String()) {
+		peerIdentity, authenticated := peerTunnel.AuthenticatePeer(ctx, conn.RemoteAddr().String())
+		if !authenticated {
 			_ = conn.Close()
 			continue
 		}
@@ -443,15 +516,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				}
 			case proto.KindFileTransfer:
 
-				_ = conn.SetDeadline(time.Now().Add(handshakeDeadline))
-				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
-				if err != nil {
-					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-
 				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
-				res, err := transfer.ReceiveFileWithPolicy(secureConn, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg))
+				res, err := transfer.ReceiveFileWithAuthenticatedPeer(&bufferedConn{Conn: conn, reader: reader}, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg), peerIdentity.NodeName, peerIdentity.NodeID)
 				if err != nil {
 					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
@@ -480,7 +546,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 
 				_ = conn.SetDeadline(time.Now().Add(discoveryDeadline))
 				var dr proto.DHTRequest
-				if err := json.Unmarshal(payload, &dr); err != nil {
+				if err := strictjson.Decode(payload, &dr); err != nil {
 					fmt.Fprintf(log, "dht decode error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
@@ -497,15 +563,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				}
 				defer release()
 
-				_ = conn.SetDeadline(time.Now().Add(relayHandshakeDeadline))
-				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindExtend, cfg.Identity)
-				if err != nil {
-					fmt.Fprintf(log, "extend secure handshake error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-
 				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
-				if err := onion.HandleExtend(ctx, secureConn, cfg.Identity); err != nil {
+				if err := onion.HandleExtend(ctx, &bufferedConn{Conn: conn, reader: reader}, cfg.Identity); err != nil {
 					fmt.Fprintf(log, "extend error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			case proto.KindRendezvous:
@@ -531,7 +590,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			case proto.KindServiceConn:
 
 				_ = conn.SetDeadline(time.Now().Add(serviceProxyDeadline))
-				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, runtimeServices(cfg)); err != nil {
+				if err := serviceproxy.HandleInboundWithPolicyAndTracker(&bufferedConn{Conn: conn, reader: reader}, runtimeServicePolicies(cfg), peerIdentity, serviceSessions); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			default:
@@ -718,6 +777,7 @@ func (s *endpointRecordState) Current(id identity.Identity, name, address string
 func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 	syncOnlyLogged := false
 	selfLookupDone := false
+	lastEndpointSequenceByPeer := make(map[string]uint64)
 
 	publishAndSync := func() {
 		liveCfg := runtimeConfig(cfg)
@@ -745,7 +805,7 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 		}
 
 		nodes, _ := liveCfg.Registry.Snapshot()
-		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), nodes)
+		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), nodes, lastEndpointSequenceByPeer)
 		if !selfLookupDone && liveCfg.DHT != nil && liveCfg.DHT.RT != nil && len(liveCfg.DHT.RT.Nodes()) > 0 {
 			lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			result, err := liveCfg.DHT.RecursiveFindValueDetailed(lookupCtx, dht.NodeIDKey(liveCfg.NodeID))
@@ -840,6 +900,8 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 }
 
 func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dht.PeerStore) {
+	probeMu := &sync.Mutex{}
+	go runDHTLivenessChecks(ctx, log, cfg, probeMu)
 	flush := func() {
 		if store == nil || cfg.DHT == nil || cfg.DHT.RT == nil {
 			return
@@ -856,43 +918,42 @@ func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dh
 		}
 		// Recheck only a small number of durable address hints. They remain
 		// candidates until signed identity, IKE and in-tunnel liveness succeed.
-		if rec, err := cfg.recordState.Current(cfg.Identity, cfg.Name, cfg.AdvertiseAddr); err == nil {
-			cached := cfg.DHT.RT.CandidateNodes(2)
-			for _, candidate := range cached {
-				if ctx.Err() != nil {
-					return
-				}
-				if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
-					continue
-				}
-				if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
-					continue
-				}
-				attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-				result := syncTarget(attemptCtx, log, cfg, &rec, candidate.Addr)
-				cancel()
-				if result.err == nil && result.peer != nil {
-					cfg.DHT.RT.AddNode(dht.NodeInfoFromEndpointRecord(*result.peer))
-					_ = cfg.Registry.Import([]record.EndpointRecord{*result.peer}, nil)
-				} else if result.nodeID != "" {
-					cfg.DHT.RT.NoteFailure(result.nodeID)
-				}
+		for _, candidate := range cfg.DHT.RT.CandidateNodes(2) {
+			if ctx.Err() != nil {
+				return
+			}
+			if !cfg.DHT.RT.ProbeAllowed(candidate.ID, time.Now()) {
+				continue
+			}
+			probeMu.Lock()
+			attemptCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			err := verifyAndPromoteRoutingCandidate(attemptCtx, cfg, cfg.DHT.RT, candidate)
+			cancel()
+			probeMu.Unlock()
+			if err != nil {
+				fmt.Fprintf(log, "[DHT] Candidate validation failed (%s): %v\n", candidate.ID, err)
 			}
 		}
-		selfKey := dht.NodeIDKey(cfg.NodeID)
-		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		referrals, err := cfg.DHT.RecursiveFindNode(refreshCtx, selfKey)
-		cancel()
-		if err == nil {
-			for _, referral := range referrals {
-				if dht.VerifyNodeInfo(referral, time.Now()) == nil {
-					cfg.DHT.RT.AddCandidate(referral)
-				}
+		var refreshKeys []string
+		bootstrap := cfg.DHT.RT.ActivePeerCount() == 0
+		if bootstrap {
+			refreshKeys = []string{dht.NodeIDKey(cfg.NodeID), dht.NodeNameKey(cfg.Name)}
+		} else {
+			refreshKeys = append(refreshKeys, dht.NodeIDKey(cfg.NodeID))
+			for _, target := range cfg.DHT.RT.RefreshTargets(time.Now(), dhtRefreshRoundLimit) {
+				refreshKeys = append(refreshKeys, target.Key)
 			}
 		}
-		for _, target := range cfg.DHT.RT.RefreshTargets(time.Now(), dhtRefreshRoundLimit) {
+		for _, key := range refreshKeys {
 			refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			referrals, err := cfg.DHT.RecursiveFindNode(refreshCtx, target.Key)
+			var referrals []proto.NodeInfo
+			var err error
+			if bootstrap {
+				result, lookupErr := cfg.DHT.RecursiveBootstrapFindNodeDetailed(refreshCtx, key)
+				referrals, err = result.Closest, lookupErr
+			} else {
+				referrals, err = cfg.DHT.RecursiveFindNode(refreshCtx, key)
+			}
 			cancel()
 			if err != nil {
 				continue
@@ -922,6 +983,80 @@ func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dh
 			refreshTimer.Reset(jitteredDHTRefresh())
 		}
 	}
+}
+
+func runDHTLivenessChecks(ctx context.Context, log io.Writer, cfg Config, probeMu *sync.Mutex) {
+	if cfg.DHT == nil || cfg.DHT.RT == nil {
+		return
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		peer, ok := cfg.DHT.RT.BeginLivenessProbe(time.Now())
+		if !ok {
+			continue
+		}
+		probeMu.Lock()
+		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err := verifyRoutingPeer(probeCtx, cfg, peer)
+		cancel()
+		probeMu.Unlock()
+		removed := cfg.DHT.RT.RecordLivenessResult(peer.ID, time.Now(), err == nil)
+		if err != nil {
+			fmt.Fprintf(log, "[DHT] Peer liveness check failed (%s): %v\n", peer.ID, err)
+		}
+		if removed {
+			fmt.Fprintf(log, "[DHT] Peer marked inactive after three spaced liveness failures: %s\n", peer.ID)
+		}
+	}
+}
+
+func verifyRoutingPeer(ctx context.Context, cfg Config, peer proto.NodeInfo) error {
+	if err := dht.VerifyNodeInfo(peer, time.Now()); err != nil {
+		return fmt.Errorf("signed peer identity is invalid: %w", err)
+	}
+	endpoint := record.EndpointRecord{
+		Version: peer.IdentityVersion, Sequence: peer.IdentitySequence,
+		NodeID: peer.ID, NodeName: peer.Name, Address: peer.Addr,
+		PublicKey: peer.PublicKey, IssuedAt: peer.IdentityIssuedAt,
+		ExpiresAt: peer.IdentityExpiresAt, Signature: peer.IdentitySignature,
+	}
+	if err := record.VerifyEndpointRecord(endpoint, time.Now()); err != nil {
+		return fmt.Errorf("signed peer endpoint is invalid: %w", err)
+	}
+	if _, _, err := liveness.Probe(ctx, peer.Addr, false, syncProbeTimeout); err != nil {
+		return fmt.Errorf("peer did not answer VX6 liveness probe: %w", err)
+	}
+	if cfg.IPsecTunnel == nil {
+		return errors.New("IPsec peer verifier is unavailable")
+	}
+	if err := cfg.IPsecTunnel.EnsurePeer(ctx, endpoint); err != nil {
+		return fmt.Errorf("IKE/IPsec identity check failed: %w", err)
+	}
+	protectedCtx := vxtransport.WithDialGuard(ctx, func(_ context.Context, target string) error {
+		if target != peer.Addr {
+			return fmt.Errorf("liveness context cannot dial unverified endpoint %s", target)
+		}
+		return nil
+	})
+	if err := liveness.TunnelPing(protectedCtx, cfg.TransportMode, peer.Addr, syncProbeTimeout); err != nil {
+		return fmt.Errorf("authenticated IPsec tunnel check failed: %w", err)
+	}
+	return nil
+}
+
+func verifyAndPromoteRoutingCandidate(ctx context.Context, cfg Config, rt *dht.RoutingTable, peer proto.NodeInfo) error {
+	if err := verifyRoutingPeer(ctx, cfg, peer); err != nil {
+		rt.RecordLivenessResult(peer.ID, time.Now(), false)
+		return err
+	}
+	rt.AddNode(peer)
+	return nil
 }
 
 func jitteredDHTRefresh() time.Duration {
@@ -1026,7 +1161,7 @@ func registryRecords(registry *discovery.Registry, server *dht.Server) []record.
 		nodes, _ := registry.Snapshot()
 		for _, rec := range nodes {
 			if record.VerifyEndpointRecord(rec, time.Now()) == nil {
-				byID[rec.NodeID] = rec
+				preferEndpointRecord(byID, rec)
 			}
 		}
 	}
@@ -1041,7 +1176,7 @@ func registryRecords(registry *discovery.Registry, server *dht.Server) []record.
 				PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 				ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
 			}
-			byID[rec.NodeID] = rec
+			preferEndpointRecord(byID, rec)
 		}
 	}
 	out := make([]record.EndpointRecord, 0, len(byID))
@@ -1049,6 +1184,13 @@ func registryRecords(registry *discovery.Registry, server *dht.Server) []record.
 		out = append(out, rec)
 	}
 	return out
+}
+
+func preferEndpointRecord(records map[string]record.EndpointRecord, candidate record.EndpointRecord) {
+	current, exists := records[candidate.NodeID]
+	if !exists || record.EndpointRecordNewer(candidate, current) {
+		records[candidate.NodeID] = candidate
+	}
 }
 
 func maintainIPsecPeers(ctx context.Context, log io.Writer, cfg Config, manager PeerTunnel) {
@@ -1211,6 +1353,7 @@ func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.Endpoin
 		if err != nil {
 			continue
 		}
+		srec.Protocol = record.NormalizeServiceProtocol(entry.Protocol)
 
 		srec.IsHidden = isHidden
 		srec.IsPrivate = entry.IsPrivate
@@ -1255,7 +1398,7 @@ func endpointRecordRef(ok bool, rec record.EndpointRecord) *record.EndpointRecor
 	return &out
 }
 
-func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, initialNodes []record.EndpointRecord) map[string]struct{} {
+func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, initialNodes []record.EndpointRecord, lastEndpointSequenceByPeer map[string]uint64) map[string]struct{} {
 	targets := map[string]struct{}{}
 	reachable := map[string]struct{}{}
 	for _, addr := range cfg.PeerAddrs {
@@ -1276,6 +1419,10 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.Endpoi
 		}
 		eligible := pending[:0]
 		for _, addr := range pending {
+			if rec != nil && !cfg.HideEndpoint && lastEndpointSequenceByPeer[addr] < rec.Sequence {
+				eligible = append(eligible, addr)
+				continue
+			}
 			if cfg.DHT != nil && cfg.DHT.RT != nil {
 				peer, known := cfg.DHT.RT.NodeByAddress(addr)
 				if known && !cfg.DHT.RT.ProbeAllowed(peer.ID, time.Now()) {
@@ -1299,6 +1446,9 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.Endpoi
 				continue
 			}
 			reachable[result.addr] = struct{}{}
+			if rec != nil && !cfg.HideEndpoint && rec.Sequence > 0 {
+				lastEndpointSequenceByPeer[result.addr] = rec.Sequence
+			}
 			if result.peer != nil {
 				_ = cfg.Registry.Import([]record.EndpointRecord{*result.peer}, nil)
 				seedDHTRouting(cfg.DHT, []record.EndpointRecord{*result.peer})
@@ -1448,6 +1598,8 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.Endp
 		cancel()
 		if err != nil {
 			fmt.Fprintf(log, "[SYNC] Publish to %s failed: %v\n", addr, err)
+			result.err = fmt.Errorf("publish signed endpoint update: %w", err)
+			return result
 		}
 	}
 
@@ -1592,6 +1744,22 @@ func runtimeConfig(base Config) Config {
 
 func runtimeServices(base Config) map[string]string {
 	return runtimeConfig(base).Services
+}
+
+func runtimeServicePolicies(base Config) map[string]serviceproxy.ServicePolicy {
+	if base.RefreshServicePolicies != nil {
+		if policies := base.RefreshServicePolicies(); policies != nil {
+			return policies
+		}
+	}
+	if base.ServicePolicies != nil {
+		return base.ServicePolicies
+	}
+	policies := make(map[string]serviceproxy.ServicePolicy, len(base.Services))
+	for name, target := range base.Services {
+		policies[name] = serviceproxy.ServicePolicy{Target: target, Protocol: record.ServiceProtocolTCP}
+	}
+	return policies
 }
 
 func persistKnownPeerMetadata(configPath string, records []record.EndpointRecord) {

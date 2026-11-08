@@ -23,13 +23,19 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/strictjson"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 type Server struct {
-	RT                *RoutingTable
-	dialGuard         vxtransport.DialGuard
-	Values            map[string]string // The decentralized database
+	RT               *RoutingTable
+	dialGuard        vxtransport.DialGuard
+	Values           map[string]string // The decentralized database
+	valuePersistence interface {
+		PutValue(string, string) error
+		LoadValues() (map[string]string, error)
+		DeleteValue(string) error
+	}
 	publisher         identity.Identity
 	hidden            HiddenDescriptorPrivacyConfig
 	adaptive          AdaptiveConfig
@@ -45,6 +51,49 @@ type Server struct {
 	lookupEWMA        float64
 	hiddenAnomalyEWMA float64
 	mu                sync.RWMutex
+}
+
+// AttachValuePersistence loads saved values as local cache observations. Every
+// row is revalidated and expired or unsupported values are removed before use.
+func (s *Server) AttachValuePersistence(store interface {
+	PutValue(string, string) error
+	LoadValues() (map[string]string, error)
+	DeleteValue(string) error
+}, now time.Time) error {
+	if store == nil {
+		return nil
+	}
+	rows, err := store.LoadValues()
+	if err != nil {
+		return err
+	}
+	valid := make(map[string]string, len(rows))
+	for key, raw := range rows {
+		if strings.HasPrefix(key, "hidden-desc/v1/") {
+			if err := store.DeleteValue(key); err != nil {
+				return fmt.Errorf("remove non-persistable DHT value %q: %w", key, err)
+			}
+			continue
+		}
+		value, err := validateLookupValue(key, raw, now)
+		if err != nil || !value.verified {
+			if deleteErr := store.DeleteValue(key); deleteErr != nil {
+				return fmt.Errorf("remove invalid persisted DHT value %q: %w", key, deleteErr)
+			}
+			continue
+		}
+		valid[key] = raw
+	}
+	s.mu.Lock()
+	s.valuePersistence = store
+	for key, raw := range valid {
+		s.Values[key] = raw
+		if value, err := validateLookupValue(key, raw, now); err == nil {
+			s.versions[key] = StoredValueState{Current: storedVersionFromValidated(value)}
+		}
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Server) SetDialGuard(guard vxtransport.DialGuard) {
@@ -188,7 +237,7 @@ func NodeNameKey(name string) string {
 func NodeNameHash(name string) string {
 	canonical, err := record.NormalizeNodeName(name)
 	if err != nil {
-		canonical = strings.ToUpper(name)
+		return ""
 	}
 	sum := sha256.Sum256([]byte("vx6/node-name/v1\x00" + canonical))
 	return fmt.Sprintf("%x", sum[:])
@@ -394,7 +443,7 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	resp := proto.DHTResponse{Type: req.Type}
+	resp := proto.DHTResponse{Version: proto.DHTWireVersion, Type: req.Type}
 	if stringsHasHiddenDescriptorKey(req.Target) {
 		if !s.allowHiddenDescriptorRequest(conn.RemoteAddr().String(), req.Action, time.Now()) {
 			payload, _ := json.Marshal(resp)
@@ -406,9 +455,37 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 	}
 
 	switch req.Action {
+	case "update_ip":
+		validated, err := validateLookupValue(req.Target, req.Data, time.Now())
+		if err != nil || !validated.verified {
+			if err == nil {
+				err = fmt.Errorf("endpoint update is not verified")
+			}
+			return fmt.Errorf("reject invalid signed endpoint update: %w", err)
+		}
+		var endpoint record.EndpointRecord
+		if err := strictjson.Decode([]byte(validated.raw), &endpoint); err != nil {
+			return fmt.Errorf("decode signed endpoint update: %w", err)
+		}
+		if err := record.VerifyEndpointRecord(endpoint, time.Now()); err != nil {
+			return fmt.Errorf("reject invalid signed endpoint update: %w", err)
+		}
+		validTarget := (req.Target == NodeIDKey(endpoint.NodeID) || req.Target == NodeNameKey(endpoint.NodeName))
+		if !validTarget {
+			return fmt.Errorf("endpoint update target does not match signed identity")
+		}
+		if err := s.admitStoreValue(conn.RemoteAddr().String(), req.Target, req.Data, time.Now()); err != nil {
+			return err
+		}
+		if _, _, err := s.storeValidated(req.Target, req.Data, time.Now()); err != nil {
+			return err
+		}
 	case "find_node":
 		limits := s.LookupLimits()
-		if req.Type == proto.DHTTypeLookupName {
+		if req.Type == proto.DHTTypeBootstrap {
+			byNameHash := !strings.HasPrefix(req.Target, "vx6_")
+			resp.Nodes = s.RT.ClosestNodesForBootstrap(req.Target, limits.MaxReferrals, byNameHash)
+		} else if req.Type == proto.DHTTypeLookupName {
 			resp.Nodes = s.RT.ClosestNodesByNameHash(req.Target, limits.MaxReferrals)
 		} else {
 			resp.Nodes = s.RT.ClosestNodes(strings.TrimPrefix(req.Target, "node/id/"), limits.MaxReferrals)
@@ -457,6 +534,9 @@ func (s *Server) StoreLocal(key, value string) {
 	s.Values[key] = value
 	if validated, err := validateLookupValue(key, value, time.Now()); err == nil {
 		s.versions[key] = StoredValueState{Current: storedVersionFromValidated(validated)}
+		if validated.verified && s.valuePersistence != nil && !strings.HasPrefix(key, "hidden-desc/v1/") {
+			_ = s.valuePersistence.PutValue(key, value)
+		}
 	}
 }
 
@@ -479,6 +559,17 @@ type NodeLookupResult struct {
 }
 
 func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (NodeLookupResult, error) {
+	return s.recursiveFindNodeDetailed(ctx, target, false)
+}
+
+// RecursiveBootstrapFindNodeDetailed includes recently inactive local
+// contacts as initial hints and asks responders for their bootstrap contacts.
+// All returned contacts still require independent validation before use.
+func (s *Server) RecursiveBootstrapFindNodeDetailed(ctx context.Context, target string) (NodeLookupResult, error) {
+	return s.recursiveFindNodeDetailed(ctx, target, true)
+}
+
+func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, bootstrap bool) (NodeLookupResult, error) {
 	limits := s.LookupLimits()
 	ctx, cancel := boundedLookupContext(ctx, limits.TotalTimeout)
 	defer cancel()
@@ -491,7 +582,15 @@ func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (
 			s.RT.DiscardCandidate(id)
 		}
 	}()
-	for _, node := range s.closestForTarget(target, limits.MaxConcurrent) {
+	seeds := s.closestForTarget(target, limits.MaxConcurrent)
+	if bootstrap {
+		if strings.HasPrefix(target, "node/name/") {
+			seeds = s.RT.ClosestNodesForBootstrap(strings.TrimPrefix(target, "node/name/"), limits.MaxConcurrent, true)
+		} else {
+			seeds = s.RT.ClosestNodesForBootstrap(strings.TrimPrefix(target, "node/id/"), limits.MaxConcurrent, false)
+		}
+	}
+	for _, node := range seeds {
 		verified := VerifyNodeInfo(node, time.Now()) == nil
 		if _, active := s.RT.ActiveNode(node.ID); active || verified {
 			known[node.ID] = node
@@ -506,11 +605,19 @@ func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (
 	queries := 0
 	failures := 0
 	rounds := 0
+	diversityLoaded := false
 	for round := 0; round < limits.MaxRounds && queries < limits.MaxPeerQueries; round++ {
 		rounds = round + 1
 		batchLimit := min(limits.MaxConcurrent, limits.MaxPeerQueries-queries)
 		batch := closestUnqueried(known, queriedIDs, target, batchLimit)
 		if len(batch) == 0 {
+			if !diversityLoaded {
+				diversityLoaded = true
+				addDiversityFallback(known, s.RT.DiversityContacts())
+				if len(closestUnqueried(known, queriedIDs, target, 1)) > 0 {
+					continue
+				}
+			}
 			if len(matches) > 0 {
 				if failures > 0 {
 					return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w: %d peer queries failed; name conflicts may be missing", ErrLookupIncomplete, failures)
@@ -538,7 +645,13 @@ func (s *Server) RecursiveFindNodeDetailed(ctx context.Context, target string) (
 			go func(node proto.NodeInfo) {
 				peerCtx, stop := context.WithTimeout(ctx, limits.PeerTimeout)
 				defer stop()
-				refs, err := s.QueryNode(peerCtx, node.Addr, target)
+				var refs []proto.NodeInfo
+				var err error
+				if bootstrap {
+					refs, err = s.QueryBootstrapNode(peerCtx, node.Addr, target)
+				} else {
+					refs, err = s.QueryNode(peerCtx, node.Addr, target)
+				}
 				results <- nodeQueryResult{node: node, refs: refs, err: err}
 			}(node)
 		}
@@ -933,6 +1046,11 @@ func (s *Server) storeValidated(key, value string, now time.Time) (string, bool,
 		return current, false, err
 	}
 	if changed {
+		if s.valuePersistence != nil && incomingValue.verified && !strings.HasPrefix(key, "hidden-desc/v1/") {
+			if err := s.valuePersistence.PutValue(key, chosen); err != nil {
+				return current, false, fmt.Errorf("persist validated DHT value: %w", err)
+			}
+		}
 		s.Values[key] = chosen
 	}
 	s.recordVersionLocked(key, previousValue, incomingValue, changed)
@@ -947,7 +1065,15 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	req := proto.DHTRequest{Type: proto.DHTTypeFor("store", key), Action: "store", Target: key, Data: value}
+	req := proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeFor("store", key), Action: "store", Target: key, Data: value}
+	if strings.HasPrefix(key, "node/id/") || strings.HasPrefix(key, "node/name/") {
+		if envelope, ok, err := maybeDecodeEnvelope(value); err == nil && ok {
+			var endpoint record.EndpointRecord
+			if strictjson.Decode([]byte(envelope.Value), &endpoint) == nil && record.VerifyEndpointRecord(endpoint, time.Now()) == nil {
+				req = proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeUpdateIP, Action: "update_ip", Target: key, Data: value}
+			}
+		}
+	}
 	if err := req.Validate(); err != nil {
 		return err
 	}
@@ -971,11 +1097,11 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 		return err
 	}
 	var resp proto.DHTResponse
-	if err := json.Unmarshal(resPayload, &resp); err != nil {
+	if err := strictjson.Decode(resPayload, &resp); err != nil {
 		return err
 	}
-	if resp.Type != req.Type {
-		return fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	if resp.Version != req.Version || resp.Type != req.Type {
+		return fmt.Errorf("DHT response version/type (%d, %q) does not match request (%d, %q)", resp.Version, resp.Type, req.Version, req.Type)
 	}
 	return nil
 }
@@ -1011,6 +1137,7 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 	collector := newLookupCollector(key, time.Now())
 	queried := 0
 	failures := 0
+	diversityLoaded := false
 
 	s.mu.RLock()
 	if local, ok := s.Values[key]; ok && local != "" {
@@ -1022,6 +1149,19 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 		batchLimit := min(limits.MaxConcurrent, limits.MaxPeerQueries-queried)
 		batch := closestUnqueried(known, queriedIDs, key, batchLimit)
 		if len(batch) == 0 {
+			if !diversityLoaded {
+				diversityLoaded = true
+				for _, peer := range s.RT.DiversityContacts() {
+					if _, exists := known[peer.ID]; exists {
+						continue
+					}
+					known[peer.ID] = peer
+					branchByID[peer.ID] = len(branchByID) + 1
+				}
+				if len(closestUnqueried(known, queriedIDs, key, 1)) > 0 {
+					continue
+				}
+			}
 			break
 		}
 		type queryResult struct {
@@ -1109,14 +1249,30 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 	return res, nil
 }
 
+func addDiversityFallback(known map[string]proto.NodeInfo, contacts []proto.NodeInfo) {
+	for _, peer := range contacts {
+		if _, exists := known[peer.ID]; !exists {
+			known[peer.ID] = peer
+		}
+	}
+}
+
 func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
+	return s.queryNode(ctx, addr, targetID, false)
+}
+
+func (s *Server) QueryBootstrapNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
+	return s.queryNode(ctx, addr, targetID, true)
+}
+
+func (s *Server) queryNode(ctx context.Context, addr, targetID string, bootstrap bool) ([]proto.NodeInfo, error) {
 	limits := s.LookupLimits()
 	var lastErr error
 	for attempt := 0; attempt <= limits.MaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		nodes, err := s.queryNodeOnce(ctx, addr, targetID, limits)
+		nodes, err := s.queryNodeOnce(ctx, addr, targetID, limits, bootstrap)
 		if err == nil {
 			return nodes, nil
 		}
@@ -1125,7 +1281,7 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 	return nil, lastErr
 }
 
-func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limits LookupLimits) ([]proto.NodeInfo, error) {
+func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limits LookupLimits, bootstrap bool) ([]proto.NodeInfo, error) {
 	ctx = s.guardedContext(ctx)
 	dialCtx, cancel := context.WithTimeout(ctx, limits.PeerTimeout)
 	defer cancel()
@@ -1140,7 +1296,15 @@ func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limit
 	setLookupConnDeadline(ctx, conn, limits.PeerTimeout)
 
 	typ, target := nodeLookupTarget(targetID)
-	req := proto.DHTRequest{Type: typ, Action: "find_node", Target: target}
+	if bootstrap {
+		typ = proto.DHTTypeBootstrap
+		if strings.HasPrefix(targetID, "node/name/") {
+			target = strings.TrimPrefix(targetID, "node/name/")
+		} else {
+			target = strings.TrimPrefix(targetID, "node/id/")
+		}
+	}
+	req := proto.DHTRequest{Version: proto.DHTWireVersion, Type: typ, Action: "find_node", Target: target}
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
@@ -1162,11 +1326,11 @@ func (s *Server) queryNodeOnce(ctx context.Context, addr, targetID string, limit
 		return nil, err
 	}
 	var resp proto.DHTResponse
-	if err := json.Unmarshal(resPayload, &resp); err != nil {
+	if err := strictjson.Decode(resPayload, &resp); err != nil {
 		return nil, err
 	}
-	if resp.Type != req.Type {
-		return nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	if resp.Version != req.Version || resp.Type != req.Type {
+		return nil, fmt.Errorf("DHT response version/type (%d, %q) does not match request (%d, %q)", resp.Version, resp.Type, req.Version, req.Type)
 	}
 	if len(resp.Nodes) > limits.MaxReferrals {
 		return nil, fmt.Errorf("DHT response exceeds %d referrals", limits.MaxReferrals)
@@ -1214,7 +1378,7 @@ func (s *Server) queryValueOnce(ctx context.Context, addr, key string, limits Lo
 	setLookupConnDeadline(ctx, conn, limits.PeerTimeout)
 
 	typ, target := lookupRequestTarget(key)
-	req := proto.DHTRequest{Type: typ, Action: "find_value", Target: target}
+	req := proto.DHTRequest{Version: proto.DHTWireVersion, Type: typ, Action: "find_value", Target: target}
 	if err := req.Validate(); err != nil {
 		return "", nil, err
 	}
@@ -1236,11 +1400,11 @@ func (s *Server) queryValueOnce(ctx context.Context, addr, key string, limits Lo
 		return "", nil, err
 	}
 	var resp proto.DHTResponse
-	if err := json.Unmarshal(resPayload, &resp); err != nil {
+	if err := strictjson.Decode(resPayload, &resp); err != nil {
 		return "", nil, err
 	}
-	if resp.Type != req.Type {
-		return "", nil, fmt.Errorf("DHT response type %q does not match request type %q", resp.Type, req.Type)
+	if resp.Version != req.Version || resp.Type != req.Type {
+		return "", nil, fmt.Errorf("DHT response version/type (%d, %q) does not match request (%d, %q)", resp.Version, resp.Type, req.Version, req.Type)
 	}
 	if len(resp.Nodes) > limits.MaxReferrals {
 		return "", nil, fmt.Errorf("DHT response exceeds %d referrals", limits.MaxReferrals)
@@ -1356,121 +1520,24 @@ func mergeCandidateNodes(existing, incoming []proto.NodeInfo, visited map[string
 }
 
 func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo {
-	if len(nodes) <= limit {
-		return append([]proto.NodeInfo(nil), nodes...)
+	if limit <= 0 {
+		return nil
 	}
+	if len(nodes) > limit {
+		nodes = nodes[:limit]
+	}
+	return append([]proto.NodeInfo(nil), nodes...)
+}
 
-	out := make([]proto.NodeInfo, 0, limit)
-	remaining := make([]proto.NodeInfo, 0, len(nodes))
-	seenASNs := map[string]int{}
-	seenProviders := map[string]struct{}{}
-	seenNetworks := map[string]struct{}{}
-	seenPrefixes := map[string]int{}
-	selected := map[string]struct{}{}
-
-	appendNode := func(node proto.NodeInfo) bool {
-		if _, ok := selected[node.ID]; ok {
-			return false
-		}
-		selected[node.ID] = struct{}{}
-		out = append(out, node)
-		if asn := (sourceObservation{addr: node.Addr}).asnKey(); asn != "" {
-			seenASNs[asn]++
-		}
-		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
-			seenProviders[provider] = struct{}{}
-		}
-		if network := (sourceObservation{addr: node.Addr}).networkKey(); network != "" {
-			seenNetworks[network] = struct{}{}
-		}
-		if prefix := ipv6Prefix48(node.Addr); prefix != "" {
-			seenPrefixes[prefix]++
-		}
-		return len(out) == limit
+func peerDiversityKeys(addr string) []string {
+	keys := make([]string, 0, 2)
+	if asn, ok := ResolveASNForAddr(addr); ok {
+		keys = append(keys, "asn:"+asn)
 	}
-
-	for _, node := range nodes {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		prefix := ipv6Prefix48(node.Addr)
-		if (prefix != "" && seenPrefixes[prefix] >= maxPrefixPeersPerBucket) ||
-			(asn != "" && seenASNs[asn] >= maxASNPeersPerBucket) {
-			remaining = append(remaining, node)
-			continue
-		}
-		if asn == "" {
-			remaining = append(remaining, node)
-			continue
-		}
-		if seenASNs[asn] > 0 {
-			remaining = append(remaining, node)
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
+	if prefix := ipv6Prefix48(addr); prefix != "" {
+		keys = append(keys, "prefix:"+prefix)
 	}
-
-	secondPass := remaining
-	remaining = remaining[:0]
-	for _, node := range secondPass {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
-			remaining = append(remaining, node)
-			continue
-		}
-		provider := (sourceObservation{addr: node.Addr}).providerKey()
-		if provider == "" {
-			remaining = append(remaining, node)
-			continue
-		}
-		if _, ok := seenProviders[provider]; ok {
-			remaining = append(remaining, node)
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
-	}
-
-	thirdPass := remaining
-	remaining = remaining[:0]
-	for _, node := range thirdPass {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
-			remaining = append(remaining, node)
-			continue
-		}
-		network := (sourceObservation{addr: node.Addr}).networkKey()
-		if network == "" {
-			remaining = append(remaining, node)
-			continue
-		}
-		if _, ok := seenNetworks[network]; ok {
-			remaining = append(remaining, node)
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
-	}
-
-	for _, node := range remaining {
-		asn := (sourceObservation{addr: node.Addr}).asnKey()
-		if asn != "" && seenASNs[asn] >= maxASNPeersPerBucket {
-			continue
-		}
-		if appendNode(node) {
-			return out
-		}
-	}
-	if len(out) < limit {
-		for _, node := range nodes {
-			if appendNode(node) {
-				break
-			}
-		}
-	}
-	return out
+	return keys
 }
 
 func ipv6Prefix48(address string) string {

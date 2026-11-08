@@ -163,12 +163,12 @@ func TestHandleDHTReturnsAtMostFourClosestReferrals(t *testing.T) {
 		if json.Unmarshal(payload, &response) != nil {
 			return
 		}
-		_ = server.HandleDHT(context.Background(), peer, proto.DHTRequest{Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
+		_ = server.HandleDHT(context.Background(), peer, proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
 	}()
 	if err := proto.WriteHeader(client, proto.KindDHT); err != nil {
 		t.Fatal(err)
 	}
-	payload, _ := json.Marshal(proto.DHTRequest{Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
+	payload, _ := json.Marshal(proto.DHTRequest{Version: proto.DHTWireVersion, Type: proto.DHTTypeLookupName, Action: "find_node", Target: target})
 	if err := proto.WriteLengthPrefixed(client, payload); err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +219,72 @@ func TestNodeLookupFindsSignedTargetAndDoesNotPersistTransientReferral(t *testin
 		if peer.Node.ID == targetInfo.ID {
 			t.Fatal("lookup-only referral was persisted in local peer state")
 		}
+	}
+}
+
+func TestOnlyBootstrapFindNodeReturnsInactiveContacts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewEndpointRecordV2(id, "OFFLINE", "[2001:db8::9]:4242", 1, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerInfo := NodeInfoFromEndpointRecord(rec)
+	server := newTestServer("server")
+	server.RT.AddNode(peerInfo)
+	start := time.Now()
+	for _, delay := range []time.Duration{0, 5 * time.Minute, 10 * time.Minute} {
+		server.RT.RecordLivenessResult(peerInfo.ID, start.Add(delay), false)
+	}
+	addr := startDHTListener(t, ctx, server)
+	client := newTestServer("client")
+	target := NodeNameKey("OFFLINE")
+	ordinary, err := client.QueryNode(ctx, addr, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordinary) != 0 {
+		t.Fatalf("ordinary lookup returned inactive peers: %+v", ordinary)
+	}
+	bootstrap, err := client.QueryBootstrapNode(ctx, addr, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bootstrap) != 1 || bootstrap[0].ID != peerInfo.ID {
+		t.Fatalf("bootstrap lookup returned %+v, want inactive address hint %s", bootstrap, peerInfo.ID)
+	}
+}
+
+func TestRecursiveBootstrapLookupCanRevalidateInactiveSeed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServerWithIdentity(id)
+	addr := startDHTListener(t, ctx, server)
+	rec, err := record.NewEndpointRecordV2(id, "OLD-SEED", addr, 1, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := NodeInfoFromEndpointRecord(rec)
+	client := newTestServer("client")
+	client.RT.AddNode(seed)
+	start := time.Now()
+	for _, delay := range []time.Duration{0, 5 * time.Minute, 10 * time.Minute} {
+		client.RT.RecordLivenessResult(seed.ID, start.Add(delay), false)
+	}
+	result, err := client.RecursiveBootstrapFindNodeDetailed(ctx, NodeNameKey("OLD-SEED"))
+	if err != nil {
+		t.Fatalf("bootstrap lookup through inactive seed: %v", err)
+	}
+	if result.Outcome != LookupFound || len(result.Matches) != 1 || result.Matches[0].ID != seed.ID {
+		t.Fatalf("bootstrap lookup result = %+v, want signed seed identity", result)
 	}
 }
 
@@ -728,7 +794,7 @@ func TestLookupCollectorRequiresBranchDiversityForNonLoopbackSources(t *testing.
 	}
 }
 
-func TestLookupCollectorRequiresProviderDiversityForNonLoopbackSources(t *testing.T) {
+func TestLookupCollectorDoesNotRequireProviderDiversityForNonLoopbackSources(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -742,8 +808,8 @@ func TestLookupCollectorRequiresProviderDiversityForNonLoopbackSources(t *testin
 	collector := newLookupCollector(NodeNameKey("owner"), now)
 	collector.Observe(sourceObservation{nodeID: "a", addr: "198.51.10.1:4242", trust: 1, branch: 1}, payload)
 	collector.Observe(sourceObservation{nodeID: "b", addr: "198.51.20.1:4242", trust: 1, branch: 2}, payload)
-	if _, err := collector.Resolve(2); err == nil || !errors.Is(err, ErrInsufficientConfirmation) {
-		t.Fatalf("expected insufficient confirmation without provider diversity, got %v", err)
+	if _, err := collector.Resolve(2); err != nil {
+		t.Fatalf("same-provider peers on independent lookup branches should confirm, got %v", err)
 	}
 
 	collector = newLookupCollector(NodeNameKey("owner"), now)
@@ -960,7 +1026,7 @@ func TestRecursiveFindValueDetailedReportsConflictCandidates(t *testing.T) {
 	}
 }
 
-func TestSelectReplicationNodesPrefersDistinctProvidersAndNetworks(t *testing.T) {
+func TestSelectReplicationNodesKeepsXORCandidateOrder(t *testing.T) {
 	t.Parallel()
 
 	nodes := []proto.NodeInfo{
@@ -977,22 +1043,10 @@ func TestSelectReplicationNodesPrefersDistinctProvidersAndNetworks(t *testing.T)
 		t.Fatalf("expected 4 selected nodes, got %d", len(selected))
 	}
 
-	seenProviders := map[string]struct{}{}
-	seenNetworks := map[string]struct{}{}
-	for _, node := range selected {
-		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
-			seenProviders[provider] = struct{}{}
+	for i := range selected {
+		if selected[i].ID != nodes[i].ID {
+			t.Fatalf("candidate %d reordered: got %q want %q", i, selected[i].ID, nodes[i].ID)
 		}
-		network := sourceObservation{addr: node.Addr}.networkKey()
-		if network != "" {
-			seenNetworks[network] = struct{}{}
-		}
-	}
-	if len(seenProviders) < 3 {
-		t.Fatalf("expected provider spread, got %d providers from %+v", len(seenProviders), selected)
-	}
-	if len(seenNetworks) < 4 {
-		t.Fatalf("expected diverse replicas, got %d networks from %+v", len(seenNetworks), selected)
 	}
 }
 
@@ -1182,9 +1236,13 @@ func TestHiddenDescriptorLookupRateLimit(t *testing.T) {
 }
 
 func startDHTListener(t *testing.T, ctx context.Context, srv *Server) string {
+	return startDHTListenerOn(t, ctx, srv, "tcp6", "[::1]:0")
+}
+
+func startDHTListenerOn(t *testing.T, ctx context.Context, srv *Server, network, address string) string {
 	t.Helper()
 
-	ln, err := net.Listen("tcp6", "[::1]:0")
+	ln, err := net.Listen(network, address)
 	if err != nil {
 		t.Fatalf("listen dht: %v", err)
 	}

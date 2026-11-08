@@ -17,6 +17,7 @@ import (
 	"github.com/vx6/vx6/internal/ipsec"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/serviceproxy"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -135,8 +136,13 @@ func run() error {
 		return err
 	}
 	services := make(map[string]string, len(cfg.Services))
+	servicePolicies := make(map[string]serviceproxy.ServicePolicy, len(cfg.Services))
 	for name, service := range cfg.Services {
 		services[name] = service.Target
+		servicePolicies[name] = serviceproxy.ServicePolicy{
+			Target: service.Target, Protocol: service.Protocol, Private: service.IsPrivate,
+			AllowedNodeIDs: append([]string(nil), service.AllowedNodeIDs...),
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -147,6 +153,20 @@ func run() error {
 		RelayResourcePercent: cfg.Node.RelayResourcePercent, DataDir: cfg.Node.DataDir,
 		ReceiveDir: cfg.Node.DownloadDir, FileReceiveMode: cfg.Node.FileReceiveMode,
 		AllowedFileSenders: cfg.Node.AllowedFileSenders, Identity: id,
-		Registry: registry, Services: services,
+		Registry: registry, Services: services, ServicePolicies: servicePolicies,
+		RefreshServicePolicies: func() map[string]serviceproxy.ServicePolicy {
+			fresh, err := store.Load()
+			if err != nil {
+				return nil
+			}
+			policies := make(map[string]serviceproxy.ServicePolicy, len(fresh.Services))
+			for name, service := range fresh.Services {
+				policies[name] = serviceproxy.ServicePolicy{
+					Target: service.Target, Protocol: service.Protocol, Private: service.IsPrivate,
+					AllowedNodeIDs: append([]string(nil), service.AllowedNodeIDs...),
+				}
+			}
+			return policies
+		},
 	})
 }

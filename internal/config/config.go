@@ -6,12 +6,15 @@ package config
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,8 +64,8 @@ type NodeConfig struct {
 	AllowedFileSenders   []string         `json:"allowed_file_senders,omitempty"`
 }
 
-// PinnedPeer is an explicit local trust decision binding a display name to a
-// cryptographic identity. Endpoint addresses remain in expiring signed records.
+// PinnedPeer is a local trust decision for one NodeID/public key. NodeName is
+// display metadata only and is not a network-wide name reservation.
 type PinnedPeer struct {
 	NodeID    string `json:"node_id"`
 	NodeName  string `json:"node_name"`
@@ -87,8 +90,10 @@ type PeerEntry struct {
 
 type ServiceEntry struct {
 	Target             string   `json:"target"`
+	Protocol           string   `json:"protocol,omitempty"`
 	IsHidden           bool     `json:"is_hidden"`
 	IsPrivate          bool     `json:"is_private,omitempty"`
+	AllowedNodeIDs     []string `json:"allowed_node_ids,omitempty"`
 	Alias              string   `json:"alias,omitempty"`
 	HiddenLookupSecret string   `json:"hidden_lookup_secret,omitempty"`
 	HiddenProfile      string   `json:"hidden_profile,omitempty"`
@@ -165,6 +170,9 @@ func (s *Store) Load() (File, error) {
 	if err := validatePinnedPeers(cfg.Node.PinnedPeers); err != nil {
 		return File{}, fmt.Errorf("validate pinned peers: %w", err)
 	}
+	if err := validateServicePolicies(cfg.Services); err != nil {
+		return File{}, err
+	}
 	normalize(&cfg)
 	return cfg, nil
 }
@@ -172,6 +180,9 @@ func (s *Store) Load() (File, error) {
 func (s *Store) Save(cfg File) error {
 	if err := validatePinnedPeers(cfg.Node.PinnedPeers); err != nil {
 		return fmt.Errorf("validate pinned peers: %w", err)
+	}
+	if err := validateServicePolicies(cfg.Services); err != nil {
+		return err
 	}
 	normalize(&cfg)
 
@@ -317,15 +328,18 @@ func (s *Store) PinPeer(rec record.EndpointRecord, now time.Time) error {
 			if pin.PublicKey != key {
 				return fmt.Errorf("peer ID %s is already pinned to a different public key", rec.NodeID)
 			}
-			if pin.NodeName != rec.NodeName {
-				return fmt.Errorf("peer ID %s is pinned under name %s; refusing silent rename", rec.NodeID, pin.NodeName)
+			cfg.Node.PinnedPeers = append([]PinnedPeer(nil), cfg.Node.PinnedPeers...)
+			for i := range cfg.Node.PinnedPeers {
+				if cfg.Node.PinnedPeers[i].NodeID == rec.NodeID {
+					cfg.Node.PinnedPeers[i].NodeName = rec.NodeName
+				}
 			}
 			found = true
 			continue
 		}
-		if pin.NodeName == rec.NodeName {
-			return fmt.Errorf("name %s is already pinned to identity %s", rec.NodeName, pin.NodeID)
-		}
+		// Local identity pins are keyed by NodeID. Different identities may
+		// legitimately advertise the same display name; the pin is not a global
+		// name reservation and must not hide such conflicts.
 	}
 	if !found {
 		cfg.Node.PinnedPeers = append(cfg.Node.PinnedPeers, PinnedPeer{NodeID: rec.NodeID, NodeName: rec.NodeName, PublicKey: key})
@@ -502,6 +516,8 @@ func normalize(cfg *File) {
 		cfg.Services = map[string]ServiceEntry{}
 	}
 	for name, svc := range cfg.Services {
+		svc.Protocol = record.NormalizeServiceProtocol(svc.Protocol)
+		svc.AllowedNodeIDs = uniqueSortedStrings(svc.AllowedNodeIDs)
 		if svc.IntroNodes == nil {
 			svc.IntroNodes = []string{}
 		}
@@ -534,9 +550,36 @@ func normalize(cfg *File) {
 	}
 }
 
+func validateServicePolicies(services map[string]ServiceEntry) error {
+	for name, service := range services {
+		if record.NormalizeServiceProtocol(service.Protocol) == "" {
+			return fmt.Errorf("service %q: protocol must be tcp or udp", name)
+		}
+		host, portText, err := net.SplitHostPort(service.Target)
+		port, portErr := strconv.Atoi(portText)
+		if err != nil || host == "" || portErr != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("service %q: target must be host:port", name)
+		}
+		if service.IsHidden && service.Protocol == record.ServiceProtocolUDP {
+			return fmt.Errorf("service %q: hidden services currently require TCP", name)
+		}
+		if service.IsHidden && len(service.AllowedNodeIDs) > 0 {
+			return fmt.Errorf("service %q: hidden-service authorization is not changed by the standard service policy", name)
+		}
+		for _, nodeID := range service.AllowedNodeIDs {
+			if len(nodeID) != 68 || !strings.HasPrefix(nodeID, "vx6_") || strings.ToLower(nodeID) != nodeID {
+				return fmt.Errorf("service %q: invalid allowed NodeID %q", name, nodeID)
+			}
+			if _, err := hex.DecodeString(strings.TrimPrefix(nodeID, "vx6_")); err != nil {
+				return fmt.Errorf("service %q: invalid allowed NodeID %q", name, nodeID)
+			}
+		}
+	}
+	return nil
+}
+
 func validatePinnedPeers(pins []PinnedPeer) error {
 	seenIDs := make(map[string]struct{}, len(pins))
-	seenNames := make(map[string]struct{}, len(pins))
 	for _, pin := range pins {
 		if err := record.ValidateCanonicalNodeName(pin.NodeName); err != nil {
 			return fmt.Errorf("invalid pinned peer name: %w", err)
@@ -551,11 +594,7 @@ func validatePinnedPeers(pins []PinnedPeer) error {
 		if _, ok := seenIDs[pin.NodeID]; ok {
 			return fmt.Errorf("duplicate pinned peer NodeID %s", pin.NodeID)
 		}
-		if _, ok := seenNames[pin.NodeName]; ok {
-			return fmt.Errorf("duplicate pinned peer name %s", pin.NodeName)
-		}
 		seenIDs[pin.NodeID] = struct{}{}
-		seenNames[pin.NodeName] = struct{}{}
 	}
 	return nil
 }

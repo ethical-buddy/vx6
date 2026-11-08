@@ -41,9 +41,10 @@ type ipcRequest struct {
 }
 
 type ipcResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-	Allow bool   `json:"allow,omitempty"`
+	OK    bool                  `json:"ok"`
+	Error string                `json:"error,omitempty"`
+	Allow bool                  `json:"allow,omitempty"`
+	Peer  record.EndpointRecord `json:"peer,omitempty"`
 }
 
 // Client calls the narrowly scoped local IPsec service. It intentionally has
@@ -87,8 +88,16 @@ func (c *Client) RevokePeer(ctx context.Context, peer record.EndpointRecord) err
 }
 
 func (c *Client) AcceptPeer(ctx context.Context, remote string) bool {
-	resp, err := c.call(ctx, ipcRequest{Action: "accept", Remote: remote})
-	return err == nil && resp.Allow
+	_, ok := c.AuthenticatePeer(ctx, remote)
+	return ok
+}
+
+func (c *Client) AuthenticatePeer(ctx context.Context, remote string) (record.EndpointRecord, bool) {
+	resp, err := c.call(ctx, ipcRequest{Action: "authenticate", Remote: remote})
+	if err != nil || !resp.Allow || record.VerifyEndpointRecord(resp.Peer, time.Now()) != nil {
+		return record.EndpointRecord{}, false
+	}
+	return resp.Peer, true
 }
 
 func (c *Client) RegisterProbePort(ctx context.Context, port string) error {
@@ -291,6 +300,11 @@ func serveIPCConn(ctx context.Context, conn net.Conn, allowed map[uint32]struct{
 		writeIPCError(conn, "cannot enforce VX6 firewall policy")
 		return
 	}
+	udpServicePort := incrementUDPServicePort(localPort(req.LocalAddress))
+	if udpServicePort == "" || firewall.RegisterPort(ctx, udpServicePort) != nil {
+		writeIPCError(conn, "cannot enforce VX6 UDP service firewall policy")
+		return
+	}
 	var response ipcResponse
 	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -307,8 +321,8 @@ func serveIPCConn(ctx context.Context, conn net.Conn, allowed map[uint32]struct{
 		err = manager.EnsurePeer(requestCtx, req.Peer)
 	case "revoke":
 		err = manager.RevokePeer(requestCtx, req.TargetPeer)
-	case "accept":
-		response.Allow = manager.AcceptPeer(requestCtx, req.Remote)
+	case "authenticate":
+		response.Peer, response.Allow = manager.AuthenticatePeer(requestCtx, req.Remote)
 	default:
 		err = errors.New("unsupported operation")
 	}
@@ -327,6 +341,14 @@ func localPort(address string) string {
 		return ""
 	}
 	return port
+}
+
+func incrementUDPServicePort(port string) string {
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || value == 0 || value >= 65534 {
+		return ""
+	}
+	return strconv.FormatUint(value+2, 10)
 }
 
 func writeIPCError(conn net.Conn, message string) {

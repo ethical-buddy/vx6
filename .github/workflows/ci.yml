@@ -1,0 +1,108 @@
+name: VX6 CI
+
+on:
+  pull_request:
+    branches: [main, release/stable]
+  push:
+    branches: [main, release/stable]
+  workflow_dispatch:
+    inputs:
+      run_ipsec_e2e:
+        description: Run the privileged two-peer IKE/ESP container test
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vx6-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux Go checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxext-dev libxkbcommon-dev libgl1-mesa-dev libxxf86vm-dev
+      - name: Check formatting
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            changed=$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- '*.go')
+          else
+            changed=$(git diff-tree --no-commit-id --name-only -r HEAD -- '*.go')
+          fi
+          if [[ -n "$changed" ]]; then
+            unformatted=$(printf '%s\n' "$changed" | xargs -r gofmt -l)
+            test -z "$unformatted"
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -count=1
+      - name: Race test DHT and node lifecycle
+        run: go test -race ./internal/dht ./internal/node -count=1
+      - name: Build all packages
+        run: go build ./...
+
+  dht-mesh:
+    name: DHT IPv6 Docker mesh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run isolated 3/5/10-peer DHT mesh
+        env:
+          DHT_REPORT_PATH: ${{ runner.temp }}/dht-docker-report.md
+        run: bash tests/dht-validation/run-docker.sh
+      - name: Upload DHT test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dht-docker-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/dht-docker-report.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+  ipsec-e2e:
+    name: Optional privileged IKE/ESP E2E
+    if: github.event_name == 'workflow_dispatch' && inputs.run_ipsec_e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install capture utilities
+        run: sudo apt-get update && sudo apt-get install -y tcpdump binutils
+      - name: Run isolated two-peer IKE/ESP capture test
+        env:
+          VX6_E2E_RESULTS_DIR: ${{ runner.temp }}/ipsec-e2e-results
+        run: bash tests/ipsec-e2e/run.sh
+      - name: Upload IKE/ESP evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipsec-e2e-${{ github.run_id }}
+          path: ${{ runner.temp }}/ipsec-e2e-results
+          if-no-files-found: ignore
+          retention-days: 30

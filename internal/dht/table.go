@@ -11,48 +11,68 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/proto"
+	"github.com/vx6/vx6/internal/record"
 )
 
 const K = 20
 
 const (
-	replacementCacheSize    = 10
-	maxPendingCandidates    = 512
-	maxPendingPerBucket     = 10
-	staleFailureThreshold   = 3
-	bucketRefillThreshold   = 15
-	bucketRefreshInterval   = 10 * time.Minute
-	peerAddressHintTTL      = 7 * 24 * time.Hour
-	peerCacheHotLimit       = 512
-	maxPrefixPeersPerBucket = 2
-	maxASNPeersPerBucket    = 4
+	maxPendingCandidates  = 512
+	staleFailureThreshold = 3
+	livenessProbeInterval = 5 * time.Minute
+	peerProbationPeriod   = 2 * time.Hour
+	bucketRefillThreshold = 15
+	bucketRefreshInterval = 5 * time.Minute
+	peerAddressHintTTL    = 30 * 24 * time.Hour
+	peerCacheHotLimit     = 512
+	minimumPeerWarmStart  = 50
 )
 
 type bucketEntry struct {
-	Node         proto.NodeInfo `json:"node"`
-	Transient    bool           `json:"-"`
-	FailCount    uint8          `json:"fail_count,omitempty"`
-	SuccessCount uint32         `json:"success_count,omitempty"`
-	LastSeen     time.Time      `json:"last_seen,omitempty"`
-	LastSuccess  time.Time      `json:"last_success,omitempty"`
-	LastUsed     time.Time      `json:"last_used,omitempty"`
-	LastFailure  time.Time      `json:"last_failure,omitempty"`
-	NextProbeAt  time.Time      `json:"next_probe_at,omitempty"`
-	RTTMicros    uint32         `json:"rtt_micros,omitempty"`
-	Pinned       bool           `json:"pinned,omitempty"`
+	Node             proto.NodeInfo `json:"node"`
+	Transient        bool           `json:"-"`
+	FailCount        uint8          `json:"fail_count,omitempty"`
+	SuccessCount     uint32         `json:"success_count,omitempty"`
+	LastSeen         time.Time      `json:"last_seen,omitempty"`
+	FirstSeen        time.Time      `json:"first_seen,omitempty"`
+	LastSuccess      time.Time      `json:"last_success,omitempty"`
+	LastUsed         time.Time      `json:"last_used,omitempty"`
+	LastFailure      time.Time      `json:"last_failure,omitempty"`
+	LastProbe        time.Time      `json:"last_probe,omitempty"`
+	LastProbeFailure time.Time      `json:"last_probe_failure,omitempty"`
+	OfflineSince     time.Time      `json:"offline_since,omitempty"`
+	ProbeMisses      uint8          `json:"probe_misses,omitempty"`
+	ProbationUntil   time.Time      `json:"probation_until,omitempty"`
+	NextProbeAt      time.Time      `json:"next_probe_at,omitempty"`
+	RTTMicros        uint32         `json:"rtt_micros,omitempty"`
+	Pinned           bool           `json:"pinned,omitempty"`
+	Friend           bool           `json:"friend,omitempty"`
+	UseCount         uint32         `json:"use_count,omitempty"`
+	ClosestIDRank    uint16         `json:"closest_id_rank,omitempty"`
+	ClosestNameRank  uint16         `json:"closest_name_rank,omitempty"`
 }
 
 type PeerObservation struct {
-	Node         proto.NodeInfo
-	FailCount    uint8
-	SuccessCount uint32
-	LastSeen     time.Time
-	LastSuccess  time.Time
-	LastUsed     time.Time
-	LastFailure  time.Time
-	NextProbeAt  time.Time
-	RTTMicros    uint32
-	Pinned       bool
+	Node             proto.NodeInfo
+	FailCount        uint8
+	SuccessCount     uint32
+	LastSeen         time.Time
+	FirstSeen        time.Time
+	LastSuccess      time.Time
+	LastUsed         time.Time
+	LastFailure      time.Time
+	LastProbe        time.Time
+	LastProbeFailure time.Time
+	OfflineSince     time.Time
+	ProbeMisses      uint8
+	ProbationUntil   time.Time
+	NextProbeAt      time.Time
+	RTTMicros        uint32
+	Pinned           bool
+	Friend           bool
+	UseCount         uint32
+	ClosestIDRank    uint16
+	ClosestNameRank  uint16
 }
 
 type RefreshTarget struct {
@@ -70,8 +90,6 @@ type RoutingTable struct {
 	// verified peers are actually learned.
 	Buckets         [256][]*bucketEntry
 	NameBuckets     [256][]*bucketEntry
-	Spare           [256][]*bucketEntry
-	NameSpare       [256][]*bucketEntry
 	Pending         [256][]*bucketEntry
 	peerByID        map[string]*bucketEntry
 	offline         map[string]*bucketEntry
@@ -90,7 +108,6 @@ func (rt *RoutingTable) SetSelfNameHash(hash string) {
 	defer rt.mu.Unlock()
 	rt.SelfNameHash = hash
 	rt.NameBuckets = [256][]*bucketEntry{}
-	rt.NameSpare = [256][]*bucketEntry{}
 	entries := make([]*bucketEntry, 0, len(rt.peerByID))
 	for _, entry := range rt.peerByID {
 		entries = append(entries, entry)
@@ -98,7 +115,7 @@ func (rt *RoutingTable) SetSelfNameHash(hash string) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Node.ID < entries[j].Node.ID })
 	for _, entry := range entries {
 		if rt.containsEntry(rt.Buckets, entry.Node.ID) {
-			rt.insertIndexLocked(rt.NameBuckets[:], rt.NameSpare[:], entry, rt.nameBucketIndex(entry.Node))
+			rt.insertIndexLocked(rt.NameBuckets[:], entry, rt.nameBucketIndex(entry.Node))
 		}
 	}
 }
@@ -114,25 +131,74 @@ func (rt *RoutingTable) AddNode(node proto.NodeInfo) {
 	defer rt.mu.Unlock()
 	entry := rt.peerByID[node.ID]
 	if entry == nil {
-		entry = &bucketEntry{Node: node}
+		entry = &bucketEntry{Node: node, ProbationUntil: now.Add(peerProbationPeriod)}
 		rt.peerByID[node.ID] = entry
 	} else {
+		if nodeNameHash(entry.Node) != nodeNameHash(node) {
+			rt.removeFromIndexLocked(rt.NameBuckets[:], node.ID)
+		}
 		entry.Node = node
+		if entry.ProbationUntil.IsZero() && entry.SuccessCount == 0 && !entry.Pinned {
+			entry.ProbationUntil = now.Add(peerProbationPeriod)
+		}
 	}
 	entry.Transient = false
 	delete(rt.offline, node.ID)
 	entry.FailCount = 0
 	entry.NextProbeAt = time.Time{}
 	entry.LastSeen = now
+	if entry.FirstSeen.IsZero() {
+		entry.FirstSeen = now
+	}
 	entry.LastSuccess = now
-	entry.LastUsed = now
+	entry.LastProbe = now
+	entry.NextProbeAt = now.Add(initialProbeDelay(node.ID))
+	entry.ProbeMisses = 0
+	entry.LastProbeFailure = time.Time{}
+	entry.OfflineSince = time.Time{}
 	if entry.SuccessCount < ^uint32(0) {
 		entry.SuccessCount++
 	}
 	rt.removePendingLocked(node.ID)
-	rt.insertIndexLocked(rt.Buckets[:], rt.Spare[:], entry, rt.bucketIndex(node.ID))
+	rt.insertIndexLocked(rt.Buckets[:], entry, rt.bucketIndex(node.ID))
 	if rt.SelfNameHash != "" {
-		rt.insertIndexLocked(rt.NameBuckets[:], rt.NameSpare[:], entry, rt.nameBucketIndex(node))
+		rt.insertIndexLocked(rt.NameBuckets[:], entry, rt.nameBucketIndex(node))
+	}
+}
+
+// UpdateKnownNode refreshes signed endpoint metadata for a peer this table
+// already knows. It never creates or promotes a peer from a record alone.
+func (rt *RoutingTable) UpdateKnownNode(node proto.NodeInfo) bool {
+	if node.ID == "" || node.ID == rt.SelfID || node.Addr == "" || VerifyNodeInfo(node, time.Now()) != nil {
+		return false
+	}
+	incoming := endpointRecordFromNodeInfo(node)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	entry := rt.peerByID[node.ID]
+	if entry == nil {
+		return false
+	}
+	current := endpointRecordFromNodeInfo(entry.Node)
+	if !record.EndpointRecordNewer(incoming, current) {
+		return false
+	}
+	if nodeNameHash(entry.Node) != nodeNameHash(node) {
+		rt.removeFromIndexLocked(rt.NameBuckets[:], node.ID)
+	}
+	entry.Node = node
+	if rt.inIndexLocked(rt.Buckets[:], node.ID) && rt.SelfNameHash != "" {
+		rt.insertIndexLocked(rt.NameBuckets[:], entry, rt.nameBucketIndex(node))
+	}
+	return true
+}
+
+func endpointRecordFromNodeInfo(node proto.NodeInfo) record.EndpointRecord {
+	return record.EndpointRecord{
+		Version: node.IdentityVersion, Sequence: node.IdentitySequence,
+		NodeID: node.ID, NodeName: node.Name, Address: node.Addr,
+		PublicKey: node.PublicKey, IssuedAt: node.IdentityIssuedAt,
+		ExpiresAt: node.IdentityExpiresAt, Signature: node.IdentitySignature,
 	}
 }
 
@@ -151,7 +217,7 @@ func (rt *RoutingTable) AddLookupCandidate(node proto.NodeInfo) bool {
 	idx := rt.bucketIndex(node.ID)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.peerByID[node.ID] != nil || rt.pendingN >= maxPendingCandidates || len(rt.Pending[idx]) >= maxPendingPerBucket {
+	if rt.peerByID[node.ID] != nil || rt.pendingN >= maxPendingCandidates {
 		return false
 	}
 	entry := &bucketEntry{Node: node, Transient: true}
@@ -168,8 +234,7 @@ func (rt *RoutingTable) addCandidate(node proto.NodeInfo) {
 	idx := rt.bucketIndex(node.ID)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.inIndexLocked(rt.Buckets[:], node.ID) || rt.inIndexLocked(rt.NameBuckets[:], node.ID) ||
-		rt.inIndexLocked(rt.Spare[:], node.ID) || rt.inIndexLocked(rt.NameSpare[:], node.ID) {
+	if rt.inIndexLocked(rt.Buckets[:], node.ID) || rt.inIndexLocked(rt.NameBuckets[:], node.ID) {
 		return
 	}
 	entry := rt.peerByID[node.ID]
@@ -180,7 +245,7 @@ func (rt *RoutingTable) addCandidate(node proto.NodeInfo) {
 		rt.Pending[idx] = append(rt.Pending[idx], entry)
 		return
 	}
-	if rt.pendingN >= maxPendingCandidates || len(rt.Pending[idx]) >= maxPendingPerBucket {
+	if rt.pendingN >= maxPendingCandidates {
 		return
 	}
 	if entry == nil {
@@ -202,7 +267,8 @@ func (rt *RoutingTable) RestoreCandidates(peers []PeerObservation, now time.Time
 	}
 	for _, peer := range peers {
 		if peer.Node.ID == "" || peer.Node.Addr == "" ||
-			(!peer.Pinned && !peer.LastSeen.IsZero() && now.Sub(peer.LastSeen) > peerAddressHintTTL) {
+			(!peer.Pinned && !peer.Friend && ((!peer.OfflineSince.IsZero() && now.Sub(peer.OfflineSince) > peerHistoryTTL) ||
+				(peer.OfflineSince.IsZero() && !peer.LastSeen.IsZero() && now.Sub(peer.LastSeen) > peerAddressHintTTL))) {
 			continue
 		}
 		rt.AddCandidate(peer.Node)
@@ -213,10 +279,24 @@ func (rt *RoutingTable) RestoreCandidates(peers []PeerObservation, now time.Time
 			entry.LastSeen = peer.LastSeen
 			entry.LastSuccess = peer.LastSuccess
 			entry.LastUsed = peer.LastUsed
+			entry.FirstSeen = peer.FirstSeen
 			entry.LastFailure = peer.LastFailure
+			entry.LastProbe = peer.LastProbe
+			entry.LastProbeFailure = peer.LastProbeFailure
+			entry.OfflineSince = peer.OfflineSince
+			entry.ProbeMisses = peer.ProbeMisses
+			entry.ProbationUntil = peer.ProbationUntil
 			entry.NextProbeAt = peer.NextProbeAt
+			if !peer.OfflineSince.IsZero() {
+				rt.removePendingLocked(peer.Node.ID)
+				rt.offline[peer.Node.ID] = entry
+			}
 			entry.RTTMicros = peer.RTTMicros
 			entry.Pinned = peer.Pinned
+			entry.Friend = peer.Friend
+			entry.UseCount = peer.UseCount
+			entry.ClosestIDRank = peer.ClosestIDRank
+			entry.ClosestNameRank = peer.ClosestNameRank
 		}
 		rt.mu.Unlock()
 	}
@@ -264,28 +344,87 @@ func (rt *RoutingTable) NoteFailureAt(nodeID string, now time.Time) bool {
 	if entry == nil || nodeID == rt.SelfID {
 		return false
 	}
-	if now.Before(entry.NextProbeAt) {
-		return false
-	}
 	entry.LastFailure = now
 	if entry.FailCount < ^uint8(0) {
 		entry.FailCount++
 	}
-	backoff := []time.Duration{5 * time.Second, 20 * time.Second, time.Minute}
-	entry.NextProbeAt = now.Add(backoff[min(int(entry.FailCount)-1, len(backoff)-1)])
-	if entry.FailCount < staleFailureThreshold {
+	return false
+}
+
+// BeginLivenessProbe reserves one due peer. Callers should run only one probe
+// at a time; reserving it prevents another maintenance pass from duplicating it.
+func (rt *RoutingTable) BeginLivenessProbe(now time.Time) (proto.NodeInfo, bool) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var selected *bucketEntry
+	for _, entry := range rt.peerByID {
+		if !rt.inIndexLocked(rt.Buckets[:], entry.Node.ID) || now.Before(entry.NextProbeAt) {
+			continue
+		}
+		if selected == nil || entry.LastProbe.Before(selected.LastProbe) {
+			selected = entry
+		}
+	}
+	if selected == nil {
+		return proto.NodeInfo{}, false
+	}
+	selected.LastProbe = now
+	selected.NextProbeAt = now.Add(livenessProbeInterval)
+	return selected.Node, true
+}
+
+// RecordLivenessResult counts only explicit identity and tunnel checks. A
+// failed lookup alone must not mark a peer offline.
+func (rt *RoutingTable) RecordLivenessResult(nodeID string, now time.Time, alive bool) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	entry := rt.peerByID[nodeID]
+	if entry == nil {
+		return false
+	}
+	entry.LastProbe = now
+	entry.NextProbeAt = now.Add(livenessProbeInterval)
+	if alive {
+		entry.ProbeMisses = 0
+		entry.FailCount = 0
+		entry.LastSeen = now
+		entry.LastSuccess = now
+		entry.LastFailure = time.Time{}
+		entry.LastProbeFailure = time.Time{}
+		entry.OfflineSince = time.Time{}
+		if entry.ProbationUntil.IsZero() {
+			entry.ProbationUntil = now.Add(peerProbationPeriod)
+		}
+		return false
+	}
+	if !entry.LastProbeFailure.IsZero() && now.Sub(entry.LastProbeFailure) < livenessProbeInterval {
+		return false
+	}
+	if entry.ProbeMisses < ^uint8(0) {
+		entry.ProbeMisses++
+	}
+	entry.LastFailure = now
+	entry.LastProbeFailure = now
+	if entry.ProbeMisses < staleFailureThreshold {
 		return false
 	}
 	removed := rt.removeFromIndexLocked(rt.Buckets[:], nodeID)
 	removed = rt.removeFromIndexLocked(rt.NameBuckets[:], nodeID) || removed
-	removed = rt.removeFromIndexLocked(rt.Spare[:], nodeID) || removed
-	removed = rt.removeFromIndexLocked(rt.NameSpare[:], nodeID) || removed
 	if removed {
+		if entry.OfflineSince.IsZero() {
+			entry.OfflineSince = now
+		}
 		rt.offline[nodeID] = entry
 		rt.removePeerIfUnindexedLocked(nodeID)
-		for i := 0; i < 256; i++ {
-			rt.promoteReplacementLocked(i, false)
-			rt.promoteReplacementLocked(i, true)
+	} else if entry.ProbeMisses >= staleFailureThreshold {
+		rt.removePendingLocked(nodeID)
+		if entry.SuccessCount > 0 || entry.Pinned {
+			if entry.OfflineSince.IsZero() {
+				entry.OfflineSince = now
+			}
+			rt.offline[nodeID] = entry
+		} else {
+			delete(rt.peerByID, nodeID)
 		}
 	}
 	return removed
@@ -299,9 +438,15 @@ func (rt *RoutingTable) RecordUse(nodeID string, now time.Time, rtt time.Duratio
 		return
 	}
 	entry.LastUsed = now
+	if entry.UseCount < ^uint32(0) {
+		entry.UseCount++
+	}
 	entry.LastSeen = now
 	entry.FailCount = 0
-	entry.NextProbeAt = time.Time{}
+	entry.ProbeMisses = 0
+	entry.LastProbeFailure = time.Time{}
+	entry.LastProbe = now
+	entry.NextProbeAt = now.Add(livenessProbeInterval)
 	if rtt > 0 {
 		micros := uint64(rtt.Microseconds())
 		if micros > uint64(^uint32(0)) {
@@ -330,21 +475,22 @@ func (rt *RoutingTable) SetPinned(nodeID string, pinned bool) bool {
 	if entry == nil {
 		return false
 	}
-	if pinned && !entry.Pinned {
-		count := 0
-		for _, peer := range rt.peerByID {
-			if peer.Pinned {
-				count++
-			}
-		}
-		if count >= maxPersistedPeers {
-			return false
-		}
-	}
 	entry.Pinned = pinned
 	if !pinned {
 		rt.removePeerIfUnindexedLocked(nodeID)
 	}
+	return true
+}
+
+// SetFriend records a local retention preference without changing XOR routing.
+func (rt *RoutingTable) SetFriend(nodeID string, friend bool) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	entry := rt.peerByID[nodeID]
+	if entry == nil {
+		return false
+	}
+	entry.Friend = friend
 	return true
 }
 
@@ -363,16 +509,100 @@ func (rt *RoutingTable) ClosestNodesByNameHash(targetHash string, count int) []p
 	return rt.closestFrom(rt.NameBuckets[:], targetHash, count, true)
 }
 
+// DiversityContacts returns active, authenticated peers that add a previously
+// unseen IPv6 prefix or ASN to this node's local view. It is a fallback contact
+// pool only; normal referrals remain sorted strictly by XOR distance.
+func (rt *RoutingTable) DiversityContacts() []proto.NodeInfo {
+	rt.mu.RLock()
+	entries := make([]bucketEntry, 0, len(rt.peerByID))
+	for _, entry := range rt.peerByID {
+		if rt.inIndexLocked(rt.Buckets[:], entry.Node.ID) {
+			entries = append(entries, *entry)
+		}
+	}
+	rt.mu.RUnlock()
+	sort.Slice(entries, func(i, j int) bool {
+		left, right := observationOf(&entries[i]), observationOf(&entries[j])
+		if peerRetentionLess(left, right) {
+			return true
+		}
+		if peerRetentionLess(right, left) {
+			return false
+		}
+		return entries[i].Node.ID < entries[j].Node.ID
+	})
+
+	seen := make(map[string]struct{})
+	contacts := make([]proto.NodeInfo, 0)
+	for _, entry := range entries {
+		keys := peerDiversityKeys(entry.Node.Addr)
+		addsCoverage := false
+		for _, key := range keys {
+			if _, ok := seen[key]; !ok {
+				addsCoverage = true
+			}
+		}
+		if !addsCoverage {
+			continue
+		}
+		contacts = append(contacts, entry.Node)
+		for _, key := range keys {
+			seen[key] = struct{}{}
+		}
+	}
+	return contacts
+}
+
+// ClosestNodesForBootstrap includes recent offline contacts as hints. Returning
+// a hint never promotes it into active routing; the requester must validate it.
+func (rt *RoutingTable) ClosestNodesForBootstrap(target string, count int, byNameHash bool) []proto.NodeInfo {
+	if count <= 0 {
+		return nil
+	}
+	rt.mu.RLock()
+	all := make([]bucketEntry, 0, len(rt.peerByID))
+	seen := make(map[string]struct{}, len(rt.peerByID))
+	buckets := rt.Buckets[:]
+	if byNameHash {
+		buckets = rt.NameBuckets[:]
+	}
+	for _, bucket := range buckets {
+		for _, entry := range bucket {
+			seen[entry.Node.ID] = struct{}{}
+			all = append(all, *entry)
+		}
+	}
+	for _, entry := range rt.offline {
+		if entry.OfflineSince.IsZero() || time.Since(entry.OfflineSince) > peerHistoryTTL {
+			continue
+		}
+		if _, ok := seen[entry.Node.ID]; !ok {
+			all = append(all, *entry)
+		}
+	}
+	rt.mu.RUnlock()
+	return sortClosestEntries(all, target, count, byNameHash)
+}
+
 func (rt *RoutingTable) closestFrom(buckets [][]*bucketEntry, target string, count int, byNameHash bool) []proto.NodeInfo {
 	if count <= 0 {
 		return nil
 	}
 	rt.mu.RLock()
-	all := make([]*bucketEntry, 0)
+	all := make([]bucketEntry, 0)
 	for _, bucket := range buckets {
-		all = append(all, bucket...)
+		for _, entry := range bucket {
+			all = append(all, *entry)
+		}
 	}
 	rt.mu.RUnlock()
+	return sortClosestEntries(all, target, count, byNameHash)
+}
+
+func sortClosestEntries(all []bucketEntry, target string, count int, byNameHash bool) []proto.NodeInfo {
+	if count <= 0 {
+		return nil
+	}
 	sort.Slice(all, func(i, j int) bool {
 		left, right := all[i].Node.ID, all[j].Node.ID
 		if byNameHash {
@@ -437,11 +667,9 @@ func (rt *RoutingTable) Nodes() []proto.NodeInfo {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	ids := make([]string, 0, len(rt.peerByID))
-	for _, buckets := range [][][]*bucketEntry{rt.Buckets[:], rt.Spare[:], rt.NameSpare[:]} {
-		for _, bucket := range buckets {
-			for _, entry := range bucket {
-				ids = append(ids, entry.Node.ID)
-			}
+	for _, bucket := range rt.Buckets {
+		for _, entry := range bucket {
+			ids = append(ids, entry.Node.ID)
 		}
 	}
 	sort.Strings(ids)
@@ -455,6 +683,16 @@ func (rt *RoutingTable) Nodes() []proto.NodeInfo {
 		out = append(out, rt.peerByID[id].Node)
 	}
 	return out
+}
+
+func (rt *RoutingTable) ActivePeerCount() int {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	count := 0
+	for _, bucket := range rt.Buckets {
+		count += len(bucket)
+	}
+	return count
 }
 
 func (rt *RoutingTable) CandidateNodes(limit int) []proto.NodeInfo {
@@ -473,24 +711,20 @@ func (rt *RoutingTable) CandidateNodes(limit int) []proto.NodeInfo {
 		out = append(out, entry.Node)
 		return len(out) == limit
 	}
+	var candidates []*bucketEntry
 	for i := range rt.Pending {
-		for _, entry := range rt.Pending[i] {
-			if appendUnique(entry) {
-				return out
-			}
-		}
+		candidates = append(candidates, rt.Pending[i]...)
 	}
-	for _, buckets := range [][][]*bucketEntry{rt.Spare[:], rt.NameSpare[:]} {
-		for i := range buckets {
-			for _, entry := range buckets[i] {
-				if appendUnique(entry) {
-					return out
-				}
-			}
+	sort.Slice(candidates, func(i, j int) bool {
+		return peerRetentionLess(observationOf(candidates[i]), observationOf(candidates[j]))
+	})
+	for _, entry := range candidates {
+		if appendUnique(entry) {
+			return out
 		}
 	}
 	for _, entry := range rt.peerByID {
-		if !entry.Pinned {
+		if !entry.Pinned && !entry.Friend {
 			continue
 		}
 		if appendUnique(entry) {
@@ -499,17 +733,28 @@ func (rt *RoutingTable) CandidateNodes(limit int) []proto.NodeInfo {
 	}
 	offline := make([]*bucketEntry, 0, len(rt.offline))
 	for _, entry := range rt.offline {
-		if entry.Pinned || entry.LastSeen.IsZero() || time.Since(entry.LastSeen) <= peerAddressHintTTL {
+		if entry.Pinned || entry.Friend || entry.OfflineSince.IsZero() || time.Since(entry.OfflineSince) <= peerHistoryTTL {
 			offline = append(offline, entry)
 		}
 	}
-	sort.Slice(offline, func(i, j int) bool { return offline[i].LastSuccess.After(offline[j].LastSuccess) })
+	sort.Slice(offline, func(i, j int) bool {
+		return peerRetentionLess(observationOf(offline[i]), observationOf(offline[j]))
+	})
 	for _, entry := range offline {
 		if appendUnique(entry) {
 			return out
 		}
 	}
 	return out
+}
+
+func observationOf(entry *bucketEntry) PeerObservation {
+	return PeerObservation{
+		Node: entry.Node, Pinned: entry.Pinned, Friend: entry.Friend, UseCount: entry.UseCount, SuccessCount: entry.SuccessCount,
+		FirstSeen: entry.FirstSeen, LastSuccess: entry.LastSuccess, LastUsed: entry.LastUsed,
+		OfflineSince: entry.OfflineSince, ClosestIDRank: entry.ClosestIDRank,
+		ClosestNameRank: entry.ClosestNameRank,
+	}
 }
 
 func (rt *RoutingTable) SnapshotPeers() []PeerObservation {
@@ -520,41 +765,63 @@ func (rt *RoutingTable) SnapshotPeers() []PeerObservation {
 		if entry.Transient {
 			continue
 		}
+		if entry.SuccessCount == 0 && !entry.Pinned && !entry.Friend {
+			continue
+		}
 		out = append(out, PeerObservation{
 			Node: entry.Node, FailCount: entry.FailCount, SuccessCount: entry.SuccessCount,
-			LastSeen: entry.LastSeen, LastSuccess: entry.LastSuccess, LastUsed: entry.LastUsed,
+			LastSeen: entry.LastSeen, FirstSeen: entry.FirstSeen,
+			LastSuccess: entry.LastSuccess, LastUsed: entry.LastUsed,
 			LastFailure: entry.LastFailure, RTTMicros: entry.RTTMicros, Pinned: entry.Pinned,
-			NextProbeAt: entry.NextProbeAt,
+			Friend: entry.Friend, UseCount: entry.UseCount,
+			ClosestIDRank: entry.ClosestIDRank, ClosestNameRank: entry.ClosestNameRank,
+			NextProbeAt: entry.NextProbeAt, LastProbe: entry.LastProbe,
+			LastProbeFailure: entry.LastProbeFailure,
+			OfflineSince:     entry.OfflineSince, ProbeMisses: entry.ProbeMisses,
+			ProbationUntil: entry.ProbationUntil,
 		})
 	}
+	assignClosestRanks(out, rt.SelfID, rt.SelfNameHash)
 	return out
+}
+
+func assignClosestRanks(peers []PeerObservation, selfID, selfNameHash string) {
+	byID := append([]PeerObservation(nil), peers...)
+	sort.Slice(byID, func(i, j int) bool {
+		return xorDistance(selfID, byID[i].Node.ID).Cmp(xorDistance(selfID, byID[j].Node.ID)) < 0
+	})
+	idRanks := make(map[string]uint16, len(byID))
+	for i, peer := range byID {
+		if i >= 50 {
+			break
+		}
+		idRanks[peer.Node.ID] = uint16(i + 1)
+	}
+	byName := append([]PeerObservation(nil), peers...)
+	sort.Slice(byName, func(i, j int) bool {
+		return xorDistance(selfNameHash, nodeNameHash(byName[i].Node)).Cmp(xorDistance(selfNameHash, nodeNameHash(byName[j].Node))) < 0
+	})
+	nameRanks := make(map[string]uint16, len(byName))
+	for i, peer := range byName {
+		if i >= 50 {
+			break
+		}
+		nameRanks[peer.Node.ID] = uint16(i + 1)
+	}
+	for i := range peers {
+		peers[i].ClosestIDRank = idRanks[peers[i].Node.ID]
+		peers[i].ClosestNameRank = nameRanks[peers[i].Node.ID]
+	}
 }
 
 func (rt *RoutingTable) PruneOffline(now time.Time) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	for id, entry := range rt.offline {
-		if !entry.Pinned && !entry.LastSeen.IsZero() && now.Sub(entry.LastSeen) > peerHistoryTTL {
+		if !entry.Pinned && !entry.Friend && !entry.OfflineSince.IsZero() && now.Sub(entry.OfflineSince) > peerHistoryTTL {
 			delete(rt.offline, id)
 			delete(rt.peerByID, id)
 		}
-	}
-	if len(rt.offline) <= maxPersistedPeers {
-		return
-	}
-	entries := make([]*bucketEntry, 0, len(rt.offline))
-	for _, entry := range rt.offline {
-		if !entry.Pinned {
-			entries = append(entries, entry)
-		}
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].LastSuccess.Before(entries[j].LastSuccess) })
-	for _, entry := range entries {
-		if len(rt.offline) <= maxPersistedPeers {
-			break
-		}
-		delete(rt.offline, entry.Node.ID)
-		delete(rt.peerByID, entry.Node.ID)
 	}
 }
 
@@ -608,14 +875,17 @@ func (rt *RoutingTable) bucketIndex(nodeID string) int {
 }
 
 func (rt *RoutingTable) nameBucketIndex(node proto.NodeInfo) int {
-	hash := node.NameHash
-	if hash == "" {
-		hash = NodeNameHash(node.Name)
-	}
-	return xorDistance(rt.SelfNameHash, hash).BitLen() - 1
+	return xorDistance(rt.SelfNameHash, nodeNameHash(node)).BitLen() - 1
 }
 
-func (rt *RoutingTable) insertIndexLocked(buckets, spares [][]*bucketEntry, entry *bucketEntry, idx int) {
+func nodeNameHash(node proto.NodeInfo) string {
+	if node.NameHash != "" {
+		return node.NameHash
+	}
+	return NodeNameHash(node.Name)
+}
+
+func (rt *RoutingTable) insertIndexLocked(buckets [][]*bucketEntry, entry *bucketEntry, idx int) {
 	if idx < 0 {
 		idx = 0
 	}
@@ -626,43 +896,17 @@ func (rt *RoutingTable) insertIndexLocked(buckets, spares [][]*bucketEntry, entr
 		buckets[idx] = moveToFront(buckets[idx], pos)
 		return
 	}
-	if len(buckets[idx]) < K {
-		buckets[idx] = append([]*bucketEntry{entry}, buckets[idx]...)
-		return
-	}
-	spares[idx] = rememberDiverseReplacement(spares[idx], entry, replacementCacheSize)
+	// K is the normal referral/replication target, not a hard per-range
+	// ceiling. The local active-peer limit bounds total memory as the view grows.
+	buckets[idx] = append([]*bucketEntry{entry}, buckets[idx]...)
 }
 
-func (rt *RoutingTable) rememberReplacementLocked(bucketIdx int, node proto.NodeInfo) {
-	entry := rt.peerByID[node.ID]
-	if entry == nil {
-		entry = &bucketEntry{Node: node}
-		rt.peerByID[node.ID] = entry
-	}
-	rt.Spare[bucketIdx] = rememberDiverseReplacement(rt.Spare[bucketIdx], entry, replacementCacheSize)
-}
-
-func (rt *RoutingTable) promoteReplacementLocked(bucketIdx int, byName bool) {
-	buckets, spares := rt.Buckets[:], rt.Spare[:]
-	if byName {
-		buckets, spares = rt.NameBuckets[:], rt.NameSpare[:]
-	}
-	if len(buckets[bucketIdx]) >= K || len(spares[bucketIdx]) == 0 {
-		return
-	}
-	entry := spares[bucketIdx][0]
-	spares[bucketIdx] = spares[bucketIdx][1:]
-	idx := rt.bucketIndex(entry.Node.ID)
-	if byName {
-		idx = rt.nameBucketIndex(entry.Node)
-	}
-	if entry.FailCount >= staleFailureThreshold || rt.pendingN >= maxPendingCandidates || len(rt.Pending[idx]) >= maxPendingPerBucket {
-		rt.removePeerIfUnindexedLocked(entry.Node.ID)
-		return
-	}
-	// A replacement is an address hint, not proof of current reachability.
-	rt.Pending[idx] = append(rt.Pending[idx], entry)
-	rt.pendingN++
+func initialProbeDelay(nodeID string) time.Duration {
+	digest := sha256.Sum256([]byte(nodeID))
+	value := new(big.Int).SetBytes(digest[:8])
+	window := big.NewInt(int64(livenessProbeInterval))
+	value.Mod(value, window)
+	return time.Duration(value.Int64())
 }
 
 func (rt *RoutingTable) containsEntry(buckets [256][]*bucketEntry, nodeID string) bool {
@@ -711,8 +955,7 @@ func (rt *RoutingTable) removePeerIfUnindexedLocked(nodeID string) {
 	if entry := rt.peerByID[nodeID]; entry != nil && entry.Pinned {
 		return
 	}
-	if rt.inIndexLocked(rt.Buckets[:], nodeID) || rt.inIndexLocked(rt.NameBuckets[:], nodeID) ||
-		rt.inIndexLocked(rt.Spare[:], nodeID) || rt.inIndexLocked(rt.NameSpare[:], nodeID) {
+	if rt.inIndexLocked(rt.Buckets[:], nodeID) || rt.inIndexLocked(rt.NameBuckets[:], nodeID) {
 		return
 	}
 	if _, ok := rt.offline[nodeID]; ok {
@@ -750,45 +993,6 @@ func moveToFront(entries []*bucketEntry, pos int) []*bucketEntry {
 	entry := entries[pos]
 	copy(entries[1:pos+1], entries[:pos])
 	entries[0] = entry
-	return entries
-}
-
-func rememberDiverseReplacement(entries []*bucketEntry, candidate *bucketEntry, limit int) []*bucketEntry {
-	if pos := indexOfEntry(entries, candidate.Node.ID); pos >= 0 {
-		entries = append(entries[:pos], entries[pos+1:]...)
-	}
-	entries = append(entries, candidate)
-	scores := make(map[string]int, len(entries))
-	for _, entry := range entries {
-		prefix := ipv6Prefix48(entry.Node.Addr)
-		asn := (sourceObservation{addr: entry.Node.Addr}).asnKey()
-		duplicates := 0
-		for _, other := range entries {
-			if other.Node.ID == entry.Node.ID {
-				continue
-			}
-			if prefix != "" && ipv6Prefix48(other.Node.Addr) == prefix {
-				duplicates += 2
-			}
-			if asn != "" && (sourceObservation{addr: other.Node.Addr}).asnKey() == asn {
-				duplicates++
-			}
-		}
-		scores[entry.Node.ID] = duplicates
-	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		scoreI, scoreJ := scores[entries[i].Node.ID], scores[entries[j].Node.ID]
-		if scoreI != scoreJ {
-			return scoreI < scoreJ
-		}
-		if !entries[i].LastSuccess.Equal(entries[j].LastSuccess) {
-			return entries[i].LastSuccess.After(entries[j].LastSuccess)
-		}
-		return entries[i].Node.ID < entries[j].Node.ID
-	})
-	if len(entries) > limit {
-		entries = entries[:limit]
-	}
 	return entries
 }
 
