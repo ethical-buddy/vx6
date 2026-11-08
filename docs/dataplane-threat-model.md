@@ -8,18 +8,18 @@ This contract applies first to direct CLI service forwarding between VX6 nodes. 
 
 ```text
 Local application
-    | local TCP connection
+    | local TCP stream or UDP datagrams
 VX6 client: expected peer + configured service permission
-    | local TCP service forwarding
-    | IPv6 traffic routed through IKEv2-negotiated IPsec ESP tunnel
+    | TCP service stream or framed UDP service datagrams
+    | IPv6 traffic protected by IKEv2-negotiated IPsec ESP
 VX6 server: authenticated peer + deny-by-default service ACL
     | configured local backend only
 Remote application service
 ```
 
 The Linux implementation uses IPsec as the network packet-protection layer.
-The existing application session remains for callers that still depend on it;
-it is not a substitute for peer-local identity trust or service authorization. The
+TCP and UDP are service transports, not separate security layers. UDP frames
+carry a service name and flow ID; ESP protects the complete routed packet. The
 current IKE identity is pinned from a locally verified signed endpoint record.
 The DHT is discovery input, not a network-wide membership authority. Each node
 applies its own trust, conflict, expiry, and revocation policy; there is no
@@ -31,7 +31,7 @@ committee or consensus certificate.
 | --- | --- |
 | Passive network observer | Cannot read service payloads or inner IP/transport headers on links covered by IPsec. Can still observe outer tunnel endpoints, packet sizes, timing, volume, and that a tunnel is in use. |
 | Active on-path MITM | Cannot impersonate the expected node, alter authenticated traffic undetected, or cause a silent downgrade. Both IKE/IPsec and the service transport verify configured peer identities. |
-| Captured-packet replay or injection | Cannot create a new authenticated session or inject accepted transport packets. IPsec anti-replay and standard QUIC/TLS/TCP behavior are enabled. Disable QUIC/TLS 0-RTT until replay-safe application semantics are explicitly reviewed. |
+| Captured-packet replay or injection | Cannot create a new authenticated session or inject accepted ESP packets; IPsec anti-replay is enabled. UDP applications still need their own request-level replay protection where their semantics require it. |
 | Unauthenticated service scanner | Cannot obtain a service banner or enumerate service names through VX6 before authentication and authorization. Service identifiers and OPEN requests are carried inside the encrypted transport. |
 | Authenticated but unauthorized peer | Cannot open a service unless an explicit peer-to-service rule allows it. Authorization occurs before any backend dial. |
 | Malicious or compromised authorized peer | Is limited by its configured services, concurrent streams, rates, timeouts, and resource quotas. VX6 cannot protect a service from an authorized client that is permitted to use it. |
@@ -50,7 +50,7 @@ committee or consensus certificate.
 ## Protocol and downgrade rules
 
 - The current IKEv2/IPsec implementation is strongSwan plus kernel XFRM. A VX6-owned Linux IKE controller is future research under #57; it must not create new cryptographic primitives or replace kernel ESP.
-- No clear TCP or QUIC path is permitted for traffic configured as tunnel-required. Authentication, local trust validation, or SA failures must fail closed.
+- No clear TCP or UDP service-data path is permitted for traffic configured as tunnel-required. Authentication, local trust validation, or SA failures must fail closed.
 - IPsec is mandatory for traffic configured as tunnel-required. If tunnel setup or health fails, protected traffic must not escape over an ordinary route.
 - The service OPEN message is bounded, encrypted, versioned, and contains an opaque service identifier rather than a backend host/port. An opaque identifier is not itself an authorization credential.
 
@@ -67,10 +67,13 @@ Implemented and tested on Linux:
 - `vx6-ipsecd` uses strongSwan and kernel XFRM to establish IKEv2/ESP with
   Ed25519 peer-key pinning and IPv6 `/128` tunnel selectors.
 - The local dial gate and nftables rules fail closed for the configured VX6
-  listener path; local peer revocation is persisted and terminates the local
-  association.
-- The routed two-peer container test observes ESP, increasing XFRM counters,
-  no service sentinel in the transit capture, and a blocked clear TCP probe.
+  TCP listener at `P` and UDP service listener at `P+2`; liveness remains at
+  UDP `P+1`. Local peer revocation is persisted and terminates the association.
+- TCP services are relayed as streams. UDP services use bounded VX6 datagram
+  framing and per-flow associations. Private-service allow-lists are checked
+  against the IKE-authenticated NodeID.
+- The routed two-peer container test observes ESP and checks that both TCP and
+  UDP service payload markers are absent from the transit capture.
 
 Remaining gaps and limitations:
 
@@ -78,7 +81,6 @@ Remaining gaps and limitations:
 - `internal/transport/quic.go` creates a throwaway self-signed certificate and skips ordinary QUIC TLS peer verification, relying on the custom session above it.
 - QUIC currently exposes one stream per connection; it does not yet provide the planned reusable per-peer multiplexed connection.
 - The transport abstraction currently selects TCP for `auto`; QUIC is not yet the default.
-- `internal/serviceproxy/proxy.go` does not enforce peer-to-service ACLs before backend dialing and does not consistently compare the authenticated remote identity with the configured expected owner.
 - Active tamper/replay, rekey failure, tunnel-loss/restart, and comprehensive
   route-leak tests are not yet covered by the container suite (#59).
 - The peer-local DHT trust and maintenance model is not complete; test peer
@@ -86,7 +88,11 @@ Remaining gaps and limitations:
   uniqueness or network-wide revocation.
 - Existing hidden-descriptor epochs rotate lookup keys and cannot be used as
   node-identity freshness proofs.
-- The current service proxy handles TCP streams. Real-time UDP/WebRTC forwarding needs a separate datagram design.
+- UDP support is a datagram service proxy, not a virtual network interface. It
+  does not implement WebRTC ICE/signaling, SCTP, multicast, arbitrary IP
+  protocols, or transparent forwarding for applications that negotiate extra
+  ports. Large UDP datagrams can incur IPv6 fragmentation or fail on a smaller
+  path MTU; applications should keep packets within their effective path MTU.
 
 These gaps are addressed by the ordered implementation work in [the dataplane roadmap](https://github.com/ethical-buddy/vx6/issues/56).
 
@@ -118,6 +124,6 @@ Performance must be measured for IPsec alone, the current TCP service path, and 
 | Baseline IPv6 IPsec capture and clear-probe tests | [#50](https://github.com/ethical-buddy/vx6/issues/50) | Two-peer IKE/ESP capture, service sentinel, protected ping, and clear TCP probe. |
 | Remaining MITM, replay, malformed-input, denial, and fail-closed matrix | [#59](https://github.com/ethical-buddy/vx6/issues/59) | Feature-gated portable and privileged integration coverage. |
 | Overhead and latency remain measured rather than assumed | [#51](https://github.com/ethical-buddy/vx6/issues/51) | Reproducible benchmarks report throughput, p95/p99 latency, CPU, memory, jitter, and loss. |
-| UDP/WebRTC identity, datagram handling, and tunnel-path protection | [#49](https://github.com/ethical-buddy/vx6/issues/49) | Datagram loss/reorder tests, signaling fingerprint checks, and packet-capture validation. |
+| UDP service datagrams through ESP | [#49](https://github.com/ethical-buddy/vx6/issues/49) | Direct UDP echo, private-policy path, ESP counter increase, and no clear UDP/`P+2` or payload marker in the routed capture pass; WebRTC ICE/signaling and loss/reorder testing remain. |
 
 The ordered dependencies and the platform and acceleration follow-up work are tracked in [roadmap issue #56](https://github.com/ethical-buddy/vx6/issues/56).

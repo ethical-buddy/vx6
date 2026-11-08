@@ -17,5 +17,8 @@ The initial Linux IPsec baseline suite is complete in [#50](https://github.com/e
 
 The target has no network committee or consensus authority. Each node validates and maintains its own bounded DHT view. This is a resilience model, not a claim that a node can prove global name uniqueness or eliminate Sybil/eclipse attacks by itself.
 
-Performance, UDP/WebRTC, eBPF, VPP/AF_XDP, and broader roadmap work are listed
-in [issue #56](https://github.com/ethical-buddy/vx6/issues/56) and linked issues.
+UDP service forwarding is now implemented for direct peers through ESP, but
+WebRTC ICE/signaling, loss/reorder testing, and broader Layer-3 protocol support
+remain. Performance, UDP/WebRTC, eBPF, VPP/AF_XDP, and related roadmap work are
+listed in [issue #56](https://github.com/ethical-buddy/vx6/issues/56) and linked
+issues.

@@ -39,8 +39,60 @@ func (r ConnectRequest) Validate() error {
 
 type ServicePolicy struct {
 	Target         string
+	Protocol       string
 	Private        bool
 	AllowedNodeIDs []string
+}
+
+// SessionTracker closes already-open private streams when their live policy
+// no longer permits the authenticated peer.
+type SessionTracker struct {
+	mu       sync.Mutex
+	sessions map[*serviceSession]struct{}
+}
+
+type serviceSession struct {
+	service string
+	peerID  string
+	conn    net.Conn
+}
+
+func NewSessionTracker() *SessionTracker {
+	return &SessionTracker{sessions: make(map[*serviceSession]struct{})}
+}
+
+func (t *SessionTracker) track(service, peerID string, conn net.Conn) func() {
+	if t == nil || peerID == "" {
+		return func() {}
+	}
+	session := &serviceSession{service: service, peerID: peerID, conn: conn}
+	t.mu.Lock()
+	t.sessions[session] = struct{}{}
+	t.mu.Unlock()
+	return func() {
+		t.mu.Lock()
+		delete(t.sessions, session)
+		t.mu.Unlock()
+	}
+}
+
+func (t *SessionTracker) Reconcile(policies map[string]ServicePolicy) {
+	if t == nil {
+		return
+	}
+	var revoke []*serviceSession
+	t.mu.Lock()
+	for session := range t.sessions {
+		policy, exists := policies[session.service]
+		if !exists || policy.Target == "" || (policy.Private && !policy.Allows(session.peerID)) {
+			revoke = append(revoke, session)
+			delete(t.sessions, session)
+		}
+	}
+	t.mu.Unlock()
+	for _, session := range revoke {
+		_ = session.conn.Close()
+	}
 }
 
 func (p ServicePolicy) Allows(nodeID string) bool {
@@ -88,6 +140,10 @@ func HandleInbound(conn net.Conn, id identity.Identity, services map[string]stri
 // HandleInboundWithPolicy relies on the listener's authenticated IKE peer
 // record. Service data is not wrapped in a second application crypto session.
 func HandleInboundWithPolicy(conn net.Conn, services map[string]ServicePolicy, ikePeer record.EndpointRecord) error {
+	return HandleInboundWithPolicyAndTracker(conn, services, ikePeer, nil)
+}
+
+func HandleInboundWithPolicyAndTracker(conn net.Conn, services map[string]ServicePolicy, ikePeer record.EndpointRecord, tracker *SessionTracker) error {
 	payload, err := proto.ReadLengthPrefixed(conn, maxRequestSize)
 	if err != nil {
 		return err
@@ -100,15 +156,17 @@ func HandleInboundWithPolicy(conn net.Conn, services map[string]ServicePolicy, i
 		return fmt.Errorf("invalid service request name: %w", err)
 	}
 	policy, ok := services[req.ServiceName]
-	if !ok || policy.Target == "" {
+	if !ok || policy.Target == "" || policy.Protocol == record.ServiceProtocolUDP {
 		return errors.New("service unavailable")
 	}
+	peerID := ""
 	if policy.Private {
 		verifiedPeer, err := record.VerifyEndpoint(ikePeer, time.Now())
 		if err != nil {
 			return errors.New("service unavailable")
 		}
-		if !policy.Allows(verifiedPeer.Endpoint().NodeID) {
+		peerID = verifiedPeer.Endpoint().NodeID
+		if !policy.Allows(peerID) {
 			return errors.New("service unavailable")
 		}
 	}
@@ -117,6 +175,8 @@ func HandleInboundWithPolicy(conn net.Conn, services map[string]ServicePolicy, i
 		return fmt.Errorf("connect local service target: %w", err)
 	}
 	defer targetConn.Close()
+	done := tracker.track(req.ServiceName, peerID, conn)
+	defer done()
 	return proxyDuplex(conn, targetConn)
 }
 

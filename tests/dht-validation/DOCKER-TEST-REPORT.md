@@ -1,10 +1,10 @@
 # VX6 Container Test Report
 
-**Run date:** 2026-11-07 (Asia/Kolkata)  
-**Source HEAD:** `516c2a012d3f01060959017e601fd9db3a5bd8c4`  
-**Working tree:** had uncommitted DHT and documentation changes during this run  
-**Docker:** 29.9.3, Linux x86_64, host kernel `7.2.15-arch1-1`  
-**Test image:** Ubuntu 22.04, `vx6-ipsec-e2e:local`  
+**Run date:** 2026-11-07 (Asia/Kolkata)
+**Source HEAD:** `516c2a012d3f01060959017e601fd9db3a5bd8c4`
+**Working tree:** had uncommitted DHT and documentation changes during this run
+**Docker:** 29.9.3, Linux x86_64, host kernel `7.2.15-arch1-1`
+**Test image:** Ubuntu 22.04, `vx6-ipsec-e2e:local`
 **Overall result:** **PARTIAL**. DHT protocol mesh scenarios passed; the separate IPsec E2E script still fails its ICMP assertion, and full CLI/IKE DHT mesh integration is not covered.
 
 ## Commands
@@ -108,7 +108,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-Sending build context to Docker daemon  12.26MB
+Sending build context to Docker daemon  12.26MB
 Step 1/3 : FROM ubuntu:22.04
  ---> eb29ed27b082
 Step 2/3 : COPY dht-validation.test /usr/local/bin/dht-validation.test
@@ -185,7 +185,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-Sending build context to Docker daemon  12.27MB
+Sending build context to Docker daemon  12.27MB
 Step 1/3 : FROM ubuntu:22.04
  ---> eb29ed27b082
 Step 2/3 : COPY dht-validation.test /usr/local/bin/dht-validation.test
@@ -238,6 +238,17 @@ PASS
 
 **Result: PASS.** The containerized DHT IPv6 mesh scenarios passed.
 
+## DHT Race-Fix Verification 2026-11-08
+
+- Source HEAD: `47ef0ab503c80d2ac05f07206d92eb3d29ad459a`; working tree also contained the DHT snapshot fix and unrelated pre-existing changes.
+- `GOCACHE=/tmp/vx6-go-build GOMODCACHE=/tmp/vx6-go-mod go test -race ./internal/dht -count=1`: **PASS**. This exercises the full DHT package, including local IPv6 listener tests and the new concurrent update/read regression.
+- `GOCACHE=/tmp/vx6-go-build GOMODCACHE=/tmp/vx6-go-mod go test ./... -count=1`: **PASS** across all repository packages in this working tree.
+- `GOCACHE=/tmp/vx6-go-build GOMODCACHE=/tmp/vx6-go-mod go build ./...`: **PASS**.
+- `bash tests/dht-validation/run-docker.sh`: **PASS** for name-hash and NodeID referral lookup with 3, 5, and 10 logical peers, plus branch failure and signed-name conflict cases. The fresh run above records the test binary checksum and full output.
+- `go test -race ./internal/integration -run TestHiddenServiceRendezvousPlainTCP -count=1`: **FAIL**, but no DHT race was reported. The race detector found a separate concurrent access in onion cell backward sealing (`internal/onion/cell.go`, `circuitKeyState.sealBackward`). This is outside the DHT snapshot fix and remains unresolved.
+
+The Docker mesh still runs multiple `dht.Server` instances in one test process with a permissive dial guard. It does not prove separate CLI-process bootstrap, IKE/IPsec protection of DHT RPCs, bbolt restart recovery, or the larger scenarios in #65/#69.
+
 ## DHT Docker Mesh Run 20261106T233702Z-49380
 
 - Source HEAD: `516c2a012d3f01060959017e601fd9db3a5bd8c4`
@@ -262,7 +273,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-Sending build context to Docker daemon  12.27MB
+Sending build context to Docker daemon  12.27MB
 Step 1/3 : FROM ubuntu:22.04
  ---> eb29ed27b082
 Step 2/3 : COPY dht-validation.test /usr/local/bin/dht-validation.test
@@ -272,6 +283,160 @@ Step 3/3 : ENTRYPOINT ["/usr/local/bin/dht-validation.test", "-test.v", "-test.t
  ---> Removed intermediate container c165859cd969
  ---> a1de4144e908
 Successfully built a1de4144e908
+Successfully tagged vx6-dht-validation:local
+```
+
+### Test output
+
+```text
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/name-hash
+    mesh_test.go:162: PASS peers=3 lookup=name-hash queried=2 rounds=3 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/node-id
+    mesh_test.go:162: PASS peers=3 lookup=node-id queried=1 rounds=1 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/name-hash
+    mesh_test.go:162: PASS peers=5 lookup=name-hash queried=4 rounds=5 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/node-id
+    mesh_test.go:162: PASS peers=5 lookup=node-id queried=3 rounds=3 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/name-hash
+    mesh_test.go:162: PASS peers=10 lookup=name-hash queried=9 rounds=10 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/node-id
+    mesh_test.go:162: PASS peers=10 lookup=node-id queried=8 rounds=8 matches=1
+--- PASS: TestThreeFiveTenPeerIPv6IterativeLookups (0.01s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/node-id (0.00s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/node-id (0.00s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/node-id (0.00s)
+=== RUN   TestFivePeerLookupReturnsIncompleteWhenOneBranchFails
+    mesh_test.go:189: PASS peers=5 reachable-match=FAULT-05 outcome=found_verified failed-branches=1
+--- PASS: TestFivePeerLookupReturnsIncompleteWhenOneBranchFails (0.00s)
+=== RUN   TestThreePeerLookupReturnsAllSignedNameConflicts
+    mesh_test.go:219: PASS name-conflict candidates=2
+--- PASS: TestThreePeerLookupReturnsAllSignedNameConflicts (0.00s)
+PASS
+```
+
+**Result: PASS.** The containerized DHT IPv6 mesh scenarios passed.
+
+## DHT Docker Mesh Run 20261108T002708Z-333077
+
+- Source HEAD: `47ef0ab503c80d2ac05f07206d92eb3d29ad459a`
+- Working tree source changes: present; this run includes them
+- Go: `go version go1.27.3-X:nodwarf5 linux/amd64`
+- Docker: `29.9.3`
+- Host kernel: `7.2.15-arch1-1`
+- Topology: 3-, 5-, and 10-peer DHT meshes using IPv6 TCP listeners in an isolated Docker network
+- Scope: DHT protocol/lookup behavior; not IKE/IPsec or separate-container process isolation
+
+Command: `bash tests/dht-validation/run-docker.sh`
+
+Test binary SHA-256: `514c4974d0de08d8d03ff460acd7458f3d57ba46c57946ae35602962383d0105`
+
+```text
+```
+
+Image ID: `sha256:3648e47332cb813168f8b39c1ab0fb8305ff52372ba18c44850801d0c5931700`
+
+```text
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  12.27MB
+Step 1/3 : FROM ubuntu:22.04
+ ---> eb29ed27b082
+Step 2/3 : COPY dht-validation.test /usr/local/bin/dht-validation.test
+ ---> 0e699b8555f4
+Step 3/3 : ENTRYPOINT ["/usr/local/bin/dht-validation.test", "-test.v", "-test.timeout=3m"]
+ ---> Running in 6ec215a31e20
+ ---> Removed intermediate container 6ec215a31e20
+ ---> 3648e47332cb
+Successfully built 3648e47332cb
+Successfully tagged vx6-dht-validation:local
+```
+
+### Test output
+
+```text
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/name-hash
+    mesh_test.go:162: PASS peers=3 lookup=name-hash queried=2 rounds=3 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/node-id
+    mesh_test.go:162: PASS peers=3 lookup=node-id queried=1 rounds=1 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/name-hash
+    mesh_test.go:162: PASS peers=5 lookup=name-hash queried=4 rounds=5 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/node-id
+    mesh_test.go:162: PASS peers=5 lookup=node-id queried=3 rounds=3 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/name-hash
+    mesh_test.go:162: PASS peers=10 lookup=name-hash queried=9 rounds=10 matches=1
+=== RUN   TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/node-id
+    mesh_test.go:162: PASS peers=10 lookup=node-id queried=8 rounds=8 matches=1
+--- PASS: TestThreeFiveTenPeerIPv6IterativeLookups (0.01s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-3/node-id (0.00s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-5/node-id (0.00s)
+    --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10 (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/name-hash (0.00s)
+        --- PASS: TestThreeFiveTenPeerIPv6IterativeLookups/peers-10/node-id (0.00s)
+=== RUN   TestFivePeerLookupReturnsIncompleteWhenOneBranchFails
+    mesh_test.go:189: PASS peers=5 reachable-match=FAULT-05 outcome=found_verified failed-branches=1
+--- PASS: TestFivePeerLookupReturnsIncompleteWhenOneBranchFails (0.00s)
+=== RUN   TestThreePeerLookupReturnsAllSignedNameConflicts
+    mesh_test.go:219: PASS name-conflict candidates=2
+--- PASS: TestThreePeerLookupReturnsAllSignedNameConflicts (0.00s)
+PASS
+```
+
+**Result: PASS.** The containerized DHT IPv6 mesh scenarios passed.
+
+## DHT Docker Mesh Run 20261108T022617Z-352578
+
+- Source HEAD: `47ef0ab503c80d2ac05f07206d92eb3d29ad459a`
+- Working tree source changes: present; this run includes them
+- Go: `go version go1.27.3-X:nodwarf5 linux/amd64`
+- Docker: `29.9.3`
+- Host kernel: `7.2.15-arch1-1`
+- Topology: 3-, 5-, and 10-peer DHT meshes using IPv6 TCP listeners in an isolated Docker network
+- Scope: DHT protocol/lookup behavior; not IKE/IPsec or separate-container process isolation
+
+Command: `bash tests/dht-validation/run-docker.sh`
+
+Test binary SHA-256: `514c4974d0de08d8d03ff460acd7458f3d57ba46c57946ae35602962383d0105`
+
+```text
+```
+
+Image ID: `sha256:3648e47332cb813168f8b39c1ab0fb8305ff52372ba18c44850801d0c5931700`
+
+```text
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  12.27MB
+Step 1/3 : FROM ubuntu:22.04
+ ---> eb29ed27b082
+Step 2/3 : COPY dht-validation.test /usr/local/bin/dht-validation.test
+ ---> Using cache
+ ---> 0e699b8555f4
+Step 3/3 : ENTRYPOINT ["/usr/local/bin/dht-validation.test", "-test.v", "-test.timeout=3m"]
+ ---> Using cache
+ ---> 3648e47332cb
+Successfully built 3648e47332cb
 Successfully tagged vx6-dht-validation:local
 ```
 

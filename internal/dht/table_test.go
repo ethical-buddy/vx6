@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,6 +117,48 @@ func TestNameAndIdentityLookupsUseSeparateRoutingCoordinates(t *testing.T) {
 	if got := rt.ClosestNodes("vx6_"+zeroHash, 1); len(got) != 1 || got[0].ID != byID.ID {
 		t.Fatalf("identity lookup chose %+v, want peer closest by NodeID", got)
 	}
+}
+
+func TestClosestNodeReadsUseStableSnapshotsDuringUpdates(t *testing.T) {
+	rt := NewRoutingTable("self")
+	rt.SetSelfNameHash(strings.Repeat("1", 64))
+	peer := proto.NodeInfo{ID: "peer", Name: "PEER-0", Addr: "[2001:db8::1]:4242"}
+	rt.AddNode(peer)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 2000; i++ {
+			updated := peer
+			updated.Name = fmt.Sprintf("PEER-%d", i)
+			updated.NameHash = NodeNameHash(updated.Name)
+			updated.Addr = fmt.Sprintf("[2001:db8::%x]:4242", i+1)
+			rt.AddNode(updated)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 2000; i++ {
+			if got := rt.ClosestNodes("peer", 1); len(got) != 1 || got[0].ID != peer.ID {
+				t.Errorf("closest lookup returned unexpected snapshot: %+v", got)
+				return
+			}
+			if got := rt.ClosestNodesByNameHash(strings.Repeat("1", 64), 1); len(got) != 1 || got[0].ID != peer.ID {
+				t.Errorf("name lookup returned unexpected snapshot: %+v", got)
+				return
+			}
+			if got := rt.ClosestNodesForBootstrap("peer", 1, false); len(got) != 1 || got[0].ID != peer.ID {
+				t.Errorf("bootstrap lookup returned unexpected snapshot: %+v", got)
+				return
+			}
+		}
+	}()
+	close(start)
+	wg.Wait()
 }
 
 func TestNameHashUpdateMovesPeerToNewNameCoordinate(t *testing.T) {
@@ -309,6 +352,43 @@ func TestDiversityContactsAreSupplementalAndDynamic(t *testing.T) {
 		if peer.ID == "peer-c" {
 			t.Fatal("inactive diversity contact remained in the active fallback pool")
 		}
+	}
+}
+
+func TestDiversityUsesKnownASNAndFallsBackWhenUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "asn-map.json")
+	writeASNMap(t, path, []ASNMapEntry{
+		{CIDR: "2001:db8:55::1/128", ASN: "AS64500"},
+		{CIDR: "2001:db8:55::2/128", ASN: "AS64501"},
+	})
+	resolver, status, err := LoadASNResolver(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetASNResolver(resolver, status)
+	t.Cleanup(func() { SetASNResolver(noASNResolver{}, ASNResolverStatus{}) })
+
+	rt := NewRoutingTable("self")
+	peers := []proto.NodeInfo{
+		{ID: "peer-a", Addr: "[2001:db8:55::1]:4242"},
+		{ID: "peer-b", Addr: "[2001:db8:55::2]:4242"},
+	}
+	for _, peer := range peers {
+		rt.AddNode(peer)
+	}
+	if got := len(rt.DiversityContacts()); got != 2 {
+		t.Fatalf("known ASN diversity contacts = %d, want 2 within the shared /48", got)
+	}
+	if got := rt.ActivePeerCount(); got != 2 {
+		t.Fatalf("diversity policy changed active admission: got %d peers", got)
+	}
+
+	SetASNResolver(noASNResolver{}, ASNResolverStatus{})
+	if got := len(rt.DiversityContacts()); got != 1 {
+		t.Fatalf("unknown-ASN fallback contacts = %d, want one prefix representative", got)
+	}
+	if got := rt.ActivePeerCount(); got != 2 {
+		t.Fatalf("unknown ASN blocked an active peer: got %d", got)
 	}
 }
 
@@ -588,6 +668,28 @@ func TestPendingCandidateMemoryIsBounded(t *testing.T) {
 	}
 	if got := rt.pendingN; got > maxPendingCandidates {
 		t.Fatalf("pending candidates = %d, exceeds global cap %d", got, maxPendingCandidates)
+	}
+}
+
+func TestCandidateFloodDoesNotEvictEstablishedRoutes(t *testing.T) {
+	rt := NewRoutingTable("self")
+	active := proto.NodeInfo{ID: "established-peer", Name: "ESTABLISHED", Addr: "[2001:db8::1]:4242"}
+	rt.AddNode(active)
+
+	for i := 0; i < maxPendingCandidates+100; i++ {
+		rt.AddCandidate(proto.NodeInfo{
+			ID:   fmt.Sprintf("unverified-%04d", i),
+			Addr: fmt.Sprintf("[2001:db8:1::%x]:4242", i+1),
+		})
+	}
+	if got := rt.ActivePeerCount(); got != 1 {
+		t.Fatalf("candidate flood changed active peer count to %d, want 1", got)
+	}
+	if got, ok := rt.ActiveNode(active.ID); !ok || got.Addr != active.Addr {
+		t.Fatalf("established peer was displaced by candidate flood: %+v active=%v", got, ok)
+	}
+	if got := rt.pendingN; got != maxPendingCandidates {
+		t.Fatalf("candidate flood retained %d pending entries, want global cap %d", got, maxPendingCandidates)
 	}
 }
 

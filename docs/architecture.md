@@ -135,10 +135,14 @@ The target direct-service flow is:
 
 1. The caller resolves an IPv6 endpoint and signed record, reports name conflicts, and applies local key-trust, expiry, and revocation checks to the NodeID/public key. A local key trust entry does not reserve the advertised name.
 2. IKEv2 mutually authenticates the expected keys and establishes an ESP tunnel using a maintained platform implementation.
-3. VX6 routes the peer traffic through the tunnel. Tunnel failure blocks that traffic; it never silently falls back to a clear connection.
+3. VX6 sends TCP streams to the peer's TCP endpoint and framed UDP datagrams to
+   UDP endpoint port `P+2`; `P+1` remains the liveness probe. Both service paths
+   are covered by the IPsec selectors. Tunnel failure blocks protected traffic
+   rather than silently falling back to a clear route.
 4. The receiving VX6 node checks private-service identity and allowlist policy
-   before dialing only its configured local backend. For public services, it
-   skips the DHT identity lookup and relies on the established IPsec path.
+   before forwarding to only its configured local backend. UDP is explicitly
+   selected per service and uses a bounded flow table. For public services, it
+   skips the per-service DHT lookup and relies on the accepted IPsec peer path.
 
 Use `vx6 service add --private --allow-node NODE_ID` to give a private service
 an explicit local allowlist; repeat `--allow-node` for additional peers. A
@@ -148,7 +152,8 @@ owner's DHT identity lookup and service allowlist, but still requires an
 IPsec-protected connection. The current strongSwan setup only admits peers for
 which a signed peer record has already configured an IKE relationship;
 arbitrary unknown-peer IKE admission is not implemented. Public does not mean
-that the service is exposed as plaintext TCP.
+that the service is exposed without IPsec. UDP services use a separate VX6
+datagram envelope; they are not raw IP forwarding.
 
 On Linux, the repository has a strongSwan-backed IKEv2/IPsec integration and a
 container packet-capture test for the ESP path. VX6 delegates privileged

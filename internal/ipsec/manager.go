@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +86,9 @@ func newManager(root, localAddress string, id identity.Identity, run commandRunn
 		return nil, fmt.Errorf("strongSwan runtime directory is required")
 	}
 	_, localPort, _ := net.SplitHostPort(localAddress)
+	if udpServicePort(localPort) == "" {
+		return nil, fmt.Errorf("local VX6 port must be below 65534 to reserve the UDP service port")
+	}
 	m := &Manager{identity: id, localIP: localIP, localPort: localPort, root: root, run: run, peers: make(map[string]record.EndpointRecord), verified: make(map[string]time.Time), revoked: make(map[string]revokedPeer)}
 	if data, err := os.ReadFile(filepath.Join(root, "revoked-peers.json")); err == nil {
 		if err := json.Unmarshal(data, &m.revoked); err != nil {
@@ -113,6 +117,9 @@ func (m *Manager) preparePeer(ctx context.Context, peer record.EndpointRecord) e
 	peer = verifiedPeer.Endpoint()
 	if !safeNodeID.MatchString(peer.NodeID) {
 		return fmt.Errorf("peer node ID contains unsupported characters")
+	}
+	if udpServicePort(peerPort(peer.Address)) == "" {
+		return fmt.Errorf("peer VX6 port must be below 65534 to reserve the UDP service port")
 	}
 	if peer.NodeID == m.identity.NodeID {
 		return fmt.Errorf("cannot create an IPsec peer connection to self")
@@ -365,9 +372,9 @@ func (m *Manager) writeFiles(verifiedPeer record.VerifiedEndpointRecord) error {
 // ephemeral port would match no policy. Each child here pins only the
 // listener side:
 //
-//   - <name>-out: local host, any port === peer host, peer's VX6 port
+//   - <name>-out: local host, any port === peer host, TCP VX6 port and UDP port+2
 //     (this node dials the peer)
-//   - <name>-in:  local host, local VX6 port === peer host, any port
+//   - <name>-in:  local host, TCP VX6 port and UDP port+2 === peer host, any port
 //     (the peer dials this node)
 //
 // Only TCP/UDP is covered, so the separate liveness probe port remains
@@ -385,11 +392,14 @@ func connectionConfig(name, localIP, localPort, remoteIP, remotePort, localKeyFi
       }
 `, child, localTS, remoteTS)
 	}
-	ts := func(ip, port string) string {
-		if port == "" {
-			return fmt.Sprintf("%s/128[tcp], %s/128[udp]", ip, ip)
+	ts := func(ip, tcpPort, udpPort string) string {
+		if tcpPort != "" {
+			tcpPort = "/" + tcpPort
 		}
-		return fmt.Sprintf("%s/128[tcp/%s], %s/128[udp/%s]", ip, port, ip, port)
+		if udpPort != "" {
+			udpPort = "/" + udpPort
+		}
+		return fmt.Sprintf("%s/128[tcp%s], %s/128[udp%s]", ip, tcpPort, ip, udpPort)
 	}
 	return fmt.Sprintf(`connections {
   %s {
@@ -412,8 +422,24 @@ func connectionConfig(name, localIP, localPort, remoteIP, remotePort, localKeyFi
   }
 }
 `, name, localIP, remoteIP, localKeyFile, peerKeyFile,
-		child(outboundChild(name), ts(localIP, ""), ts(remoteIP, remotePort)),
-		child(inboundChild(name), ts(localIP, localPort), ts(remoteIP, "")))
+		child(outboundChild(name), ts(localIP, "", ""), ts(remoteIP, remotePort, udpServicePort(remotePort))),
+		child(inboundChild(name), ts(localIP, localPort, udpServicePort(localPort)), ts(remoteIP, "", "")))
+}
+
+func incrementPort(port string) string {
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value >= 65535 {
+		return ""
+	}
+	return strconv.Itoa(value + 1)
+}
+
+func udpServicePort(port string) string {
+	probePort := incrementPort(port)
+	if probePort == "" {
+		return ""
+	}
+	return incrementPort(probePort)
 }
 
 func outboundChild(name string) string { return name + "-out" }

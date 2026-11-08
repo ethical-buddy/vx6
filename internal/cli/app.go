@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -93,10 +94,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp] [--relay on|off] [--relay-percent N] [--peer [ipv6]:port] [--hidden-node] [--setup-firewall] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
-	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
+	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--protocol tcp|udp] [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 --private --allow-node NODE_ID [--allow-node NODE_ID ...]")
 	fmt.Fprintln(w, "  vx6 service remove --name NAME")
-	fmt.Fprintln(w, "  vx6 connect --service NAME [--listen 127.0.0.1:2222] [--proxy] [--addr [ipv6]:port]")
+	fmt.Fprintln(w, "  vx6 service allow --name NAME --node-id NODE_ID")
+	fmt.Fprintln(w, "  vx6 service revoke --name NAME --node-id NODE_ID")
+	fmt.Fprintln(w, "  vx6 connect --service NAME [--listen 127.0.0.1:2222] [--proxy] [--addr [ipv6]:port] [--protocol tcp|udp]")
 	fmt.Fprintln(w, "  vx6 send --file PATH (--to PEER | --addr [ipv6]:port) [--proxy]")
 	fmt.Fprintln(w, "  vx6 receive status")
 	fmt.Fprintln(w, "  vx6 receive allow --all | --node NAME")
@@ -128,14 +131,14 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  - Signed endpoint and service discovery via peer-to-peer registry sync")
 	fmt.Fprintln(w, "  - DHT-backed endpoint/service key lookup")
 	fmt.Fprintln(w, "  - Encrypted file transfer with local receive permissions")
-	fmt.Fprintln(w, "  - Direct TCP service sharing")
+	fmt.Fprintln(w, "  - Direct TCP and UDP service sharing")
 	fmt.Fprintln(w, "  - 5-hop proxy forwarding for direct services and files")
 	fmt.Fprintln(w, "  - Plain-TCP hidden services via 3 active intros, 2 standby intros, guards, and rendezvous relay")
 	fmt.Fprintln(w, "  - Direct IPv6 service sharing without peer sync using --addr")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Experimental / not complete:")
 	fmt.Fprintln(w, "  - eBPF loader and attach path (embedded bytecode is present and tested)")
-	fmt.Fprintln(w, "  - QUIC transport is not active in this build; all network traffic uses TCP")
+	fmt.Fprintln(w, "  - QUIC is not active; VX6 control/TCP services use TCP and UDP services use UDP")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  vx6 init --name alice --listen '[::]:4242' --peer '[::1]:4242'")
@@ -519,7 +522,7 @@ func runNode(ctx context.Context, args []string) error {
 	servicePolicies := make(map[string]serviceproxy.ServicePolicy, len(cfgFile.Services))
 	for name, svc := range cfgFile.Services {
 		services[name] = svc.Target
-		servicePolicies[name] = serviceproxy.ServicePolicy{Target: svc.Target, Private: svc.IsPrivate, AllowedNodeIDs: append([]string(nil), svc.AllowedNodeIDs...)}
+		servicePolicies[name] = serviceproxy.ServicePolicy{Target: svc.Target, Protocol: svc.Protocol, Private: svc.IsPrivate, AllowedNodeIDs: append([]string(nil), svc.AllowedNodeIDs...)}
 	}
 	registry, err := discovery.NewRegistry(filepath.Join(*dataDir, "registry.json"))
 	if err != nil {
@@ -585,7 +588,7 @@ func runNode(ctx context.Context, args []string) error {
 			}
 			m := make(map[string]serviceproxy.ServicePolicy, len(c.Services))
 			for k, v := range c.Services {
-				m[k] = serviceproxy.ServicePolicy{Target: v.Target, Private: v.IsPrivate, AllowedNodeIDs: append([]string(nil), v.AllowedNodeIDs...)}
+				m[k] = serviceproxy.ServicePolicy{Target: v.Target, Protocol: v.Protocol, Private: v.IsPrivate, AllowedNodeIDs: append([]string(nil), v.AllowedNodeIDs...)}
 			}
 			return m
 		},
@@ -635,8 +638,9 @@ func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	svc := fs.String("service", "", "service")
-	localListen := fs.String("listen", "127.0.0.1:2222", "local TCP listener address")
+	localListen := fs.String("listen", "127.0.0.1:2222", "local TCP or UDP listener address, depending on the service")
 	addrFlag := fs.String("addr", "", "direct VX6 node IPv6 address")
+	protocolFlag := fs.String("protocol", "", "protocol for a direct peer address: tcp or udp")
 	proxy := fs.Bool("proxy", false, "force proxy")
 	finalSvc, parseArgs := extractLeadingConnectService(args)
 	if err := fs.Parse(parseArgs); err != nil {
@@ -693,12 +697,23 @@ func runConnect(ctx context.Context, args []string) error {
 		if err := transfer.ValidateIPv6Address(*addrFlag); err != nil {
 			return err
 		}
+		protocol := record.ServiceProtocolTCP
+		if *protocolFlag != "" {
+			protocol = record.NormalizeServiceProtocol(*protocolFlag)
+			if protocol == "" {
+				return fmt.Errorf("invalid protocol %q (use tcp or udp)", *protocolFlag)
+			}
+		}
 		serviceRec = record.ServiceRecord{
 			NodeName:    "direct",
 			ServiceName: requestServiceName,
+			Protocol:    protocol,
 			Address:     *addrFlag,
 		}
 	} else {
+		if *protocolFlag != "" {
+			return errors.New("--protocol is only valid with --addr; discovered services use their signed protocol")
+		}
 		var err error
 		serviceRec, err = resolveServiceDistributed(ctx, cfg, finalSvc)
 		if err != nil {
@@ -753,6 +768,22 @@ func runConnect(ctx context.Context, args []string) error {
 		}
 		return vxtransport.DialContext(rctx, cfg.Node.TransportMode, serviceRec.Address)
 	}
+	if record.NormalizeServiceProtocol(serviceRec.Protocol) == record.ServiceProtocolUDP {
+		if *proxy || serviceRec.IsHidden {
+			return errors.New("UDP services currently require a direct peer connection")
+		}
+		udpDialer := func(dialCtx context.Context) (net.Conn, error) {
+			conn, err := dialer(dialCtx)
+			if err == nil && usedPeer.ID != "" {
+				observeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = runtimectl.RecordPeerUse(observeCtx, controlPath, usedPeer)
+			}
+			return conn, err
+		}
+		fmt.Printf("udp_forward_active\t%s\t%s\n", *localListen, finalSvc)
+		return serviceproxy.ServeLocalUDPForward(ctx, *localListen, serviceRec, udpDialer)
+	}
 	fmt.Printf("tunnel_active\t%s\t%s\n", *localListen, finalSvc)
 	return serviceproxy.ServeLocalForwardWithUseObserver(ctx, *localListen, serviceRec, id, dialer, func() {
 		if usedPeer.ID == "" {
@@ -781,7 +812,8 @@ func runService(args []string) error {
 		fs := flag.NewFlagSet("service add", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		name := fs.String("name", "", "local service name")
-		target := fs.String("target", "", "local TCP target")
+		target := fs.String("target", "", "local TCP or UDP target address")
+		protocol := fs.String("protocol", record.ServiceProtocolTCP, "service protocol: tcp or udp")
 		private := fs.Bool("private", false, "publish only through per-user private catalog")
 		var allowedNodeIDs stringListFlag
 		fs.Var(&allowedNodeIDs, "allow-node", "NodeID allowed to use a private service; repeatable")
@@ -798,7 +830,11 @@ func runService(args []string) error {
 			*name = prompt("Service Name")
 		}
 		if *target == "" {
-			*target = prompt("Target (e.g. :8000)")
+			*target = prompt("Target (e.g. 127.0.0.1:8000)")
+		}
+		serviceProtocol := record.NormalizeServiceProtocol(*protocol)
+		if serviceProtocol == "" {
+			return fmt.Errorf("invalid service protocol %q (use tcp or udp)", *protocol)
 		}
 		store, err := config.NewStore("")
 		if err != nil {
@@ -806,6 +842,7 @@ func runService(args []string) error {
 		}
 		entry := config.ServiceEntry{
 			Target:         *target,
+			Protocol:       serviceProtocol,
 			IsPrivate:      *private,
 			AllowedNodeIDs: append([]string(nil), allowedNodeIDs...),
 			IsHidden:       *h,
@@ -816,6 +853,9 @@ func runService(args []string) error {
 		}
 		if entry.IsPrivate && entry.IsHidden {
 			return errors.New("service cannot be both hidden and private")
+		}
+		if entry.IsHidden && entry.Protocol == record.ServiceProtocolUDP {
+			return errors.New("hidden services currently support TCP only")
 		}
 		if len(entry.AllowedNodeIDs) > 0 && !entry.IsPrivate {
 			return errors.New("--allow-node is only valid with --private")
@@ -883,6 +923,66 @@ func runService(args []string) error {
 			return err
 		}
 		fmt.Printf("service_removed\t%s\n", *name)
+		if err := requestConfiguredNodeReload(store.Path()); err == nil {
+			fmt.Println("service_policy_reload\tsent")
+		}
+		return nil
+	}
+	if len(args) >= 1 && (args[0] == "allow" || args[0] == "revoke") {
+		action := args[0]
+		fs := flag.NewFlagSet("service "+action, flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		name := fs.String("name", "", "private service name")
+		nodeID := fs.String("node-id", "", "full VX6 NodeID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *name == "" || *nodeID == "" {
+			return fmt.Errorf("service %s requires --name and --node-id", action)
+		}
+		if !strings.HasPrefix(*nodeID, "vx6_") {
+			return errors.New("node ID must be a full vx6_ SHA-256 identity")
+		}
+		decoded, err := hex.DecodeString(strings.TrimPrefix(*nodeID, "vx6_"))
+		if err != nil || len(decoded) != 32 {
+			return errors.New("node ID must contain a full 64-character hexadecimal SHA-256 digest")
+		}
+		store, err := config.NewStore("")
+		if err != nil {
+			return err
+		}
+		entry, err := store.ResolveService(*name)
+		if err != nil {
+			return err
+		}
+		if entry.IsHidden || !entry.IsPrivate {
+			return errors.New("allow/revoke applies only to non-hidden private services")
+		}
+		found := false
+		updated := make([]string, 0, len(entry.AllowedNodeIDs)+1)
+		for _, allowed := range entry.AllowedNodeIDs {
+			if allowed == *nodeID {
+				found = true
+				if action == "revoke" {
+					continue
+				}
+			}
+			updated = append(updated, allowed)
+		}
+		if action == "allow" && !found {
+			updated = append(updated, *nodeID)
+		}
+		if action == "revoke" && !found {
+			return errors.New("node is not on this service's allowlist")
+		}
+		entry.AllowedNodeIDs = updated
+		if err := store.SetService(*name, entry); err != nil {
+			return err
+		}
+		fmt.Printf("service_%s\t%s\t%s\n", action, *name, *nodeID)
+		if err := requestConfiguredNodeReload(store.Path()); err == nil {
+			fmt.Println("service_policy_reload\tsent")
+		}
 		return nil
 	}
 	store, err := config.NewStore("")
@@ -907,6 +1007,16 @@ func runService(args []string) error {
 		fmt.Printf("%s\t%s\t%s\n", label, s.Target, mode)
 	}
 	return nil
+}
+
+func requestConfiguredNodeReload(configPath string) error {
+	controlPath, err := config.RuntimeControlPath(configPath)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return runtimectl.RequestReload(ctx, controlPath)
 }
 
 func runPeerFriend(action string, args []string) error {
@@ -2735,6 +2845,12 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 		return nil, nil, err
 	}
 	probeCache := liveness.NewCache(20 * time.Second)
+	validateExpectedPeer := func(ctx context.Context, peer record.EndpointRecord) error {
+		if expected := vxtransport.ExpectedPeerID(ctx); expected != "" && peer.NodeID != expected {
+			return fmt.Errorf("signed peer identity mismatch at %s: got %s, want %s", peer.Address, peer.NodeID, expected)
+		}
+		return validatePinnedIdentity(cfg, peer)
+	}
 	probeThenEnsure := func(ctx context.Context, peer record.EndpointRecord) error {
 		if !probeCache.IsAlive(peer.Address, time.Now()) {
 			if _, _, err := liveness.Probe(ctx, peer.Address, false, 500*time.Millisecond); err != nil {
@@ -2750,7 +2866,7 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 			nodes, _ := registry.Snapshot()
 			for _, peer := range nodes {
 				if peer.Address == addr && record.VerifyEndpointRecord(peer, time.Now()) == nil {
-					if err := validatePinnedIdentity(cfg, peer); err != nil {
+					if err := validateExpectedPeer(ctx, peer); err != nil {
 						return err
 					}
 					return probeThenEnsure(ctx, peer)
@@ -2766,7 +2882,7 @@ func newIPsecDialGuard(cfg config.File, id identity.Identity, registry *discover
 					PublicKey: info.PublicKey, IssuedAt: info.IdentityIssuedAt,
 					ExpiresAt: info.IdentityExpiresAt, Signature: info.IdentitySignature,
 				}
-				if err := validatePinnedIdentity(cfg, peer); err != nil {
+				if err := validateExpectedPeer(ctx, peer); err != nil {
 					return err
 				}
 				return probeThenEnsure(ctx, peer)

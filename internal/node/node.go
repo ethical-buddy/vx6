@@ -30,7 +30,6 @@ import (
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/runtimectl"
-	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/strictjson"
 	"github.com/vx6/vx6/internal/transfer"
@@ -199,6 +198,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		if peer.NodeID == "" {
 			return fmt.Errorf("no verified signed DHT identity for endpoint")
 		}
+		if expected := vxtransport.ExpectedPeerID(dialCtx); expected != "" && peer.NodeID != expected {
+			return fmt.Errorf("signed peer identity mismatch at %s: got %s, want %s", addr, peer.NodeID, expected)
+		}
 		if !cfg.livenessCache.IsAlive(addr, time.Now()) {
 			if _, _, err := liveness.Probe(dialCtx, addr, false, syncProbeTimeout); err != nil {
 				cfg.livenessCache.MarkFailed(addr)
@@ -253,6 +255,26 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer listener.Close()
+	udpServiceAddress, err := serviceproxy.UDPServicePort(cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("configure VX6 UDP service endpoint: %w", err)
+	}
+	udpServiceUDPAddr, err := net.ResolveUDPAddr("udp6", udpServiceAddress)
+	if err != nil {
+		return fmt.Errorf("resolve VX6 UDP service endpoint: %w", err)
+	}
+	udpServiceConn, err := net.ListenUDP("udp6", udpServiceUDPAddr)
+	if err != nil {
+		return fmt.Errorf("listen on VX6 UDP service endpoint %s: %w", udpServiceAddress, err)
+	}
+	defer udpServiceConn.Close()
+	go func() {
+		if err := serviceproxy.ServeUDPServices(ctx, udpServiceConn, func() map[string]serviceproxy.ServicePolicy {
+			return runtimeServicePolicies(cfg)
+		}, peerTunnel.AuthenticatePeer); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(log, "VX6 UDP services stopped: %v\n", err)
+		}
+	}()
 	if !cfg.HideEndpoint && cfg.AdvertiseAddr != "" {
 		probeListenAddr, err := livenessListenAddress(listener.Addr().String(), cfg.AdvertiseAddr)
 		if err != nil {
@@ -291,6 +313,19 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	go maintainIPsecPeers(ctx, log, cfg, peerTunnel)
 	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
+	serviceSessions := serviceproxy.NewSessionTracker()
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				serviceSessions.Reconcile(runtimeServicePolicies(cfg))
+			}
+		}
+	}()
 	if cfg.ControlInfoPath != "" {
 		controlServer, err := runtimectl.StartWithPeerHandlers(cfg.ControlInfoPath, os.Getpid(), func() error {
 			if cfg.Reload == nil {
@@ -481,15 +516,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				}
 			case proto.KindFileTransfer:
 
-				_ = conn.SetDeadline(time.Now().Add(handshakeDeadline))
-				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
-				if err != nil {
-					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-
 				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
-				res, err := transfer.ReceiveFileWithPolicy(secureConn, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg))
+				res, err := transfer.ReceiveFileWithAuthenticatedPeer(&bufferedConn{Conn: conn, reader: reader}, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg), peerIdentity.NodeName, peerIdentity.NodeID)
 				if err != nil {
 					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
@@ -535,15 +563,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				}
 				defer release()
 
-				_ = conn.SetDeadline(time.Now().Add(relayHandshakeDeadline))
-				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindExtend, cfg.Identity)
-				if err != nil {
-					fmt.Fprintf(log, "extend secure handshake error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-
 				_ = conn.SetDeadline(time.Now().Add(idleSessionDeadline))
-				if err := onion.HandleExtend(ctx, secureConn, cfg.Identity); err != nil {
+				if err := onion.HandleExtend(ctx, &bufferedConn{Conn: conn, reader: reader}, cfg.Identity); err != nil {
 					fmt.Fprintf(log, "extend error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			case proto.KindRendezvous:
@@ -569,7 +590,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			case proto.KindServiceConn:
 
 				_ = conn.SetDeadline(time.Now().Add(serviceProxyDeadline))
-				if err := serviceproxy.HandleInboundWithPolicy(&bufferedConn{Conn: conn, reader: reader}, runtimeServicePolicies(cfg), peerIdentity); err != nil {
+				if err := serviceproxy.HandleInboundWithPolicyAndTracker(&bufferedConn{Conn: conn, reader: reader}, runtimeServicePolicies(cfg), peerIdentity, serviceSessions); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			default:
@@ -906,13 +927,11 @@ func runDHTMaintenance(ctx context.Context, log io.Writer, cfg Config, store *dh
 			}
 			probeMu.Lock()
 			attemptCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			err := verifyRoutingPeer(attemptCtx, cfg, candidate)
+			err := verifyAndPromoteRoutingCandidate(attemptCtx, cfg, cfg.DHT.RT, candidate)
 			cancel()
 			probeMu.Unlock()
-			if err == nil {
-				cfg.DHT.RT.AddNode(candidate)
-			} else {
-				cfg.DHT.RT.RecordLivenessResult(candidate.ID, time.Now(), false)
+			if err != nil {
+				fmt.Fprintf(log, "[DHT] Candidate validation failed (%s): %v\n", candidate.ID, err)
 			}
 		}
 		var refreshKeys []string
@@ -1028,6 +1047,15 @@ func verifyRoutingPeer(ctx context.Context, cfg Config, peer proto.NodeInfo) err
 	if err := liveness.TunnelPing(protectedCtx, cfg.TransportMode, peer.Addr, syncProbeTimeout); err != nil {
 		return fmt.Errorf("authenticated IPsec tunnel check failed: %w", err)
 	}
+	return nil
+}
+
+func verifyAndPromoteRoutingCandidate(ctx context.Context, cfg Config, rt *dht.RoutingTable, peer proto.NodeInfo) error {
+	if err := verifyRoutingPeer(ctx, cfg, peer); err != nil {
+		rt.RecordLivenessResult(peer.ID, time.Now(), false)
+		return err
+	}
+	rt.AddNode(peer)
 	return nil
 }
 
@@ -1325,6 +1353,7 @@ func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.Endpoin
 		if err != nil {
 			continue
 		}
+		srec.Protocol = record.NormalizeServiceProtocol(entry.Protocol)
 
 		srec.IsHidden = isHidden
 		srec.IsPrivate = entry.IsPrivate
@@ -1728,7 +1757,7 @@ func runtimeServicePolicies(base Config) map[string]serviceproxy.ServicePolicy {
 	}
 	policies := make(map[string]serviceproxy.ServicePolicy, len(base.Services))
 	for name, target := range base.Services {
-		policies[name] = serviceproxy.ServicePolicy{Target: target}
+		policies[name] = serviceproxy.ServicePolicy{Target: target, Protocol: record.ServiceProtocolTCP}
 	}
 	return policies
 }

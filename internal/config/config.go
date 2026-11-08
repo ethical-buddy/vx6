@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +90,7 @@ type PeerEntry struct {
 
 type ServiceEntry struct {
 	Target             string   `json:"target"`
+	Protocol           string   `json:"protocol,omitempty"`
 	IsHidden           bool     `json:"is_hidden"`
 	IsPrivate          bool     `json:"is_private,omitempty"`
 	AllowedNodeIDs     []string `json:"allowed_node_ids,omitempty"`
@@ -513,6 +516,7 @@ func normalize(cfg *File) {
 		cfg.Services = map[string]ServiceEntry{}
 	}
 	for name, svc := range cfg.Services {
+		svc.Protocol = record.NormalizeServiceProtocol(svc.Protocol)
 		svc.AllowedNodeIDs = uniqueSortedStrings(svc.AllowedNodeIDs)
 		if svc.IntroNodes == nil {
 			svc.IntroNodes = []string{}
@@ -548,6 +552,17 @@ func normalize(cfg *File) {
 
 func validateServicePolicies(services map[string]ServiceEntry) error {
 	for name, service := range services {
+		if record.NormalizeServiceProtocol(service.Protocol) == "" {
+			return fmt.Errorf("service %q: protocol must be tcp or udp", name)
+		}
+		host, portText, err := net.SplitHostPort(service.Target)
+		port, portErr := strconv.Atoi(portText)
+		if err != nil || host == "" || portErr != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("service %q: target must be host:port", name)
+		}
+		if service.IsHidden && service.Protocol == record.ServiceProtocolUDP {
+			return fmt.Errorf("service %q: hidden services currently require TCP", name)
+		}
 		if service.IsHidden && len(service.AllowedNodeIDs) > 0 {
 			return fmt.Errorf("service %q: hidden-service authorization is not changed by the standard service policy", name)
 		}

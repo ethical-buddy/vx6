@@ -560,7 +560,7 @@ func (rt *RoutingTable) ClosestNodesForBootstrap(target string, count int, byNam
 		return nil
 	}
 	rt.mu.RLock()
-	all := make([]*bucketEntry, 0, len(rt.peerByID))
+	all := make([]bucketEntry, 0, len(rt.peerByID))
 	seen := make(map[string]struct{}, len(rt.peerByID))
 	buckets := rt.Buckets[:]
 	if byNameHash {
@@ -569,7 +569,7 @@ func (rt *RoutingTable) ClosestNodesForBootstrap(target string, count int, byNam
 	for _, bucket := range buckets {
 		for _, entry := range bucket {
 			seen[entry.Node.ID] = struct{}{}
-			all = append(all, entry)
+			all = append(all, *entry)
 		}
 	}
 	for _, entry := range rt.offline {
@@ -577,7 +577,7 @@ func (rt *RoutingTable) ClosestNodesForBootstrap(target string, count int, byNam
 			continue
 		}
 		if _, ok := seen[entry.Node.ID]; !ok {
-			all = append(all, entry)
+			all = append(all, *entry)
 		}
 	}
 	rt.mu.RUnlock()
@@ -589,15 +589,17 @@ func (rt *RoutingTable) closestFrom(buckets [][]*bucketEntry, target string, cou
 		return nil
 	}
 	rt.mu.RLock()
-	all := make([]*bucketEntry, 0)
+	all := make([]bucketEntry, 0)
 	for _, bucket := range buckets {
-		all = append(all, bucket...)
+		for _, entry := range bucket {
+			all = append(all, *entry)
+		}
 	}
 	rt.mu.RUnlock()
 	return sortClosestEntries(all, target, count, byNameHash)
 }
 
-func sortClosestEntries(all []*bucketEntry, target string, count int, byNameHash bool) []proto.NodeInfo {
+func sortClosestEntries(all []bucketEntry, target string, count int, byNameHash bool) []proto.NodeInfo {
 	if count <= 0 {
 		return nil
 	}

@@ -152,3 +152,58 @@ func TestPrivateServiceAllowsVerifiedIKEPeerOnAllowlist(t *testing.T) {
 		t.Fatal("private service handler did not finish")
 	}
 }
+
+func TestPrivateServiceRevocationClosesEstablishedStream(t *testing.T) {
+	clientID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := record.NewEndpointRecord(clientID, "client", "[2001:db8::2]:4242", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	backendConn := make(chan net.Conn, 1)
+	go func() {
+		conn, err := backend.Accept()
+		if err == nil {
+			backendConn <- conn
+		}
+	}()
+
+	clientConn, serverConn := net.Pipe()
+	tracker := NewSessionTracker()
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- HandleInboundWithPolicyAndTracker(serverConn, map[string]ServicePolicy{
+			"admin": {Target: backend.Addr().String(), Private: true, AllowedNodeIDs: []string{clientID.NodeID}},
+		}, peer, tracker)
+	}()
+	payload, _ := json.Marshal(ConnectRequest{Version: 1, Action: "open", ServiceName: "admin"})
+	if err := proto.WriteLengthPrefixed(clientConn, payload); err != nil {
+		t.Fatal(err)
+	}
+	var stream net.Conn
+	select {
+	case stream = <-backendConn:
+	case <-time.After(time.Second):
+		t.Fatal("private service stream did not establish")
+	}
+	defer stream.Close()
+	tracker.Reconcile(map[string]ServicePolicy{"admin": {Target: backend.Addr().String(), Private: true}})
+	_ = clientConn.SetReadDeadline(time.Now().Add(time.Second))
+	var one [1]byte
+	if _, err := clientConn.Read(one[:]); err == nil {
+		t.Fatal("revoked service stream remained open")
+	}
+	_ = clientConn.Close()
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("revoked handler did not stop")
+	}
+}

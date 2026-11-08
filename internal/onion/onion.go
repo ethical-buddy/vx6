@@ -19,7 +19,6 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
-	"github.com/vx6/vx6/internal/secure"
 	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
@@ -431,6 +430,7 @@ func dialRelayConn(ctx context.Context, addr string, opts ClientOptions, expecte
 	if mode == "" {
 		mode = vxtransport.ModeAuto
 	}
+	ctx = vxtransport.WithExpectedPeerID(ctx, expectedNodeID)
 	conn, err := vxtransport.DialContext(ctx, mode, addr)
 	if err != nil {
 		return nil, err
@@ -439,16 +439,9 @@ func dialRelayConn(ctx context.Context, addr string, opts ClientOptions, expecte
 		_ = conn.Close()
 		return nil, err
 	}
-	secureConn, err := secure.Client(conn, proto.KindExtend, opts.Identity)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	if expectedNodeID != "" && secureConn.PeerNodeID() != expectedNodeID {
-		_ = secureConn.Close()
-		return nil, fmt.Errorf("relay identity mismatch: got %s want %s", secureConn.PeerNodeID(), expectedNodeID)
-	}
-	return secureConn, nil
+	// The dial guard validates the expected peer against its signed endpoint
+	// record before establishing IKE. ESP protects this relay stream.
+	return conn, nil
 }
 
 func notifyTrace(plan CircuitPlan) {

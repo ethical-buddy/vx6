@@ -50,7 +50,7 @@ func TestPreparePeerWritesPinnedIPv6TunnelConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "-out {", "-in {", "local_ts = 2001:db8::1/128[tcp], 2001:db8::1/128[udp]", "remote_ts = 2001:db8::2/128[tcp/4242], 2001:db8::2/128[udp/4242]", "local_ts = 2001:db8::1/128[tcp/4242], 2001:db8::1/128[udp/4242]", "remote_ts = 2001:db8::2/128[tcp], 2001:db8::2/128[udp]", "start_action = trap", "esp_proposals = aes128gcm16"} {
+	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "-out {", "-in {", "local_ts = 2001:db8::1/128[tcp], 2001:db8::1/128[udp]", "remote_ts = 2001:db8::2/128[tcp/4242], 2001:db8::2/128[udp/4244]", "local_ts = 2001:db8::1/128[tcp/4242], 2001:db8::1/128[udp/4244]", "remote_ts = 2001:db8::2/128[tcp], 2001:db8::2/128[udp]", "start_action = trap", "esp_proposals = aes128gcm16"} {
 		if !strings.Contains(string(config), want) {
 			t.Errorf("generated connection config lacks %q", want)
 		}
@@ -58,8 +58,8 @@ func TestPreparePeerWritesPinnedIPv6TunnelConfig(t *testing.T) {
 	if strings.Contains(string(config), "id = @") {
 		t.Fatal("generated IKE config must not use the VX6 node name as the raw-key IKE identity")
 	}
-	if strings.Contains(string(config), "service") || strings.Contains(string(config), "udp/4243") {
-		t.Fatal("generated IPsec config unexpectedly includes a VX6 service label or cleartext liveness port")
+	if strings.Contains(string(config), "service") || strings.Contains(string(config), "udp/4242") || strings.Contains(string(config), "udp/4243") || !strings.Contains(string(config), "udp/4244") {
+		t.Fatal("generated IPsec config must protect the UDP service port but leave the liveness port outside ESP selectors")
 	}
 	info, err := os.Stat(filepath.Join(root, "private", local.NodeID+".pem"))
 	if err != nil {
@@ -405,26 +405,20 @@ func TestChildSAInstalledRequiresExpectedConnectionAndState(t *testing.T) {
 // Every (dialer, listener) direction must be covered by exactly the child the
 // manager checks for it; a selector pair with the VX6 port on both ends would
 // leave ordinary dials unprotected (they match no IPsec policy).
-func TestSelectorsCoverEphemeralSourcePorts(t *testing.T) {
+func TestSelectorsCoverTCPAndUDPServicePorts(t *testing.T) {
 	cfg := connectionConfig("vx6-x", "2001:db8::1", "4242", "2001:db8::2", "4343", "/l.pem", "/r.pem")
 	children := parseChildren(t, cfg)
-	type flow struct{ lport, rport int }
-	covers := func(c childTS, f flow) bool {
-		return c.local.match(f.lport) && c.remote.match(f.rport)
+	if c := children["vx6-x-out"]; !c.local.tcp.match(51234) || !c.remote.tcp.match(4343) || !c.local.udp.match(51234) || !c.remote.udp.match(4345) {
+		t.Fatalf("outbound child does not cover TCP and UDP service ports: %+v", c)
 	}
-	// This node dials the peer's listener (4343) from an ephemeral port.
-	if c := children["vx6-x-out"]; !covers(c, flow{51234, 4343}) {
-		t.Fatalf("outbound child does not cover local ephemeral -> peer listener: %+v", c)
+	if c := children["vx6-x-in"]; !c.local.tcp.match(4242) || !c.remote.tcp.match(60001) || !c.local.udp.match(4244) || !c.remote.udp.match(60001) {
+		t.Fatalf("inbound child does not cover TCP and UDP service ports: %+v", c)
 	}
-	// The peer dials this node's listener (4242) from an ephemeral port.
-	if c := children["vx6-x-in"]; !covers(c, flow{4242, 60001}) {
-		t.Fatalf("inbound child does not cover peer ephemeral -> local listener: %+v", c)
+	if c := children["vx6-x-out"]; c.remote.tcp.match(60001) || c.remote.udp.match(60001) {
+		t.Fatalf("outbound child unexpectedly covers arbitrary peer ports: %+v", c)
 	}
-	// Neither child may cover arbitrary non-VX6 port pairs.
-	for name, c := range children {
-		if covers(c, flow{51234, 60001}) {
-			t.Fatalf("child %s covers non-VX6 traffic: %+v", name, c)
-		}
+	if c := children["vx6-x-in"]; c.local.tcp.match(4343) || c.local.udp.match(4343) {
+		t.Fatalf("inbound child unexpectedly covers arbitrary local ports: %+v", c)
 	}
 }
 
@@ -435,28 +429,37 @@ type portSel struct {
 
 func (p portSel) match(port int) bool { return p.any || p.port == port }
 
-type childTS struct{ local, remote portSel }
+type transportSelectors struct{ tcp, udp portSel }
+type childTS struct{ local, remote transportSelectors }
 
 func parseChildren(t *testing.T, cfg string) map[string]childTS {
 	t.Helper()
 	out := map[string]childTS{}
 	var current string
-	sel := func(v string) portSel {
-		first := strings.TrimSpace(strings.Split(v, ",")[0])
-		open := strings.Index(first, "[")
-		if open < 0 {
-			return portSel{any: true}
+	sel := func(v string) transportSelectors {
+		result := transportSelectors{tcp: portSel{any: true}, udp: portSel{any: true}}
+		for _, item := range strings.Split(v, ",") {
+			item = strings.TrimSpace(item)
+			open := strings.Index(item, "[")
+			if open < 0 {
+				continue
+			}
+			inner := strings.TrimSuffix(item[open+1:], "]")
+			protocol, port, hasPort := strings.Cut(inner, "/")
+			value := portSel{any: !hasPort}
+			if hasPort {
+				if _, err := fmt.Sscanf(port, "%d", &value.port); err != nil {
+					t.Fatalf("bad selector %q", item)
+				}
+			}
+			switch protocol {
+			case "tcp":
+				result.tcp = value
+			case "udp":
+				result.udp = value
+			}
 		}
-		inner := strings.TrimSuffix(first[open+1:], "]")
-		_, port, ok := strings.Cut(inner, "/")
-		if !ok {
-			return portSel{any: true}
-		}
-		var n int
-		if _, err := fmt.Sscanf(port, "%d", &n); err != nil {
-			t.Fatalf("bad selector %q", first)
-		}
-		return portSel{port: n}
+		return result
 	}
 	for _, line := range strings.Split(cfg, "\n") {
 		line = strings.TrimSpace(line)

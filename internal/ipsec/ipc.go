@@ -300,6 +300,11 @@ func serveIPCConn(ctx context.Context, conn net.Conn, allowed map[uint32]struct{
 		writeIPCError(conn, "cannot enforce VX6 firewall policy")
 		return
 	}
+	udpServicePort := incrementUDPServicePort(localPort(req.LocalAddress))
+	if udpServicePort == "" || firewall.RegisterPort(ctx, udpServicePort) != nil {
+		writeIPCError(conn, "cannot enforce VX6 UDP service firewall policy")
+		return
+	}
 	var response ipcResponse
 	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -336,6 +341,14 @@ func localPort(address string) string {
 		return ""
 	}
 	return port
+}
+
+func incrementUDPServicePort(port string) string {
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || value == 0 || value >= 65534 {
+		return ""
+	}
+	return strconv.FormatUint(value+2, 10)
 }
 
 func writeIPCError(conn net.Conn, message string) {

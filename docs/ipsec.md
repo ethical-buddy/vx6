@@ -16,8 +16,9 @@ PRF-SHA-256, and Curve25519; ESP uses AES-GCM-128. `start_action = trap` and
 `close_action = trap` ensure the kernel policy does not send matching peer
 traffic in cleartext when an SA is unavailable. The VX6 dial gate additionally
 requires strongSwan to report the matching CHILD_SA installed before opening a
-TCP or QUIC socket. The listener rejects connections unless the source maps to
-a verified peer with an installed CHILD_SA.
+TCP connection. UDP service datagrams use a separate listener at endpoint port
+`P+2`; the existing VX6 liveness probe remains at UDP `P+1`. Both service paths
+are selected by explicit TCP/UDP ESP selectors.
 
 The local identity key is sent to the root-owned IPsec service through the
 authorized local Unix socket and written as PKCS#8 PEM with mode `0600` under
@@ -71,8 +72,10 @@ the CLI, invokes `swanctl` and stores the private key under its protected state
 directory.
 
 The service owns a dedicated nftables table named `inet vx6`. For every
-configured VX6 listener port it accepts packets marked as IPsec-protected and
-drops cleartext TCP/UDP packets on that port in both input and output hooks.
+configured VX6 listener port `P` it accepts packets marked as IPsec-protected
+and drops cleartext TCP/UDP packets on `P` and `P+2` in both input and output
+hooks. UDP `P+1` is the separate liveness probe and is not an application
+service port.
 Revocation also drops IKE (UDP/500) and ESP (IPv6 next-header 50) to and from
 the peer's signed IPv6 endpoint. The table is rebuilt atomically from
 root-owned state and contains no unrelated host rules. These rules can affect
@@ -105,11 +108,10 @@ package upgrades/removal, and firewall policy lifecycle. See the
 [packaging plan](packaging-plan.md). Application-level listener rejection is
 not a substitute for firewall enforcement.
 
-The listener check occurs after TCP/QUIC has reached VX6. It can prevent an
-unauthorized connection from reaching VX6 protocol handling, but it does not
-hide the listening port, prevent connection attempts, or prove that packets
-were protected on the wire. Only kernel IPsec policy plus a real packet capture
-on a two-peer test can demonstrate that.
+The TCP and UDP service listeners can reject traffic that is not associated
+with an installed peer SA. This does not hide the listening ports or prevent
+connection attempts. Only kernel IPsec policy plus a real packet capture on a
+two-peer test demonstrates that service data was protected on the wire.
 
 ## Host Requirements
 
@@ -142,16 +144,17 @@ application behavior, not real ESP encryption.
 
 `tests/ipsec-e2e/run.sh` performs a real two-peer IPv6 container test. It places
 a router/sniffer between the nodes and captures from before IKE through ping,
-VX6 connection, and a Python HTTP service request. The successful run showed
+VX6 connection, a Python HTTP request, and a UDP echo service exchange. The successful run showed
 an established IKEv2 SA with Ed25519-authenticated peer identities,
 AES-GCM-128/PRF-SHA-256/Curve25519, an ESP AES-GCM-128 tunnel CHILD_SA, and
 increasing XFRM counters. The post-tunnel ping was not visible as clear ICMPv6;
-the HTTP service returned a unique test marker to the client, but that marker
-was absent from the transit capture. The capture contained ESP and IKE, and no
-clear peer-to-peer VX6 TCP/UDP traffic on the configured service port after
-tunnel establishment. A third-party clear TCP probe to that port received no
-response and was blocked. The intentionally pre-tunnel baseline ping was
-visible in clear ICMPv6, demonstrating the before/after distinction.
+the HTTP and UDP echo services returned unique test markers to the client, but
+neither marker appeared in the transit capture. UDP use increased the ESP SA
+packet counters. The capture contained ESP and IKE, and no clear peer-to-peer
+VX6 TCP traffic on `P` or UDP service traffic on `P+2` after tunnel
+establishment. A third-party clear TCP probe to that port received no response
+and was blocked. The intentionally pre-tunnel baseline ping was visible in
+clear ICMPv6, demonstrating the before/after distinction.
 
 The capture uses `tcpdump -i any`; Linux can show a packet at both ingress and
 egress, so reported totals are observations, not necessarily unique frames.
@@ -179,7 +182,7 @@ For an already provisioned Linux peer pair, run
 `sudo bash scripts/verify-ipsec-linux.sh <interface> <peer-ipv6> <vx6-port> -- <traffic-test-command>`.
 It checks the installed SA and XFRM state, captures the outer interface while
 the supplied VX6 workload runs, then fails if it sees no ESP or sees clear
-TCP/UDP traffic on the VX6 port. This is a verification harness, not an install
+TCP/UDP traffic on the VX6 service ports. This is a verification harness, not an install
 script; it does not configure system networking. The two-peer workload and a
 failed-key test still have to be run in a controlled test environment before
 release.
