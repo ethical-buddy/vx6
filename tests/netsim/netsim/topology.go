@@ -51,6 +51,7 @@ func DefaultParams() Params {
 }
 
 type Topology struct {
+	RunID      string  `json:"run_id,omitempty"`
 	Params     Params  `json:"params"`
 	ASes       []*AS   `json:"ases"`
 	Links      []Link  `json:"links"`

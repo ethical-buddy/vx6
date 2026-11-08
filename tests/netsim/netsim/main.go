@@ -24,17 +24,24 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
+	"syscall"
 	"time"
 )
+
+var buildRevision = "unknown"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -49,6 +56,8 @@ func main() {
 		err = cmdRender(os.Args[2:])
 	case "run":
 		err = cmdRun(os.Args[2:])
+	case "teardown":
+		err = cmdTeardown(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(os.Args[2:])
 	case "-h", "--help", "help":
@@ -69,6 +78,7 @@ func usage() {
   netsim plan    -out plan.json [-nodes N -isps N -orgs N ...]
   netsim render  -params plan.json            print ip/FRR commands (no changes)
   netsim run     -out DIR [params]            build and drive (Linux, root)
+  netsim teardown -params DIR/topology.json   stop and remove this run only
   netsim doctor                               check prerequisites
 
 Params: -seed -tier1 -isps -orgs -attackers -nodes -ipsec-nodes -lan-size
@@ -149,6 +159,7 @@ func cmdRender(args []string) error {
 	for _, c := range RouterCmds(t) {
 		fmt.Println(c)
 	}
+	fmt.Println("# PREVIEW ONLY: commands are not run; use `netsim run` for managed setup and cleanup.")
 	for _, a := range t.ASes {
 		fmt.Printf("# FRR bgpd config for %s (AS%d):\n", a.RouterNS, a.ASN)
 	}
@@ -175,12 +186,9 @@ func cmdDoctor(args []string) error {
 		_, err := exec.LookPath(bin)
 		report(bin, err)
 	}
-	// FRR is optional: without it, ASes still route statically within the sim
-	// is not possible across ASes, so BGP scenarios need it.
-	if _, err := exec.LookPath("bgpd"); err != nil {
-		fmt.Println("  [warn]    bgpd (FRR) not found: inter-AS BGP and hijack scenarios unavailable; install frr")
-	} else {
-		fmt.Println("  [ok]      bgpd (FRR)")
+	for _, bin := range []string{"bgpd", "zebra"} {
+		_, err := exec.LookPath(bin)
+		report(bin+" (FRR)", err)
 	}
 	if _, err := os.Stat("/proc/sys/net/ipv6"); err != nil {
 		ok = false
@@ -222,7 +230,7 @@ func (r *runner) run(c Cmd) error {
 	return nil
 }
 
-func cmdRun(args []string) error {
+func cmdRun(args []string) (retErr error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	params := fs.String("params", "", "topology JSON (else generated from flags)")
 	outDir := fs.String("out", "", "results directory (required)")
@@ -231,6 +239,7 @@ func cmdRun(args []string) error {
 	settleRounds := fs.Int("settle-rounds", 6, "snapshot rounds to take after the last join")
 	settleGap := fs.Duration("settle-gap", 30*time.Second, "delay between settle snapshots")
 	probes := fs.Int("probes", 50, "random lookup probes per snapshot round")
+	restartCount := fs.Int("restart-count", 1, "nodes to restart after joining to check bbolt recovery (0 disables)")
 	p := paramFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -240,6 +249,16 @@ func cmdRun(args []string) error {
 	}
 	if !*dry && os.Geteuid() != 0 {
 		return errors.New("run needs root; use -dry-run to preview")
+	}
+	if !*dry {
+		for _, bin := range []string{"ip", "sysctl", "bgpd", "zebra"} {
+			if _, err := exec.LookPath(bin); err != nil {
+				return fmt.Errorf("live run requires %s in PATH", bin)
+			}
+		}
+		if _, err := os.Stat("/proc/sys/net/ipv6"); err != nil {
+			return errors.New("live run requires Linux IPv6 support")
+		}
 	}
 	var t *Topology
 	var err error
@@ -251,8 +270,32 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+	runID, err := newRunID()
+	if err != nil {
+		return fmt.Errorf("create isolated run ID: %w", err)
+	}
+	if err := isolateNamespaces(t, runID); err != nil {
 		return err
+	}
+	if err := validateRunOptions(*settleRounds, *settleGap, *probes, *restartCount, len(t.Nodes)); err != nil {
+		return err
+	}
+	securedOutDir, err := secureRunDirectory(*outDir, !*dry, true)
+	if err != nil {
+		return fmt.Errorf("secure output directory: %w", err)
+	}
+	*outDir = securedOutDir
+	entries, err := os.ReadDir(*outDir)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("output directory %s is not empty; use a fresh directory per run", *outDir)
+	}
+	if !*dry {
+		if err := preflightNamespaces(t); err != nil {
+			return err
+		}
 	}
 	logf, err := os.Create(filepath.Join(*outDir, "commands.log"))
 	if err != nil {
@@ -262,23 +305,140 @@ func cmdRun(args []string) error {
 	r := &runner{dry: *dry, log: logf}
 
 	sim := NewSimRun(t, r, *outDir, *simnodeBin)
+	started := time.Now().UTC()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	topologyData, _ := json.Marshal(t)
+	simnodePath, _ := exec.LookPath(*simnodeBin)
+	report := &Report{SchemaVersion: 1, RunID: runID, StartedAt: started,
+		BuildRevision: buildRevision, TopologySHA256: hashHex(topologyData),
+		SimnodeSHA256: hashFile(simnodePath), Params: t.Params,
+		HostOS: runtime.GOOS, HostArch: runtime.GOARCH,
+		SettleRounds: *settleRounds, SettleGap: *settleGap, ProbesPerRound: *probes,
+		RestartCount: *restartCount, DryRun: *dry}
+	defer func() {
+		report.FinishedAt = time.Now().UTC()
+		if *dry {
+			report.CleanupStatus = "not applicable (dry run)"
+		} else if cleanupErr := sim.Cleanup(); cleanupErr != nil {
+			report.CleanupStatus = "FAILED: " + cleanupErr.Error()
+			if retErr == nil {
+				retErr = cleanupErr
+			} else {
+				retErr = fmt.Errorf("%v; cleanup also failed: %w", retErr, cleanupErr)
+			}
+		} else {
+			report.CleanupStatus = "complete"
+		}
+		if writeErr := writeReportFiles(*outDir, report); writeErr != nil {
+			if retErr == nil {
+				retErr = writeErr
+			} else {
+				retErr = fmt.Errorf("%v; report write failed: %w", retErr, writeErr)
+			}
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := sim.BuildFabric(); err != nil {
 		return fmt.Errorf("build fabric: %w", err)
 	}
-	ctx := context.Background()
-	report, err := sim.DriveWaves(ctx, *settleRounds, *settleGap, *probes)
+	partial, err := sim.DriveWaves(ctx, *settleRounds, *settleGap, *probes, *restartCount)
+	if partial != nil {
+		report.Rounds = partial.Rounds
+		report.Restarts = partial.Restarts
+		report.RunID = runID
+		report.StartedAt = started
+		report.BuildRevision = buildRevision
+		report.TopologySHA256 = hashHex(topologyData)
+		report.SimnodeSHA256 = hashFile(simnodePath)
+	}
 	if err != nil {
 		return fmt.Errorf("drive waves: %w", err)
 	}
-	data, _ := json.MarshalIndent(report, "", "  ")
-	if err := os.WriteFile(filepath.Join(*outDir, "report.json"), data, 0o644); err != nil {
+	fmt.Printf("done: %d nodes, %d rounds. Reports: %s and %s\n", len(t.Nodes), len(report.Rounds),
+		filepath.Join(*outDir, "report.json"), filepath.Join(*outDir, "report.md"))
+	return nil
+}
+
+func cmdTeardown(args []string) error {
+	fs := flag.NewFlagSet("teardown", flag.ContinueOnError)
+	params := fs.String("params", "", "topology.json emitted by netsim run")
+	dry := fs.Bool("dry-run", false, "print cleanup actions without changing the host")
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	fmt.Printf("done: %d nodes, %d waves. Report: %s\n", len(t.Nodes), len(report.Rounds), filepath.Join(*outDir, "report.json"))
-	if !*dry {
-		fmt.Printf("Tear down with: netsim teardown -params %s  (or reboot the lab host)\n", filepath.Join(*outDir, "topology.json"))
+	if *params == "" {
+		return errors.New("-params is required")
+	}
+	if !*dry && os.Geteuid() != 0 {
+		return errors.New("teardown needs root; use -dry-run to preview")
+	}
+	t, err := loadTopology(*params)
+	if err != nil {
+		return err
+	}
+	if err := validateOwnedTopology(t); err != nil {
+		return err
+	}
+	runDir := filepath.Dir(*params)
+	securedRunDir, err := secureRunDirectory(runDir, !*dry, false)
+	if err != nil {
+		return fmt.Errorf("validate run directory: %w", err)
+	}
+	runDir = securedRunDir
+	if *dry {
+		files, err := filepath.Glob(filepath.Join(runDir, "pids", "*.json"))
+		if err != nil {
+			return err
+		}
+		for _, file := range files {
+			fmt.Printf("would stop recorded process: %s\n", filepath.Base(file))
+		}
+	} else {
+		if err := stopPersistedProcesses(filepath.Join(runDir, "pids")); err != nil {
+			return fmt.Errorf("stop recorded processes: %w", err)
+		}
+	}
+	r := &runner{dry: *dry}
+	if err := deleteOwnedNamespaces(t, r); err != nil {
+		return err
+	}
+	fmt.Printf("teardown complete for netsim run %s\n", t.RunID)
+	return nil
+}
+
+func validateRunOptions(settleRounds int, settleGap time.Duration, probes, restartCount, nodes int) error {
+	if settleRounds < 0 || settleRounds > 100 {
+		return errors.New("-settle-rounds must be 0..100")
+	}
+	if settleGap < 0 || settleGap > 24*time.Hour {
+		return errors.New("-settle-gap must be 0..24h")
+	}
+	if probes < 0 || probes > 10000 {
+		return errors.New("-probes must be 0..10000")
+	}
+	if restartCount < 0 || restartCount > nodes {
+		return errors.New("-restart-count must be 0..nodes")
 	}
 	return nil
+}
+
+func hashHex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func hashFile(path string) string {
+	if path == "" {
+		return "unavailable"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "unavailable"
+	}
+	return hashHex(data)
 }
 
 // Summary is the human-readable digest from `netsim plan`.

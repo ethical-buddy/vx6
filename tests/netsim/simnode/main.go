@@ -22,7 +22,8 @@
 //
 //	GET  /status               identity, address, peer counts, RSS
 //	GET  /snapshot             routing-table peers (DHT snapshot)
-//	GET  /lookup?target=ID     RecursiveFindNodeDetailed result + latency
+//	GET  /lookup?type=id&target=ID
+//	GET  /lookup?type=name&target=NAME (the DHT receives only the name hash)
 package main
 
 import (
@@ -40,6 +41,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -60,16 +62,49 @@ var labPrefixes = []netip.Prefix{
 
 // passThroughTunnel mirrors internal/integration's test provider: it accepts
 // only peers with a valid signed endpoint record but negotiates no IPsec.
-type passThroughTunnel struct{}
+type passThroughTunnel struct {
+	mu    sync.RWMutex
+	peers map[string]record.EndpointRecord
+}
 
-func (passThroughTunnel) PreparePeer(_ context.Context, p record.EndpointRecord) error {
-	return record.VerifyEndpointRecord(p, time.Now())
+func (p *passThroughTunnel) PreparePeer(_ context.Context, peer record.EndpointRecord) error {
+	if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.peers[peerHost(peer.Address)] = peer
+	p.mu.Unlock()
+	return nil
 }
-func (passThroughTunnel) EnsurePeer(_ context.Context, p record.EndpointRecord) error {
-	return record.VerifyEndpointRecord(p, time.Now())
+func (p *passThroughTunnel) EnsurePeer(ctx context.Context, peer record.EndpointRecord) error {
+	return p.PreparePeer(ctx, peer)
 }
-func (passThroughTunnel) RegisterProbePort(context.Context, string) error { return nil }
-func (passThroughTunnel) AcceptPeer(context.Context, string) bool         { return true }
+func (*passThroughTunnel) RegisterProbePort(context.Context, string) error { return nil }
+func (p *passThroughTunnel) AuthenticatePeer(_ context.Context, remote string) (record.EndpointRecord, bool) {
+	p.mu.RLock()
+	peer, ok := p.peers[peerHost(remote)]
+	p.mu.RUnlock()
+	if !ok || record.VerifyEndpointRecord(peer, time.Now()) != nil {
+		return record.EndpointRecord{}, false
+	}
+	return peer, true
+}
+func (p *passThroughTunnel) AcceptPeer(ctx context.Context, remote string) bool {
+	_, ok := p.AuthenticatePeer(ctx, remote)
+	return ok
+}
+
+func peerHost(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	parsed, err := netip.ParseAddr(host)
+	if err != nil {
+		return ""
+	}
+	return parsed.String()
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -181,7 +216,7 @@ func run() error {
 		Name: *name, NodeID: id.NodeID, ListenAddr: *listen, AdvertiseAddr: *listen,
 		DataDir: dataDir, ConfigPath: configPath, PeerAddrs: seedAddrs,
 		Services: map[string]string{}, DHT: srv, Identity: id, Registry: registry,
-		IPsecTunnel:     passThroughTunnel{},
+		IPsecTunnel:     &passThroughTunnel{peers: make(map[string]record.EndpointRecord)},
 		RefreshServices: func() map[string]string { return map[string]string{} },
 	}
 
@@ -239,19 +274,31 @@ type adminState struct {
 
 // Snapshot is the per-node DHT state the orchestrator collects.
 type Snapshot struct {
-	Time    time.Time  `json:"time"`
-	Name    string     `json:"name"`
-	NodeID  string     `json:"node_id"`
-	Addr    string     `json:"addr"`
-	Active  int        `json:"active"`
-	Peers   []PeerView `json:"peers"`
-	Records int        `json:"registry_records"`
-	RSSKB   int        `json:"rss_kb"`
-	Uptime  float64    `json:"uptime_sec"`
+	Time     time.Time    `json:"time"`
+	Name     string       `json:"name"`
+	NodeID   string       `json:"node_id"`
+	NameHash string       `json:"name_hash"`
+	Addr     string       `json:"addr"`
+	Active   int          `json:"active"`
+	Peers    []PeerView   `json:"peers"`
+	Records  int          `json:"registry_records"`
+	RSSKB    int          `json:"rss_kb"`
+	Uptime   float64      `json:"uptime_sec"`
+	Lookup   LookupPolicy `json:"lookup_policy"`
+}
+
+type LookupPolicy struct {
+	MaxRounds      int   `json:"max_rounds"`
+	MaxConcurrent  int   `json:"max_concurrent"`
+	MaxPeerQueries int   `json:"max_peer_queries"`
+	MaxReferrals   int   `json:"max_referrals_per_reply"`
+	PeerTimeoutMS  int64 `json:"peer_timeout_ms"`
+	TotalTimeoutMS int64 `json:"total_timeout_ms"`
 }
 
 type PeerView struct {
 	ID       string `json:"id"`
+	NameHash string `json:"name_hash"`
 	Addr     string `json:"addr"`
 	Success  uint32 `json:"success"`
 	Fail     uint8  `json:"fail"`
@@ -261,35 +308,47 @@ type PeerView struct {
 
 // LookupReport is returned by /lookup.
 type LookupReport struct {
-	Target    string  `json:"target"`
-	Outcome   string  `json:"outcome"`
-	Found     bool    `json:"found"`
-	Rounds    int     `json:"rounds"`
-	Queried   int     `json:"queried"`
-	LatencyMS float64 `json:"latency_ms"`
-	Error     string  `json:"error,omitempty"`
+	Source         string  `json:"source,omitempty"`
+	TargetType     string  `json:"target_type"`
+	Target         string  `json:"target"`
+	ExpectedNodeID string  `json:"expected_node_id,omitempty"`
+	Outcome        string  `json:"outcome"`
+	Found          bool    `json:"found_expected"`
+	MatchCount     int     `json:"match_count"`
+	Rounds         int     `json:"rounds"`
+	Queried        int     `json:"queried"`
+	LatencyMS      float64 `json:"latency_ms"`
+	Error          string  `json:"error,omitempty"`
 }
 
 func (a *adminState) snapshot() Snapshot {
 	obs := a.srv.RT.SnapshotPeers()
 	peers := make([]PeerView, 0, len(obs))
 	for _, o := range obs {
-		peers = append(peers, PeerView{ID: o.Node.ID, Addr: o.Node.Addr, Success: o.SuccessCount,
+		peers = append(peers, PeerView{ID: o.Node.ID, NameHash: o.Node.NameHash, Addr: o.Node.Addr, Success: o.SuccessCount,
 			Fail: o.FailCount, RTTMicro: o.RTTMicros, Pinned: o.Pinned})
 	}
 	recs, _ := a.registry.Snapshot()
-	return Snapshot{Time: time.Now().UTC(), Name: a.name, NodeID: a.id, Addr: a.addr,
+	limits := a.srv.LookupLimits()
+	return Snapshot{Time: time.Now().UTC(), Name: a.name, NodeID: a.id, NameHash: dht.NodeNameHash(a.name), Addr: a.addr,
 		Active: len(a.srv.RT.Nodes()), Peers: peers, Records: len(recs), RSSKB: rssKB(),
-		Uptime: time.Since(a.started).Seconds()}
+		Uptime: time.Since(a.started).Seconds(), Lookup: LookupPolicy{MaxRounds: limits.MaxRounds,
+			MaxConcurrent: limits.MaxConcurrent, MaxPeerQueries: limits.MaxPeerQueries, MaxReferrals: limits.MaxReferrals,
+			PeerTimeoutMS: limits.PeerTimeout.Milliseconds(), TotalTimeoutMS: limits.TotalTimeout.Milliseconds()}}
 }
 
-func (a *adminState) lookup(ctx context.Context, target string) LookupReport {
+func (a *adminState) lookup(ctx context.Context, targetType, target string) LookupReport {
+	lookupTarget, expectedID, reportTarget, err := nodeLookupTarget(targetType, target)
+	if err != nil {
+		return LookupReport{TargetType: targetType, Outcome: "invalid_target", Error: err.Error()}
+	}
 	t0 := time.Now()
-	res, err := a.srv.RecursiveFindNodeDetailed(ctx, target)
-	rep := LookupReport{Target: target, Outcome: string(res.Outcome), Rounds: res.Rounds,
+	res, err := a.srv.RecursiveFindNodeDetailed(ctx, lookupTarget)
+	rep := LookupReport{TargetType: targetType, Target: reportTarget, ExpectedNodeID: expectedID,
+		Outcome: string(res.Outcome), MatchCount: len(res.Matches), Rounds: res.Rounds,
 		Queried: res.QueriedNodes, LatencyMS: float64(time.Since(t0).Microseconds()) / 1000}
 	for _, m := range res.Matches {
-		if m.ID == target {
+		if targetType == "id" && m.ID == expectedID || targetType == "name" && dht.NodeNameHash(m.Name) == strings.TrimPrefix(lookupTarget, "node/name/") {
 			rep.Found = true
 		}
 	}
@@ -297,6 +356,30 @@ func (a *adminState) lookup(ctx context.Context, target string) LookupReport {
 		rep.Error = err.Error()
 	}
 	return rep
+}
+
+func nodeLookupTarget(targetType, target string) (lookupTarget, expectedID, reportTarget string, err error) {
+	switch targetType {
+	case "id":
+		if len(target) != len("vx6_")+64 || !strings.HasPrefix(target, "vx6_") {
+			return "", "", "", errors.New("node ID must be vx6_ followed by a full SHA-256 digest")
+		}
+		for _, c := range target[len("vx6_"):] {
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+				return "", "", "", errors.New("node ID digest must use lowercase hexadecimal")
+			}
+		}
+		return "node/id/" + target, target, target, nil
+	case "name":
+		canonical, err := record.NormalizeNodeName(target)
+		if err != nil {
+			return "", "", "", err
+		}
+		hash := dht.NodeNameHash(canonical)
+		return "node/name/" + hash, "", hash, nil
+	default:
+		return "", "", "", errors.New("type must be id or name")
+	}
 }
 
 func startAdmin(sock string, st *adminState) (net.Listener, error) {
@@ -315,17 +398,18 @@ func startAdmin(sock string, st *adminState) (net.Listener, error) {
 	mux.HandleFunc("/snapshot", func(w http.ResponseWriter, _ *http.Request) { writeHTTP(w, st.snapshot()) })
 	mux.HandleFunc("/lookup", func(w http.ResponseWriter, r *http.Request) {
 		target := r.URL.Query().Get("target")
-		if target == "" || len(target) > 256 {
+		targetType := r.URL.Query().Get("type")
+		if target == "" || len(target) > 256 || (targetType != "id" && targetType != "name") {
 			http.Error(w, "target required", http.StatusBadRequest)
 			return
 		}
-		timeout := 30 * time.Second
-		if v, err := strconv.Atoi(r.URL.Query().Get("timeout_s")); err == nil && v > 0 && v <= 120 {
+		timeout := 10 * time.Second
+		if v, err := strconv.Atoi(r.URL.Query().Get("timeout_s")); err == nil && v > 0 && v <= 10 {
 			timeout = time.Duration(v) * time.Second
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
-		writeHTTP(w, st.lookup(ctx, target))
+		writeHTTP(w, st.lookup(ctx, targetType, target))
 	})
 	go func() { _ = http.Serve(ln, mux) }()
 	return ln, nil
