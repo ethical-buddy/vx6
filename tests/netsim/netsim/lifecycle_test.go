@@ -134,3 +134,30 @@ func TestDryRunReportDoesNotClaimCoverage(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupStatsAndRouteDiversityAreReportedCorrectly(t *testing.T) {
+	stats := lookupStatsFromReports([]LookupReport{
+		{Outcome: "found_verified", Found: true, LatencyMS: 1, Queried: 4, Rounds: 1},
+		{Outcome: "found_verified", Found: true, LatencyMS: 3, Queried: 8, Rounds: 2},
+		{Outcome: "not_found_reachable", LatencyMS: 5, Queried: 12, Rounds: 3},
+		{Outcome: "incomplete", Error: "timeout", LatencyMS: 7, Queried: 4, Rounds: 2},
+		{Outcome: "admin_error", Error: "socket unavailable"},
+	})
+	if stats.Attempts != 5 || stats.N != 4 || stats.Found != 2 || stats.Missed != 2 ||
+		stats.NotFound != 1 || stats.Other != 1 || stats.Errors != 1 || stats.LookupErrors != 1 {
+		t.Fatalf("unexpected lookup counts: %+v", stats)
+	}
+	if stats.P50ms != 3 || stats.P95ms != 7 || stats.FoundRatePct != 50 || stats.AvgQueries != 7 {
+		t.Fatalf("unexpected lookup benchmark summary: %+v", stats)
+	}
+
+	peers := []PeerView{
+		{ASN: 64512, Prefix48: "2001:db8:1::/48"},
+		{ASN: 64512, Prefix48: "2001:db8:1::/48"},
+		{ASN: 64513, Prefix48: "2001:db8:2::/48"},
+	}
+	unique, maxASN, maxPrefix := routeDiversity(peers)
+	if unique != 2 || maxASN != 2 || maxPrefix != 2 {
+		t.Fatalf("route diversity = (%d, %d, %d), want (2, 2, 2)", unique, maxASN, maxPrefix)
+	}
+}

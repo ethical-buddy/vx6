@@ -120,7 +120,7 @@ type lookupBranch struct {
 
 const (
 	defaultLookupAlpha               = 4
-	defaultLookupQueryBudget         = 12
+	defaultLookupQueryBudget         = 80
 	defaultLookupRounds              = 20
 	defaultLookupParallelism         = 4
 	defaultLookupPeerTimeout         = 2 * time.Second
@@ -381,7 +381,7 @@ func defaultAdaptiveConfig() AdaptiveConfig {
 		LookupAlphaBase:      defaultLookupAlpha,
 		LookupAlphaMax:       6,
 		LookupBudgetBase:     defaultLookupQueryBudget,
-		LookupBudgetMax:      28,
+		LookupBudgetMax:      defaultLookupRounds * defaultLookupParallelism,
 		ReplicationBase:      defaultReplicationFactor,
 		ReplicationMax:       8,
 		FailureEWMAWeight:    0.18,

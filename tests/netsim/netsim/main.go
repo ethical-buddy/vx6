@@ -306,18 +306,23 @@ func cmdRun(args []string) (retErr error) {
 
 	sim := NewSimRun(t, r, *outDir, *simnodeBin)
 	started := time.Now().UTC()
+	hostMetricsStart := captureHostMetrics()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	topologyData, _ := json.Marshal(t)
 	simnodePath, _ := exec.LookPath(*simnodeBin)
+	hostKernel, hostCPUModel := hostPlatformInfo()
 	report := &Report{SchemaVersion: 1, RunID: runID, StartedAt: started,
 		BuildRevision: buildRevision, TopologySHA256: hashHex(topologyData),
 		SimnodeSHA256: hashFile(simnodePath), Params: t.Params,
-		HostOS: runtime.GOOS, HostArch: runtime.GOARCH,
+		HostOS: runtime.GOOS, HostArch: runtime.GOARCH, GoVersion: runtime.Version(),
+		HostKernel: hostKernel, HostCPUModel: hostCPUModel, LogicalCPUs: runtime.NumCPU(),
 		SettleRounds: *settleRounds, SettleGap: *settleGap, ProbesPerRound: *probes,
 		RestartCount: *restartCount, DryRun: *dry}
 	defer func() {
 		report.FinishedAt = time.Now().UTC()
+		report.HostResources = summarizeHostMetrics(hostMetricsStart, captureHostMetrics())
+		report.HostResources.SimnodeCPUTimeMS, report.HostResources.SimnodeCPUStatsAvailable = simnodeCPUTimeMS(*outDir, filepath.Base(*simnodeBin))
 		if *dry {
 			report.CleanupStatus = "not applicable (dry run)"
 		} else if cleanupErr := sim.Cleanup(); cleanupErr != nil {
@@ -330,6 +335,7 @@ func cmdRun(args []string) (retErr error) {
 		} else {
 			report.CleanupStatus = "complete"
 		}
+		finalizeReport(report)
 		if writeErr := writeReportFiles(*outDir, report); writeErr != nil {
 			if retErr == nil {
 				retErr = writeErr

@@ -17,7 +17,13 @@ confidentiality or IKE authentication.
 - Gracefully restarts a selected number of nodes and checks identity stability
   plus whether bbolt-persisted peer candidates return to the active routing
   snapshot.
-- Writes exact lookup outcomes, observed lookup limits, logs and snapshots.
+- Exercises the default iterative lookup ceiling of 20 rounds, 4 concurrent
+  peers, and 80 total peer queries (10-second total timeout). The DHT unit test
+  builds a signed multi-hop referral graph and verifies that one lookup really
+  queries more than 12 peers, while lookup-only referrals stay transient.
+- Writes exact lookup outcomes, observed lookup limits, latency/query-count
+  percentiles, convergence snapshots, route ASN/prefix distribution, per-node
+  RSS, aggregate simnode CPU time, host CPU/memory context, logs, and hashes.
 
 The attacker-AS entries in this version are ordinary honest simnodes. The run
 does **not** yet inject poisoned referrals, partitions, address changes, liveness
@@ -38,6 +44,13 @@ go build -ldflags="-X main.buildRevision=$(git rev-parse HEAD)" \
   -out /tmp/vx6-plan-10.json
 /tmp/vx6-netsim render -params /tmp/vx6-plan-10.json
 ```
+
+For PR testing, GitHub Actions builds Linux `amd64` and `arm64` binaries and
+publishes them as 30-day workflow artifacts named
+`vx6-netsim-linux-amd64` and `vx6-netsim-linux-arm64`. Download the artifact
+from the PR's **Linux simulator binaries** checks. Each archive contains
+`vx6-netsim`, `vx6-simnode`, `SHA256SUMS`, and a short safety note. These are
+test binaries, not a VX6 release package.
 
 `plan`, `render`, and `run -dry-run` do not create namespaces. For a dry-run,
 use a new output directory:
@@ -95,6 +108,14 @@ Each output directory contains `report.md`, `report.json`, `topology.json`,
 process manifests. Return the whole directory (or an archive) for each 3/5/10
 run, plus the exact command and host RAM/OS details. The report records binary
 hashes and the DHT lookup policy actually exposed by running nodes.
+
+The report's percentiles are calculated from observed lookup attempts. Its
+route-diversity figures map each active peer address to the generated test
+topology's ASN and IPv6 `/48`; these are measurements, not enforcement claims.
+Host-wide CPU and memory are context and include unrelated host activity. A
+successful run proves only the listed scenarios under that run's parameters;
+it cannot prove global lookup completeness, adversarial resilience, or a
+perfect DHT.
 
 These are local functional checks, not a guarantee of global lookup
 completeness, Sybil resistance, production-scale capacity, or IPsec security.

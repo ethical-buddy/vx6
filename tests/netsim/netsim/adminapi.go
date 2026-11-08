@@ -36,6 +36,8 @@ type PeerView struct {
 	ID       string `json:"id"`
 	NameHash string `json:"name_hash"`
 	Addr     string `json:"addr"`
+	ASN      uint32 `json:"asn,omitempty"`
+	Prefix48 string `json:"prefix_48,omitempty"`
 	Success  uint32 `json:"success"`
 	Fail     uint8  `json:"fail"`
 	RTTMicro uint32 `json:"rtt_us"`

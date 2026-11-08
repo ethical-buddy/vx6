@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -239,24 +240,44 @@ func (s *SimRun) adminGet(ctx context.Context, n Node, path string, v any) error
 
 // Report is the simulation output.
 type Report struct {
-	SchemaVersion  int             `json:"schema_version"`
-	RunID          string          `json:"run_id"`
-	StartedAt      time.Time       `json:"started_at"`
-	FinishedAt     time.Time       `json:"finished_at,omitempty"`
-	BuildRevision  string          `json:"build_revision"`
-	HostOS         string          `json:"host_os"`
-	HostArch       string          `json:"host_arch"`
-	TopologySHA256 string          `json:"topology_sha256"`
-	SimnodeSHA256  string          `json:"simnode_sha256"`
-	Params         Params          `json:"params"`
-	SettleRounds   int             `json:"settle_rounds"`
-	SettleGap      time.Duration   `json:"settle_gap_ns"`
-	ProbesPerRound int             `json:"probes_per_round"`
-	RestartCount   int             `json:"restart_count"`
-	DryRun         bool            `json:"dry_run"`
-	CleanupStatus  string          `json:"cleanup_status,omitempty"`
-	Restarts       []RestartReport `json:"restarts,omitempty"`
-	Rounds         []RoundReport   `json:"rounds"`
+	SchemaVersion  int                `json:"schema_version"`
+	RunID          string             `json:"run_id"`
+	StartedAt      time.Time          `json:"started_at"`
+	FinishedAt     time.Time          `json:"finished_at,omitempty"`
+	BuildRevision  string             `json:"build_revision"`
+	HostOS         string             `json:"host_os"`
+	HostArch       string             `json:"host_arch"`
+	GoVersion      string             `json:"go_version"`
+	HostKernel     string             `json:"host_kernel,omitempty"`
+	HostCPUModel   string             `json:"host_cpu_model,omitempty"`
+	LogicalCPUs    int                `json:"logical_cpus"`
+	TopologySHA256 string             `json:"topology_sha256"`
+	SimnodeSHA256  string             `json:"simnode_sha256"`
+	Params         Params             `json:"params"`
+	SettleRounds   int                `json:"settle_rounds"`
+	SettleGap      time.Duration      `json:"settle_gap_ns"`
+	ProbesPerRound int                `json:"probes_per_round"`
+	RestartCount   int                `json:"restart_count"`
+	DryRun         bool               `json:"dry_run"`
+	HostResources  HostResourceReport `json:"host_resources"`
+	Totals         LookupStats        `json:"lookup_totals"`
+	SnapshotTotal  int                `json:"snapshots_total"`
+	SnapshotErrors int                `json:"snapshot_errors_total"`
+	CleanupStatus  string             `json:"cleanup_status,omitempty"`
+	Restarts       []RestartReport    `json:"restarts,omitempty"`
+	Rounds         []RoundReport      `json:"rounds"`
+}
+
+type HostResourceReport struct {
+	StartMemoryTotalKB       uint64  `json:"start_memory_total_kb,omitempty"`
+	StartMemoryAvailableKB   uint64  `json:"start_memory_available_kb,omitempty"`
+	EndMemoryTotalKB         uint64  `json:"end_memory_total_kb,omitempty"`
+	EndMemoryAvailableKB     uint64  `json:"end_memory_available_kb,omitempty"`
+	HostCPUUtilizationPct    float64 `json:"host_cpu_utilization_pct,omitempty"`
+	SimnodeCPUTimeMS         uint64  `json:"simnode_cpu_time_ms,omitempty"`
+	CPUStatsAvailable        bool    `json:"cpu_stats_available"`
+	MemoryStatsAvailable     bool    `json:"memory_stats_available"`
+	SimnodeCPUStatsAvailable bool    `json:"simnode_cpu_stats_available"`
 }
 
 type RestartReport struct {
@@ -272,32 +293,55 @@ type RestartReport struct {
 }
 
 type RoundReport struct {
-	Label              string         `json:"label"`
-	Time               time.Time      `json:"time"`
-	NodesJoined        int            `json:"nodes_joined"`
-	SnapshotsOK        int            `json:"snapshots_ok"`
-	SnapshotErrors     int            `json:"snapshot_errors"`
-	SnapshotErrorNodes []string       `json:"snapshot_error_nodes,omitempty"`
-	LookupPolicy       *LookupPolicy  `json:"lookup_policy,omitempty"`
-	AvgActivePeers     float64        `json:"avg_active_peers"`
-	MinActivePeers     int            `json:"min_active_peers"`
-	MaxActivePeers     int            `json:"max_active_peers"`
-	AvgRSSKB           float64        `json:"avg_rss_kb"`
-	Lookups            LookupStats    `json:"lookups"`
-	Probes             []LookupReport `json:"probes"`
+	Label              string              `json:"label"`
+	Time               time.Time           `json:"time"`
+	NodesJoined        int                 `json:"nodes_joined"`
+	SnapshotsOK        int                 `json:"snapshots_ok"`
+	SnapshotErrors     int                 `json:"snapshot_errors"`
+	SnapshotErrorNodes []string            `json:"snapshot_error_nodes,omitempty"`
+	LookupPolicy       *LookupPolicy       `json:"lookup_policy,omitempty"`
+	AvgActivePeers     float64             `json:"avg_active_peers"`
+	MinActivePeers     int                 `json:"min_active_peers"`
+	MaxActivePeers     int                 `json:"max_active_peers"`
+	AvgRSSKB           float64             `json:"avg_rss_kb"`
+	MinRSSKB           int                 `json:"min_rss_kb"`
+	MaxRSSKB           int                 `json:"max_rss_kb"`
+	TotalRSSKB         int                 `json:"total_rss_kb"`
+	Diversity          RouteDiversityStats `json:"route_diversity"`
+	JoinDurationMS     float64             `json:"join_duration_ms"`
+	RoundDurationMS    float64             `json:"round_duration_ms"`
+	Lookups            LookupStats         `json:"lookups"`
+	Probes             []LookupReport      `json:"probes"`
+}
+
+type RouteDiversityStats struct {
+	Tables                      int     `json:"tables_sampled"`
+	AvgUniqueASNsPerTable       float64 `json:"avg_unique_asns_per_table"`
+	MinUniqueASNsPerTable       int     `json:"min_unique_asns_per_table"`
+	MaxUniqueASNsPerTable       int     `json:"max_unique_asns_per_table"`
+	MaxPeersFromOneASN          int     `json:"max_peers_from_one_asn"`
+	MaxPeersFromOneIPv6Prefix48 int     `json:"max_peers_from_one_ipv6_prefix_48"`
 }
 
 type LookupStats struct {
-	Attempts int     `json:"attempts"`
-	N        int     `json:"n"`
-	Found    int     `json:"found_verified"`
-	NotFound int     `json:"not_found_reachable"`
-	Missed   int     `json:"expected_target_not_returned"`
-	Errors   int     `json:"request_errors"`
-	Other    int     `json:"incomplete_or_conflict"`
-	P50ms    float64 `json:"p50_ms"`
-	P95ms    float64 `json:"p95_ms"`
-	AvgRound float64 `json:"avg_rounds"`
+	Attempts     int     `json:"attempts"`
+	N            int     `json:"n"`
+	Found        int     `json:"found_verified"`
+	NotFound     int     `json:"not_found_reachable"`
+	Missed       int     `json:"expected_target_not_returned"`
+	Errors       int     `json:"request_errors"`
+	LookupErrors int     `json:"lookup_errors"`
+	Other        int     `json:"incomplete_or_conflict"`
+	FoundRatePct float64 `json:"found_rate_pct"`
+	P50ms        float64 `json:"p50_ms"`
+	P95ms        float64 `json:"p95_ms"`
+	P99ms        float64 `json:"p99_ms"`
+	AvgRound     float64 `json:"avg_rounds"`
+	AvgQueries   float64 `json:"avg_peer_queries"`
+	P50Queries   int     `json:"p50_peer_queries"`
+	P95Queries   int     `json:"p95_peer_queries"`
+	P50Rounds    float64 `json:"p50_lookup_rounds"`
+	P95Rounds    float64 `json:"p95_lookup_rounds"`
 }
 
 // DriveWaves joins each wave, then snapshots until settle rounds are done.
@@ -312,6 +356,7 @@ func (s *SimRun) DriveWaves(ctx context.Context, settleRounds int, gap time.Dura
 	endpointPath := func(n Node) string { return filepath.Join(s.nodeDir, n.Name, "endpoint.json") }
 
 	for w, wave := range s.t.Waves {
+		waveStarted := time.Now()
 		for _, idx := range wave {
 			n := byIndex[idx]
 			var seeds []string
@@ -331,10 +376,12 @@ func (s *SimRun) DriveWaves(ctx context.Context, settleRounds int, gap time.Dura
 				return rep, err
 			}
 		}
+		joinDurationMS := float64(time.Since(waveStarted).Microseconds()) / 1000
 		rr, err := s.snapshotRound(ctx, fmt.Sprintf("after-wave-%d", w), joined, probes, rng)
 		if err != nil {
 			return rep, err
 		}
+		rr.JoinDurationMS = joinDurationMS
 		rep.Rounds = append(rep.Rounds, rr)
 		if err := s.writeRound(w, rr); err != nil {
 			return rep, err
@@ -508,12 +555,22 @@ func (s *SimRun) waitNodeReady(ctx context.Context, node Node, timeout time.Dura
 }
 
 func (s *SimRun) snapshotRound(ctx context.Context, label string, joined []Node, probes int, rng *rand.Rand) (RoundReport, error) {
+	started := time.Now()
 	rr := RoundReport{Label: label, Time: time.Now().UTC(), NodesJoined: len(joined)}
 	if s.r.dry {
+		rr.RoundDurationMS = float64(time.Since(started).Microseconds()) / 1000
 		return rr, nil
 	}
 	var totalActive, minA, maxA, n int
 	var totalRSS float64
+	var totalUniqueASNs int
+	minUniqueASNs := -1
+	addressASN := make(map[string]uint32, len(s.t.Nodes))
+	for _, node := range s.t.Nodes {
+		if addr, err := netip.ParseAddr(node.Addr); err == nil {
+			addressASN[addr.String()] = node.ASN
+		}
+	}
 	snapDir := filepath.Join(s.dir, "snapshots", label)
 	if err := os.MkdirAll(snapDir, 0o700); err != nil {
 		return rr, err
@@ -524,6 +581,20 @@ func (s *SimRun) snapshotRound(ctx context.Context, label string, joined []Node,
 			rr.SnapshotErrors++
 			rr.SnapshotErrorNodes = append(rr.SnapshotErrorNodes, nd.Name)
 			continue
+		}
+		for peerIndex := range snap.Peers {
+			host, _, splitErr := net.SplitHostPort(snap.Peers[peerIndex].Addr)
+			if splitErr != nil {
+				continue
+			}
+			addr, parseErr := netip.ParseAddr(host)
+			if parseErr != nil || !addr.Is6() {
+				continue
+			}
+			if asn, ok := addressASN[addr.String()]; ok {
+				snap.Peers[peerIndex].ASN = asn
+			}
+			snap.Peers[peerIndex].Prefix48 = netip.PrefixFrom(addr, 48).Masked().String()
 		}
 		rr.SnapshotsOK++
 		if rr.LookupPolicy == nil {
@@ -545,26 +616,49 @@ func (s *SimRun) snapshotRound(ctx context.Context, label string, joined []Node,
 		}
 		totalActive += snap.Active
 		totalRSS += float64(snap.RSSKB)
+		rr.TotalRSSKB += snap.RSSKB
+		if n == 0 || snap.RSSKB < rr.MinRSSKB {
+			rr.MinRSSKB = snap.RSSKB
+		}
+		if snap.RSSKB > rr.MaxRSSKB {
+			rr.MaxRSSKB = snap.RSSKB
+		}
 		n++
+		uniqueASNs, maxASN, maxPrefix := routeDiversity(snap.Peers)
+		totalUniqueASNs += uniqueASNs
+		if minUniqueASNs < 0 || uniqueASNs < minUniqueASNs {
+			minUniqueASNs = uniqueASNs
+		}
+		if uniqueASNs > rr.Diversity.MaxUniqueASNsPerTable {
+			rr.Diversity.MaxUniqueASNsPerTable = uniqueASNs
+		}
+		if maxASN > rr.Diversity.MaxPeersFromOneASN {
+			rr.Diversity.MaxPeersFromOneASN = maxASN
+		}
+		if maxPrefix > rr.Diversity.MaxPeersFromOneIPv6Prefix48 {
+			rr.Diversity.MaxPeersFromOneIPv6Prefix48 = maxPrefix
+		}
 	}
 	if n > 0 {
 		rr.AvgActivePeers = float64(totalActive) / float64(n)
 		rr.AvgRSSKB = totalRSS / float64(n)
 		rr.MinActivePeers, rr.MaxActivePeers = minA, maxA
+		rr.Diversity.Tables = n
+		rr.Diversity.AvgUniqueASNsPerTable = float64(totalUniqueASNs) / float64(n)
+		rr.Diversity.MinUniqueASNsPerTable = minUniqueASNs
 	}
 	rr.Lookups, rr.Probes = s.runProbes(ctx, joined, probes, rng)
+	rr.RoundDurationMS = float64(time.Since(started).Microseconds()) / 1000
 	return rr, nil
 }
 
 // runProbes asks random source nodes to resolve random (existing) target IDs.
 func (s *SimRun) runProbes(ctx context.Context, joined []Node, probes int, rng *rand.Rand) (LookupStats, []LookupReport) {
-	var st LookupStats
 	var reports []LookupReport
 	if len(joined) < 2 {
-		return st, reports
+		return LookupStats{}, reports
 	}
-	var lat []float64
-	var rounds float64
+	var reportsForStats []LookupReport
 	for i := 0; i < probes; i++ {
 		if err := ctx.Err(); err != nil {
 			break
@@ -578,48 +672,29 @@ func (s *SimRun) runProbes(ctx context.Context, joined []Node, probes int, rng *
 			NodeID string `json:"node_id"`
 			Name   string `json:"name"`
 		}
-		st.Attempts += 2
 		statusCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		statusErr := s.adminGet(statusCtx, dst, "/status", &target)
 		cancel()
 		if statusErr != nil || target.NodeID == "" || target.Name == "" {
-			st.Errors += 2
 			reports = append(reports,
 				LookupReport{Source: src.Name, TargetType: "id", Outcome: "admin_error", Error: fmt.Sprint(statusErr)},
 				LookupReport{Source: src.Name, TargetType: "name", Outcome: "admin_error", Error: fmt.Sprint(statusErr)})
+			reportsForStats = append(reportsForStats, reports[len(reports)-2:]...)
 			continue
 		}
 		for _, query := range []struct{ kind, value string }{{"id", target.NodeID}, {"name", target.Name}} {
 			var rep LookupReport
 			path := "/lookup?type=" + query.kind + "&target=" + url.QueryEscape(query.value) + "&timeout_s=10"
 			if err := s.adminGet(ctx, src, path, &rep); err != nil {
-				st.Errors++
 				rep = LookupReport{Source: src.Name, TargetType: query.kind, Outcome: "admin_error", Error: err.Error()}
-			} else {
-				st.N++
-				if rep.Found {
-					st.Found++
-				} else {
-					st.Other++
-					st.Missed++
-					if rep.Outcome == "not_found_reachable" {
-						st.NotFound++
-					}
-				}
-				lat = append(lat, rep.LatencyMS)
-				rounds += float64(rep.Rounds)
 			}
 			rep.Source = src.Name
 			rep.ExpectedNodeID = target.NodeID
 			reports = append(reports, rep)
+			reportsForStats = append(reportsForStats, rep)
 		}
 	}
-	if len(lat) > 0 {
-		sort.Float64s(lat)
-		st.P50ms = lat[len(lat)*50/100]
-		st.P95ms = lat[min(len(lat)-1, len(lat)*95/100)]
-		st.AvgRound = rounds / float64(len(lat))
-	}
+	st := lookupStatsFromReports(reportsForStats)
 	return st, reports
 }
 
@@ -629,6 +704,117 @@ func (s *SimRun) writeRound(i int, rr RoundReport) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(s.dir, fmt.Sprintf("round-%02d.json", i)), data, 0o600)
+}
+
+func lookupStatsFromReports(reports []LookupReport) LookupStats {
+	stats := LookupStats{Attempts: len(reports)}
+	var latencies, rounds []float64
+	var queries []int
+	for _, result := range reports {
+		if result.Outcome == "admin_error" {
+			stats.Errors++
+			continue
+		}
+		stats.N++
+		if result.Error != "" {
+			stats.LookupErrors++
+		}
+		if result.Found {
+			stats.Found++
+		} else {
+			stats.Missed++
+			switch result.Outcome {
+			case "not_found_reachable":
+				stats.NotFound++
+			default:
+				stats.Other++
+			}
+		}
+		latencies = append(latencies, result.LatencyMS)
+		rounds = append(rounds, float64(result.Rounds))
+		queries = append(queries, result.Queried)
+	}
+	if stats.N > 0 {
+		stats.FoundRatePct = float64(stats.Found) * 100 / float64(stats.N)
+	}
+	sort.Float64s(latencies)
+	sort.Float64s(rounds)
+	sort.Ints(queries)
+	if len(latencies) > 0 {
+		stats.P50ms = percentileFloat(latencies, 50)
+		stats.P95ms = percentileFloat(latencies, 95)
+		stats.P99ms = percentileFloat(latencies, 99)
+		stats.P50Rounds = percentileFloat(rounds, 50)
+		stats.P95Rounds = percentileFloat(rounds, 95)
+		for _, value := range rounds {
+			stats.AvgRound += value
+		}
+		stats.AvgRound /= float64(len(rounds))
+		for _, value := range queries {
+			stats.AvgQueries += float64(value)
+		}
+		stats.AvgQueries /= float64(len(queries))
+		stats.P50Queries = percentileInt(queries, 50)
+		stats.P95Queries = percentileInt(queries, 95)
+	}
+	return stats
+}
+
+func routeDiversity(peers []PeerView) (uniqueASNs, maxPerASN, maxPerPrefix int) {
+	byASN := make(map[uint32]int)
+	byPrefix := make(map[string]int)
+	for _, peer := range peers {
+		if peer.ASN != 0 {
+			byASN[peer.ASN]++
+		}
+		if peer.Prefix48 != "" {
+			byPrefix[peer.Prefix48]++
+		}
+	}
+	uniqueASNs = len(byASN)
+	for _, count := range byASN {
+		if count > maxPerASN {
+			maxPerASN = count
+		}
+	}
+	for _, count := range byPrefix {
+		if count > maxPerPrefix {
+			maxPerPrefix = count
+		}
+	}
+	return uniqueASNs, maxPerASN, maxPerPrefix
+}
+
+func percentileIndex(length, percentile int) int {
+	if length <= 1 {
+		return 0
+	}
+	index := (length*percentile+99)/100 - 1
+	return min(length-1, max(0, index))
+}
+
+func percentileFloat(values []float64, percentile int) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	return values[percentileIndex(len(values), percentile)]
+}
+
+func percentileInt(values []int, percentile int) int {
+	if len(values) == 0 {
+		return 0
+	}
+	return values[percentileIndex(len(values), percentile)]
+}
+
+func finalizeReport(report *Report) {
+	var probes []LookupReport
+	for _, round := range report.Rounds {
+		report.SnapshotTotal += round.SnapshotsOK
+		report.SnapshotErrors += round.SnapshotErrors
+		probes = append(probes, round.Probes...)
+	}
+	report.Totals = lookupStatsFromReports(probes)
 }
 
 func min(a, b int) int {

@@ -119,8 +119,8 @@ summary. `round-XX.json` and `snapshots/` hold per-round/per-node details.
 Preserve all output directories and do not combine results from different
 seeds or configurations into one success rate.
 
-The live nodes expose the present DHT query budget. At the code revision
-currently being tested, this may differ from the earlier discussed theoretical
-maximum of four parallel peers over twenty rounds. Reports must state the
-observed value. Resolving that policy mismatch is a DHT implementation
-decision, not a simulator-only adjustment.
+The live nodes expose the active DHT policy. The configured default is 20
+rounds, four concurrent peer queries, at most 80 total peer queries, four
+referrals per response, and a 10-second total lookup timeout. The report records
+the values returned by a running node, and a DHT network test walks a signed
+referral graph with more than 12 peers to verify the larger budget in practice.

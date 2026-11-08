@@ -81,6 +81,45 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  netsim-binaries:
+    name: Linux simulator binaries (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build Linux binaries
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -o dist/vx6-simnode ./tests/netsim/simnode
+          go build -ldflags="-X main.buildRevision=${GITHUB_SHA}" -o dist/vx6-netsim ./tests/netsim/netsim
+          sha256sum dist/vx6-simnode dist/vx6-netsim > dist/SHA256SUMS
+          printf '%s\n' \
+            'VX6 DHT simulator test binaries' \
+            'Target: Linux ${{ matrix.arch }}' \
+            'These binaries use the lab-only pass-through; they do not test IKE/ESP.' \
+            'Run only in a disposable Linux VM/host with IPv6, iproute2, FRR, and root/CAP_NET_ADMIN+CAP_SYS_ADMIN.' \
+            'See tests/netsim/README.md in the PR for commands, expected artifacts, and teardown.' \
+            > dist/README.txt
+      - name: Upload binaries for PR tester
+        uses: actions/upload-artifact@v4
+        with:
+          name: vx6-netsim-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
   ipsec-e2e:
     name: Optional privileged IKE/ESP E2E
     if: github.event_name == 'workflow_dispatch' && inputs.run_ipsec_e2e
