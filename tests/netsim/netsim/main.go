@@ -37,6 +37,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -188,7 +189,16 @@ func cmdDoctor(args []string) error {
 	}
 	for _, bin := range []string{"bgpd", "zebra"} {
 		_, err := exec.LookPath(bin)
+		if err != nil {
+			// Debian/Ubuntu install the daemons outside PATH.
+			if _, statErr := os.Stat(filepath.Join("/usr/lib/frr", bin)); statErr == nil {
+				err = fmt.Errorf("found /usr/lib/frr/%s; run with PATH=/usr/lib/frr:$PATH", bin)
+			}
+		}
 		report(bin+" (FRR)", err)
+	}
+	if _, err := lookupFRRAccount(); err != nil {
+		report("frr user (FRR)", err)
 	}
 	if _, err := os.Stat("/proc/sys/net/ipv6"); err != nil {
 		ok = false
@@ -335,7 +345,12 @@ func cmdRun(args []string) (retErr error) {
 		} else {
 			report.CleanupStatus = "complete"
 		}
+		report.BGPConvergedMS = float64(sim.BGPConverged.Microseconds()) / 1000
 		finalizeReport(report)
+		if report.Verdict == "FAIL" && retErr == nil {
+			retErr = fmt.Errorf("simulation verdict FAIL: %s (see %s)", strings.Join(report.VerdictReasons, "; "),
+				filepath.Join(*outDir, "report.md"))
+		}
 		if writeErr := writeReportFiles(*outDir, report); writeErr != nil {
 			if retErr == nil {
 				retErr = writeErr
@@ -410,6 +425,13 @@ func cmdTeardown(args []string) error {
 	r := &runner{dry: *dry}
 	if err := deleteOwnedNamespaces(t, r); err != nil {
 		return err
+	}
+	if *dry {
+		if state, err := frrRunStateDir(t.RunID); err == nil {
+			fmt.Printf("would remove FRR state directory: %s\n", state)
+		}
+	} else if err := removeFRRRunState(t.RunID); err != nil {
+		return fmt.Errorf("remove FRR state: %w", err)
 	}
 	fmt.Printf("teardown complete for netsim run %s\n", t.RunID)
 	return nil

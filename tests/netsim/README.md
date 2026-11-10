@@ -55,6 +55,7 @@ verify both binaries before running them:
 
 ```sh
 sha256sum -c SHA256SUMS
+chmod +x vx6-netsim vx6-simnode   # artifact downloads drop the executable bit
 ```
 
 `plan`, `render`, and `run -dry-run` do not create namespaces. For a dry-run,
@@ -78,18 +79,42 @@ configure the host's normal interfaces. Use an empty, root-owned private output
 directory for each run. The output path must not be inside a user-owned home
 directory when using `sudo`.
 
+Debian and Ubuntu install `zebra` and `bgpd` in `/usr/lib/frr`, outside
+`PATH`; run `netsim` with `PATH=/usr/lib/frr:$PATH` (`doctor` points this
+out). FRR drops privileges to the `frr` user, so each run keeps the daemons' pid
+files, vty sockets and `zserv.api` in its own `/run/vx6-netsim/<run-id>/<router>`
+directory (one per AS router, so many zebra/bgpd pairs can run side by side).
+Cleanup and `teardown` remove that directory. Nodes join only after every AS
+router has a BGP route to every other AS prefix; the run aborts if BGP has not
+converged within 90 seconds.
+
 Example for ten nodes; repeat with 3 and 5 nodes, using fresh output paths and
-topology-appropriate schedules (`1,2` for 3; `1,1,3` for 5). These smaller AS
-counts keep a smoke run manageable while retaining multiple organizations,
-ISPs, and an attacker-AS topology entry:
+topology-appropriate topologies (`-tier1 2 -isps 1 -orgs 1 -schedule 1,2` for
+3; `-tier1 2 -isps 2 -orgs 2 -schedule 1,1,3` for 5; at least two tier-1 ASes
+are required). These smaller AS counts keep a smoke run manageable while
+retaining multiple organizations, ISPs, and an attacker-AS topology entry:
 
 ```sh
 sudo install -d -m 0700 -o root -g root /var/tmp/vx6-netsim-10
-sudo /tmp/vx6-netsim run -tier1 2 -isps 2 -orgs 3 -attackers 1 \
+sudo env PATH=/usr/lib/frr:$PATH /tmp/vx6-netsim run \
+  -tier1 2 -isps 2 -orgs 3 -attackers 1 \
   -nodes 10 -schedule 1,1,2,6 -seed 69 \
-  -simnode /tmp/vx6-simnode -settle-rounds 2 -settle-gap 5s \
+  -simnode /tmp/vx6-simnode -settle-rounds 4 -settle-gap 60s \
   -probes 10 -restart-count 1 -out /var/tmp/vx6-netsim-10
 ```
+
+Keep `-settle-gap` at 60 seconds or more. Joined nodes promote bootstrap
+contacts to active DHT peers on the node's own timers; with short gaps (for
+example 5s) every snapshot shows zero active peers and every lookup misses. The
+graceful-restart sample runs right after the last join wave, so on short runs
+it usually restarts a node that has no peers yet and proves only identity
+stability.
+
+`run` writes a verdict into the report. It exits non-zero with verdict
+**FAIL** when lookups ran but none found its known-existing target, or when no
+node had an active DHT peer in the final round; both lookup coverage rows are
+then marked FAILED. **PASS** only means the DHT formed and some lookups
+succeeded; read the found rate and per-round tables for anything more.
 
 The runner attempts cleanup on normal exit, error, SIGINT, and SIGTERM. If it is
 forcibly killed (for example, SIGKILL or host shutdown), inspect the report and
@@ -102,9 +127,10 @@ sudo /tmp/vx6-netsim teardown \
 
 `teardown -dry-run` prints the namespaces and recorded process files it would
 clean without changing the host. Cleanup validates the run ID and exact derived
-namespace names; it refuses arbitrary namespace names. The runner also records
-process IDs with executable and namespace-inode checks to avoid signaling an
-unrelated process if a PID has been reused.
+namespace names; it refuses arbitrary namespace names. The runner records each
+process ID only after the process has exec'd inside its named namespace, with
+the program (argv[0]) and that namespace's inode; teardown signals a PID only
+if both still match, so a reused PID is left alone.
 
 ## Evidence to return
 

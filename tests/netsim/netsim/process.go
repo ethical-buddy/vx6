@@ -23,17 +23,46 @@ type processRecord struct {
 	NetNSInode uint64 `json:"netns_inode"`
 }
 
+// netnsDir is where `ip netns add` bind-mounts named namespaces.
+var netnsDir = "/run/netns"
+
+// namedNetNSInode returns the inode of a named namespace created by `ip netns`.
+func namedNetNSInode(namespace string) (uint64, error) {
+	info, err := os.Stat(filepath.Join(netnsDir, namespace))
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, errors.New("cannot inspect named network namespace")
+	}
+	return stat.Ino, nil
+}
+
+// recordProcess waits until `ip netns exec NS program` has exec'd program
+// inside NS, then persists PID, program and the namespace inode. Right after
+// Start the PID still belongs to the `ip` wrapper in the host namespace, so the
+// record is written only once the PID's namespace equals the named namespace
+// and argv[0] is the program.
 func recordProcess(dir, namespace, program string, cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil || namespace == "" || program == "" {
 		return errors.New("cannot record an unstarted simulation process")
 	}
+	want, err := namedNetNSInode(namespace)
+	if err != nil {
+		return fmt.Errorf("inspect namespace %s: %w", namespace, err)
+	}
+	pid := cmd.Process.Pid
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		inode, err := processNetNSInode(cmd.Process.Pid)
-		if err == nil {
-			args, argErr := processArgs(cmd.Process.Pid)
-			if argErr == nil && hasProgram(args, program) {
-				record := processRecord{PID: cmd.Process.Pid, Namespace: namespace,
+		if processStopped(pid) {
+			return fmt.Errorf("process %s exited during startup in namespace %s (see its log)", program, namespace)
+		}
+		inode, err := processNetNSInode(pid)
+		if err == nil && inode == want {
+			args, argErr := processArgs(pid)
+			if argErr == nil && isProgram(args, program) {
+				record := processRecord{PID: pid, Namespace: namespace,
 					Program: filepath.Base(program), NetNSInode: inode}
 				return writeProcessRecord(dir, record)
 			}
@@ -74,14 +103,10 @@ func processArgs(pid int) ([]string, error) {
 	return args, nil
 }
 
-func hasProgram(args []string, program string) bool {
-	want := filepath.Base(program)
-	for _, arg := range args {
-		if filepath.Base(arg) == want {
-			return true
-		}
-	}
-	return false
+// isProgram reports whether argv[0] names program. Later arguments are
+// ignored so that, for example, `less .../zebra.log` never matches "zebra".
+func isProgram(args []string, program string) bool {
+	return len(args) > 0 && filepath.Base(args[0]) == filepath.Base(program)
 }
 
 func processNetNSInode(pid int) (uint64, error) {
@@ -154,7 +179,7 @@ func stopRecordedProcess(path string) error {
 	if err != nil {
 		return err
 	}
-	if inode != record.NetNSInode || !hasProgram(args, record.Program) {
+	if inode != record.NetNSInode || !isProgram(args, record.Program) {
 		// The original process is gone and this PID has been reused or exec'd;
 		// leave the unrelated process alone and discard the stale record.
 		return os.Remove(path)

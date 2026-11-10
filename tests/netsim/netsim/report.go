@@ -47,6 +47,14 @@ func coverage(report *Report) []coverageItem {
 		{"Network partition, churn, and eclipse", "NOT EXERCISED", "Topology primitives exist, but this run path does not apply fault schedules."},
 		{"IKEv2/IPsec confidentiality and authentication", "NOT EXERCISED", "The scale tier uses an explicit pass-through tunnel. Use the separate two-peer IPsec suite."},
 	}
+	if !report.DryRun && report.Totals.Attempts > 0 && report.Totals.Found == 0 {
+		for i := range items {
+			if items[i].name == "Identity-ID lookup" || items[i].name == "Canonical-name lookup" {
+				items[i].status = "FAILED"
+				items[i].note = "Lookups ran but none found its known-existing target; see the verdict and per-probe details."
+			}
+		}
+	}
 	if report.DryRun {
 		for i := range items {
 			if items[i].status == "EXERCISED" || items[i].status == "PARTIAL" {
@@ -72,7 +80,15 @@ func writeReportFiles(dir string, report *Report) error {
 		report.RunID, report.BuildRevision, report.HostOS, report.HostArch, report.HostKernel, report.LogicalCPUs,
 		report.HostCPUModel, report.GoVersion,
 		report.DryRun, report.StartedAt.UTC().Format("2006-01-02T15:04:05Z"), report.FinishedAt.UTC().Format("2006-01-02T15:04:05Z"), report.CleanupStatus)
-	fmt.Fprintf(&b, "- Topology SHA-256: `%s`\n- simnode SHA-256: `%s`\n\n", report.TopologySHA256, report.SimnodeSHA256)
+	fmt.Fprintf(&b, "- Topology SHA-256: `%s`\n- simnode SHA-256: `%s`\n", report.TopologySHA256, report.SimnodeSHA256)
+	if report.BGPConvergedMS > 0 {
+		fmt.Fprintf(&b, "- BGP converged before first join: **%.0f ms**\n", report.BGPConvergedMS)
+	}
+	fmt.Fprintf(&b, "- Verdict: **%s**\n", report.Verdict)
+	for _, reason := range report.VerdictReasons {
+		fmt.Fprintf(&b, "  - %s\n", reason)
+	}
+	fmt.Fprintf(&b, "\n")
 	fmt.Fprintf(&b, "## Configuration\n\n- Sim nodes: %d\n- IPsec nodes: %d (not launched by this scale runner)\n- ASes: %d tier-1, %d ISP, %d org, %d attacker\n- Seed: %d\n- Join schedule: `%s`\n- Signed bootstrap contacts per join: %d\n- Sampled graceful restarts: %d\n- Post-join settle rounds: %d at %s each\n- Probe pairs per round: %d (one ID and one name lookup per pair)\n- Lookup timeout: 10 seconds\n\n",
 		report.Params.Nodes, report.Params.IPsecNodes, report.Params.Tier1, report.Params.ISPs, report.Params.Orgs,
 		report.Params.Attackers, report.Params.Seed, report.Params.Schedule, report.Params.Seeds,

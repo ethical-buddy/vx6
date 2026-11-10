@@ -34,7 +34,15 @@ type SimRun struct {
 	procs   map[string]*exec.Cmd
 	hasFRR  bool
 	cleaned bool
+	// frrState is the run-specific FRR state directory (live runs only).
+	frrState string
+	frrAcct  frrAccount
+	// BGPConverged is how long inter-AS routing took to converge.
+	BGPConverged time.Duration
 }
+
+// bgpConvergeTimeout bounds the wait for inter-AS routes before nodes join.
+var bgpConvergeTimeout = 90 * time.Second
 
 func NewSimRun(t *Topology, r *runner, dir, simnode string) *SimRun {
 	_, frrErr := exec.LookPath("bgpd")
@@ -58,10 +66,29 @@ func (s *SimRun) BuildFabric() error {
 		}
 	}
 	if s.hasFRR || s.r.dry {
+		if !s.r.dry {
+			acct, err := lookupFRRAccount()
+			if err != nil {
+				return err
+			}
+			state, err := prepareFRRRunState(s.t.RunID)
+			if err != nil {
+				return err
+			}
+			s.frrAcct, s.frrState = acct, state
+		}
 		for _, a := range s.t.ASes {
 			if err := s.startBGP(a, nil); err != nil {
 				return fmt.Errorf("bgp %s: %w", a.RouterNS, err)
 			}
+		}
+		if !s.r.dry {
+			took, err := waitBGPConverged(context.Background(), s.t, bgpConvergeTimeout)
+			if err != nil {
+				return err
+			}
+			s.BGPConverged = took
+			fmt.Printf("BGP converged across %d ASes in %s\n", len(s.t.ASes), took.Round(time.Millisecond))
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "warning: FRR not installed; inter-AS routing is absent, only same-AS lookups will work")
@@ -83,15 +110,25 @@ func (s *SimRun) startBGP(a *AS, hijack []string) error {
 	if err := os.WriteFile(bgp, []byte(BGPConf(s.t, a, hijack)), 0o644); err != nil {
 		return err
 	}
+	// The copies above are evidence in the root-only run directory; the
+	// daemons read their own copies from the per-router FRR state directory.
 	if s.r.dry {
-		fmt.Printf("ip netns exec %s zebra -f %s -z %s/zserv.api\n", a.RouterNS, zebra, cfgDir)
-		fmt.Printf("ip netns exec %s bgpd -f %s -z %s/zserv.api\n", a.RouterNS, bgp, cfgDir)
+		state := filepath.Join(frrStateRoot, s.t.RunID, a.RouterNS)
+		fmt.Printf("ip netns exec %s zebra %s\n", a.RouterNS, strings.Join(frrDaemonArgs(state, "zebra", filepath.Join(state, "zebra.conf")), " "))
+		fmt.Printf("ip netns exec %s bgpd %s\n", a.RouterNS, strings.Join(frrDaemonArgs(state, "bgpd", filepath.Join(state, "bgpd.conf")), " "))
 		return nil
 	}
-	if err := s.startManagedProcess(a.RouterNS, "zebra", "-f", zebra, "-z", filepath.Join(cfgDir, "zserv.api")); err != nil {
+	state, err := prepareFRRRouterState(s.frrState, a.RouterNS, s.frrAcct, map[string]string{
+		"zebra.conf": ZebraConf(a),
+		"bgpd.conf":  BGPConf(s.t, a, hijack),
+	})
+	if err != nil {
+		return fmt.Errorf("FRR state: %w", err)
+	}
+	if err := s.startManagedProcess(a.RouterNS, "zebra", frrDaemonArgs(state, "zebra", filepath.Join(state, "zebra.conf"))...); err != nil {
 		return fmt.Errorf("zebra: %w", err)
 	}
-	if err := s.startManagedProcess(a.RouterNS, "bgpd", "-f", bgp, "-z", filepath.Join(cfgDir, "zserv.api")); err != nil {
+	if err := s.startManagedProcess(a.RouterNS, "bgpd", frrDaemonArgs(state, "bgpd", filepath.Join(state, "bgpd.conf"))...); err != nil {
 		return fmt.Errorf("bgpd: %w", err)
 	}
 	return nil
@@ -212,6 +249,9 @@ func (s *SimRun) Cleanup() error {
 	if err := deleteOwnedNamespaces(s.t, s.r); err != nil && cleanupErr == nil {
 		cleanupErr = err
 	}
+	if err := removeFRRRunState(s.t.RunID); err != nil && cleanupErr == nil {
+		cleanupErr = fmt.Errorf("remove FRR state: %w", err)
+	}
 	return cleanupErr
 }
 
@@ -264,8 +304,13 @@ type Report struct {
 	SnapshotTotal  int                `json:"snapshots_total"`
 	SnapshotErrors int                `json:"snapshot_errors_total"`
 	CleanupStatus  string             `json:"cleanup_status,omitempty"`
-	Restarts       []RestartReport    `json:"restarts,omitempty"`
-	Rounds         []RoundReport      `json:"rounds"`
+	BGPConvergedMS float64            `json:"bgp_converged_ms,omitempty"`
+	// Verdict is PASS, FAIL or PREVIEW (dry run). A FAIL makes `run` exit
+	// non-zero so a broken fabric cannot produce a green run.
+	Verdict        string          `json:"verdict"`
+	VerdictReasons []string        `json:"verdict_reasons,omitempty"`
+	Restarts       []RestartReport `json:"restarts,omitempty"`
+	Rounds         []RoundReport   `json:"rounds"`
 }
 
 type HostResourceReport struct {
@@ -815,6 +860,32 @@ func finalizeReport(report *Report) {
 		probes = append(probes, round.Probes...)
 	}
 	report.Totals = lookupStatsFromReports(probes)
+	report.Verdict, report.VerdictReasons = runVerdict(report)
+}
+
+// runVerdict fails a live run whose measurements show the DHT never worked:
+// no lookup found a known-existing target, or joined nodes ended with no
+// active peers. It does not judge performance; thresholds stay with readers.
+func runVerdict(report *Report) (string, []string) {
+	if report.DryRun {
+		return "PREVIEW", nil
+	}
+	var reasons []string
+	if report.Totals.Attempts > 0 && report.Totals.Found == 0 {
+		reasons = append(reasons, fmt.Sprintf("no lookup found its known-existing target (0 of %d attempts)", report.Totals.Attempts))
+	}
+	if n := len(report.Rounds); n > 0 {
+		last := report.Rounds[n-1]
+		if last.NodesJoined > 1 && last.SnapshotsOK > 0 && last.MaxActivePeers == 0 {
+			reasons = append(reasons, fmt.Sprintf("no node had an active DHT peer in the final round (%s)", last.Label))
+		}
+	} else {
+		reasons = append(reasons, "no measurement rounds completed")
+	}
+	if len(reasons) > 0 {
+		return "FAIL", reasons
+	}
+	return "PASS", nil
 }
 
 func min(a, b int) int {

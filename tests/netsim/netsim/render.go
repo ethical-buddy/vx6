@@ -28,9 +28,10 @@ func RouterCmds(t *Topology) []Cmd {
 			ip("-n", ns, "link", "set", "lo", "up"),
 			nsSysctl(ns, "net.ipv6.conf.all.forwarding=1", "net.ipv6.conf.all.accept_ra=0",
 				"net.ipv6.conf.default.accept_dad=0", "net.ipv6.conf.all.accept_dad=0",
-				// Large LANs: room for thousands of neighbour entries.
-				"net.ipv6.neigh.default.gc_thresh1=4096", "net.ipv6.neigh.default.gc_thresh2=16384",
-				"net.ipv6.neigh.default.gc_thresh3=32768", "net.ipv6.route.max_size=262144"),
+				// net.ipv6.neigh.default.gc_thresh* exist only in the initial
+				// network namespace, so they cannot be set here; a fresh
+				// namespace keeps the kernel's neighbour-table defaults.
+				"net.ipv6.route.max_size=262144"),
 			// Blackhole the whole AS block so BGP can originate it; LANs are more specific.
 			ip("-n", ns, "-6", "route", "add", "blackhole", a.Prefix),
 		)
