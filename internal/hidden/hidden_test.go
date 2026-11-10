@@ -3,6 +3,7 @@ package hidden
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -629,4 +630,72 @@ func waitForIntroNotifyAddrs(t *testing.T, scope string, want []string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for intro notify addrs %q", scope)
+}
+
+func TestJoinedRendezvousOutlivesJoinTimeout(t *testing.T) {
+	original := rendezvousJoinTimeout
+	rendezvousJoinTimeout = 200 * time.Millisecond
+	defer func() { rendezvousJoinTimeout = original }()
+
+	firstRelay, firstPeer := net.Pipe()
+	secondRelay, secondPeer := net.Pipe()
+	defer firstPeer.Close()
+	defer secondPeer.Close()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- joinRendezvous(testControlConn{Conn: firstRelay, local: "relay", peer: "first"}, "rv-long")
+	}()
+	waitForRendezvous(t, "rv-long")
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- joinRendezvous(testControlConn{Conn: secondRelay, local: "relay", peer: "second"}, "rv-long")
+	}()
+	for _, peer := range []net.Conn{firstPeer, secondPeer} {
+		msg, err := readControl(peer)
+		if err != nil || msg.Action != "rv_ready" {
+			t.Fatalf("expected rv_ready, got %+v, %v", msg, err)
+		}
+	}
+
+	// Keep the session idle for several join timeouts; the second joiner
+	// must not return (its caller would close the connection mid-session).
+	time.Sleep(4 * rendezvousJoinTimeout)
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second joiner returned while the session was live: %v", err)
+	default:
+	}
+
+	payload := []byte("still connected")
+	go func() { _, _ = firstPeer.Write(payload) }()
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(secondPeer, buf); err != nil || string(buf) != string(payload) {
+		t.Fatalf("session data after join timeout: %q, %v", buf, err)
+	}
+
+	_ = firstPeer.Close()
+	for name, done := range map[string]chan error{"first": firstDone, "second": secondDone} {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s joiner did not return after the session closed", name)
+		}
+	}
+}
+
+func waitForRendezvous(t *testing.T, id string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		rendezvousMu.Lock()
+		_, ok := rendezvouses[id]
+		rendezvousMu.Unlock()
+		if ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("rendezvous %q was not registered", id)
 }

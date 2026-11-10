@@ -304,10 +304,96 @@ func TestLookupPolicyDefaultsAndRejectsUnsafeCeilings(t *testing.T) {
 	if got := server.LookupLimits(); got != defaults {
 		t.Fatalf("lookup limits = %+v, want %+v", got, defaults)
 	}
+	fullBudget := defaultLookupLimits()
+	if err := server.SetLookupLimits(fullBudget); err != nil {
+		t.Fatalf("accept full 80-query ceiling: %v", err)
+	}
+	if got := server.LookupLimits(); got.MaxRounds != 20 || got.MaxConcurrent != 4 || got.MaxPeerQueries != 80 {
+		t.Fatalf("full lookup budget was not retained: %+v", got)
+	}
 	defaults.MaxConcurrent = 5
 	if err := server.SetLookupLimits(defaults); err == nil {
 		t.Fatal("accepted a concurrency setting above the safety ceiling")
 	}
+}
+
+func TestRecursiveFindNodeCanQueryMoreThanLegacyTwelvePeers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	const seedCount = 4
+	const branchWidth = 4
+	const secondHopCount = seedCount * branchWidth
+	const thirdHopCount = 16
+	const peerCount = seedCount + secondHopCount + thirdHopCount
+	identities := make([]identity.Identity, peerCount)
+	servers := make([]*Server, peerCount)
+	addresses := make([]string, peerCount)
+	for i := range servers {
+		id, err := identity.Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		identities[i] = id
+		servers[i] = newTestServerWithIdentity(id)
+		addresses[i] = startDHTListener(t, ctx, servers[i])
+	}
+
+	infos := make([]proto.NodeInfo, peerCount)
+	now := time.Now().UTC()
+	for i := range infos {
+		rec, err := record.NewEndpointRecordV2(identities[i], fmt.Sprintf("PEER-%02d", i), addresses[i], 1, time.Hour, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		infos[i] = NodeInfoFromEndpointRecord(rec)
+	}
+
+	// Four starting peers expose disjoint second-hop contacts. Those contacts
+	// expose a shared third-hop pool, forcing a walk beyond 12 without reaching
+	// the configured 80-query ceiling.
+	for i := 0; i < seedCount; i++ {
+		for j := 0; j < branchWidth; j++ {
+			servers[i].RT.AddNode(infos[seedCount+i*branchWidth+j])
+		}
+	}
+	secondHopStart := seedCount
+	thirdHopStart := seedCount + secondHopCount
+	for i := secondHopStart; i < thirdHopStart; i++ {
+		for j := 0; j < branchWidth; j++ {
+			servers[i].RT.AddNode(infos[thirdHopStart+j])
+		}
+	}
+
+	client := newTestServer("lookup-client")
+	for i := 0; i < seedCount; i++ {
+		client.RT.AddNode(infos[i])
+	}
+	target := "vx6_" + strings.Repeat("f", 64)
+	result, err := client.RecursiveFindNodeDetailed(ctx, target)
+	if err != nil {
+		t.Fatalf("iterative lookup: %v", err)
+	}
+	if result.QueriedNodes <= 12 || result.QueriedNodes > peerCount {
+		t.Fatalf("lookup queried %d peers; want more than legacy 12 and no more than %d available peers", result.QueriedNodes, peerCount)
+	}
+	if result.QueriedNodes > 80 || result.Rounds > 20 {
+		t.Fatalf("lookup exceeded configured ceilings: %+v", result)
+	}
+	if result.Outcome != LookupNotFound {
+		t.Fatalf("lookup outcome=%s, want reachable-view not-found after Kademlia convergence", result.Outcome)
+	}
+	queriedIDs := map[string]struct{}{}
+	for i := 0; i < seedCount; i++ {
+		queriedIDs[infos[i].ID] = struct{}{}
+	}
+	for _, peer := range client.RT.SnapshotPeers() {
+		if _, wasSeed := queriedIDs[peer.Node.ID]; !wasSeed {
+			t.Fatalf("lookup-only referral %s was persisted into the active routing table", peer.Node.ID)
+		}
+	}
+	t.Logf("queried %d unique peers (of %d available) in %d rounds with max_parallel=%d, max_total=%d; transient referrals were not persisted",
+		result.QueriedNodes, peerCount, result.Rounds, client.LookupLimits().MaxConcurrent, client.LookupLimits().MaxPeerQueries)
 }
 
 func TestCyclicLookupTerminatesAsReachableViewNotFound(t *testing.T) {

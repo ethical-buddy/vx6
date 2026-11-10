@@ -14,8 +14,8 @@ func TestAdaptiveLookupParamsScaleWithFailureEWMA(t *testing.T) {
 	if alpha <= defaultLookupAlpha {
 		t.Fatalf("expected alpha to increase under churn, got %d", alpha)
 	}
-	if budget <= defaultLookupQueryBudget {
-		t.Fatalf("expected budget to increase under churn, got %d", budget)
+	if budget != defaultLookupRounds*defaultLookupParallelism {
+		t.Fatalf("adaptive budget=%d; want the 80-query protocol ceiling", budget)
 	}
 }
 
