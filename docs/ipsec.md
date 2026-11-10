@@ -82,6 +82,13 @@ root-owned state and contains no unrelated host rules. These rules can affect
 another local application that shares a VX6 listener port; use a dedicated
 port. The service requires `CAP_NET_ADMIN` and nftables support.
 
+Each VX6 CHILD_SA now sets XFRM policy priority `1`, so its endpoint-specific
+TCP/UDP selectors take precedence over broader pass policies already present
+on the host. The nftables output rule still fails closed if the kernel does
+not select an IPsec route. `vx6 peer check --ike` verifies both the installed
+CHILD_SA and a protected TCP health request; an established IKE SA alone does
+not prove that traffic matched the ESP policy.
+
 `vx6 peer revoke --node-id ID` performs a local revocation, not a network-wide
 DHT revocation. It requires a current signed endpoint record in the local peer
 directory. The control service persists the node ID and endpoint, rejects

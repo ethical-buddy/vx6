@@ -50,7 +50,7 @@ func TestPreparePeerWritesPinnedIPv6TunnelConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "-out {", "-in {", "local_ts = 2001:db8::1/128[tcp], 2001:db8::1/128[udp]", "remote_ts = 2001:db8::2/128[tcp/4242], 2001:db8::2/128[udp/4244]", "local_ts = 2001:db8::1/128[tcp/4242], 2001:db8::1/128[udp/4244]", "remote_ts = 2001:db8::2/128[tcp], 2001:db8::2/128[udp]", "start_action = trap", "esp_proposals = aes128gcm16"} {
+	for _, want := range []string{"version = 2", "auth = pubkey", "pubkeys = " + filepath.Join(root, "pubkey", local.NodeID+".pem"), "id = %any", "pubkeys = " + filepath.Join(root, "pubkey", remote.NodeID+".pem"), "mode = tunnel", "priority = 1", "-out {", "-in {", "local_ts = 2001:db8::1/128[tcp], 2001:db8::1/128[udp]", "remote_ts = 2001:db8::2/128[tcp/4242], 2001:db8::2/128[udp/4244]", "local_ts = 2001:db8::1/128[tcp/4242], 2001:db8::1/128[udp/4244]", "remote_ts = 2001:db8::2/128[tcp], 2001:db8::2/128[udp]", "start_action = trap", "esp_proposals = aes128gcm16"} {
 		if !strings.Contains(string(config), want) {
 			t.Errorf("generated connection config lacks %q", want)
 		}

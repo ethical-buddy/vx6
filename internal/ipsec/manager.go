@@ -48,7 +48,11 @@ type revokedPeer struct {
 	At      time.Time `json:"at"`
 }
 
-const saVerificationCache = 3 * time.Second
+const (
+	saVerificationCache = 3 * time.Second
+	// Ensure endpoint-specific VX6 policies take precedence over broader host policies.
+	vx6ChildPolicyPriority = 1
+)
 
 func NewManager(root, localAddress string, id identity.Identity) (*Manager, error) {
 	return newManager(root, localAddress, id, func(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -384,6 +388,7 @@ func connectionConfig(name, localIP, localPort, remoteIP, remotePort, localKeyFi
 	child := func(child, localTS, remoteTS string) string {
 		return fmt.Sprintf(`      %s {
         mode = tunnel
+        priority = %d
         local_ts = %s
         remote_ts = %s
         esp_proposals = aes128gcm16
@@ -391,7 +396,7 @@ func connectionConfig(name, localIP, localPort, remoteIP, remotePort, localKeyFi
         close_action = trap
         dpd_action = restart
       }
-`, child, localTS, remoteTS)
+`, child, vx6ChildPolicyPriority, localTS, remoteTS)
 	}
 	ts := func(ip, tcpPort, udpPort string) string {
 		if tcpPort != "" {
