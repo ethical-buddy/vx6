@@ -27,14 +27,22 @@ type CircuitPlan struct {
 	Relays     []record.EndpointRecord
 	TargetAddr string
 	Purpose    string
+	// Session and Role are local trace metadata (for example a hidden-service
+	// rendezvous ID and "client"/"owner"); they are never sent on the wire.
+	Session string
+	Role    string
 }
 
+// TraceEvent is emitted when a circuit is about to be dialed, before it is
+// known whether the dial succeeds.
 type TraceEvent struct {
 	CircuitID  string
 	RelayNames []string
 	RelayAddrs []string
 	TargetAddr string
 	Purpose    string
+	Session    string
+	Role       string
 }
 
 type InspectEvent struct {
@@ -458,6 +466,8 @@ func notifyTrace(plan CircuitPlan) {
 		RelayAddrs: make([]string, 0, len(plan.Relays)),
 		TargetAddr: plan.TargetAddr,
 		Purpose:    plan.Purpose,
+		Session:    plan.Session,
+		Role:       plan.Role,
 	}
 	for _, relay := range plan.Relays {
 		event.RelayNames = append(event.RelayNames, relay.NodeName)

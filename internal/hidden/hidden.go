@@ -38,7 +38,6 @@ const (
 	hiddenDialParallelAttempts = 3
 	maxHiddenDialAttempts      = 8
 	maxActiveRendezvous        = 512
-	rendezvousJoinTimeout      = 8 * time.Second
 	maxControlReplayEntries    = 8192
 
 	hiddenIntroRequestWindow   = 10 * time.Second
@@ -55,6 +54,10 @@ const (
 )
 
 var (
+	// rendezvousJoinTimeout bounds how long either side waits for its peer to
+	// join. It does not bound the session once both sides are joined.
+	rendezvousJoinTimeout = 8 * time.Second
+
 	hiddenControlEpochDuration = 30 * time.Second
 	hiddenControlPingInterval  = 10 * time.Second
 	hiddenControlReadTimeout   = 25 * time.Second
@@ -486,6 +489,8 @@ func handleIntroNotify(ctx context.Context, msg Message, cfg HandlerConfig) erro
 			continue
 		}
 		plan.Purpose = "hidden-rendezvous"
+		plan.Session = msg.RendezvousID
+		plan.Role = "owner"
 
 		conn, err := onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{
 			Identity:      cfg.Identity,
@@ -609,12 +614,12 @@ func joinRendezvous(conn net.Conn, rendezvousID string) error {
 		return fmt.Errorf("timed out joining rendezvous")
 	}
 
-	select {
-	case <-wait.doneCh:
-		return nil
-	case <-timer.C:
-		return fmt.Errorf("timed out waiting for rendezvous completion")
-	}
+	// The first joiner now proxies both connections and closes doneCh when
+	// the session ends. The caller closes conn as soon as this returns, so
+	// returning before then (for example on the join timer) would cut a live
+	// rendezvous session after rendezvousJoinTimeout.
+	<-wait.doneCh
+	return nil
 }
 
 func SelectTopology(ctx context.Context, selfAddr string, nodes []record.EndpointRecord, preferred []string, introMode, profile string) Topology {
@@ -1029,7 +1034,10 @@ func buildHiddenDialAttempts(ctx context.Context, service record.ServiceRecord, 
 				noteHiddenPathFailure([]string{introAddr, rendezvousAddr})
 				continue
 			}
+			rendezvousID := fmt.Sprintf("rv_%d", rng.Int63())
 			plan.Purpose = "hidden-rendezvous"
+			plan.Session = rendezvousID
+			plan.Role = "client"
 			candidateOrder := preferAddressFirst(rendezvousCandidates, rendezvousAddr)
 
 			relayExcludes := append([]string(nil), excluded...)
@@ -1040,7 +1048,7 @@ func buildHiddenDialAttempts(ctx context.Context, service record.ServiceRecord, 
 			attempts = append(attempts, hiddenDialAttempt{
 				introAddr:       introAddr,
 				rendezvousAddr:  rendezvousAddr,
-				rendezvousID:    fmt.Sprintf("rv_%d", rng.Int63()),
+				rendezvousID:    rendezvousID,
 				relayExcludes:   relayExcludes,
 				candidateOrder:  candidateOrder,
 				plan:            plan,
