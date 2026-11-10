@@ -70,29 +70,35 @@ The initial code defaults are:
 | Referrals returned per lookup RPC | 4 | Closest active peers for the requested coordinate. |
 | Underfilled refresh threshold | 15 | A non-empty range below this value is eligible for refresh. |
 | Pending candidates total | 512 | Global cap across not-yet-active referrals. |
+| Active routing peers | 512 | Local cap across both indexes; each peer counts once. |
+| Offline hints | 512 | Local cap for ordinary inactive peers; friends and pinned identities are retained. |
 | Startup candidates restored | 50 minimum, up to 512 | Eligible saved contacts are offered for revalidation; none start active. |
-| Active routing contacts | No fixed count ceiling | Authenticated peers are retained in dynamically growing slices/maps. |
 | Local peer-index rows | 512 unique identities | bbolt keeps one row per NodeID; the category indexes refer to those same rows. |
 | New-peer probation | 2 hours | Authenticated peers can route during probation; their probation state is persisted locally. |
 | Offline history retention | 30 days | Based on local `OfflineSince`; old unpinned history is pruned. |
 
 The arrays of ranges have fixed slice headers; peer slices grow only when
 contacts are learned. A fresh node does not allocate thousands of peer records
-merely because the coordinate space has 256 possible ranges. A small network
-can retain every authenticated peer it learns; `k=20` is a normal closest-peer
-and replication target, not a maximum per range. There is no fixed global
-active-peer or database-row count ceiling. At restart, the node loads at least
-50 eligible saved contacts when that many are available, up to the 512-peer
-warm-start limit, and revalidates them before promoting them to active routes.
-The 512-row cap applies to the secondary local retention index, not the live
-XOR routing tables.
+merely because the coordinate space has 256 possible ranges. The 512 active
+peer ceiling is local to one node and counts a peer once even though it may be
+indexed by both NodeID and NameHash. Offline hints also have a 512-entry local
+cap, with explicit friends and pinned identities retained. When full, active
+admission evicts only an
+unprotected peer from an XOR range that has another route, preferring to
+preserve range coverage; friends and pinned identities are protected. If all
+possible eviction candidates are protected, a newly verified peer is not
+admitted. The network itself has no 512-node ceiling. `k=20` remains the
+normal closest-peer and replication target, not a hard per-range cap. At
+restart, the node loads up to 512 eligible saved contacts as candidates and
+revalidates them before promoting them to active routes.
 
 New successful contacts move to the front of their local range. XOR distance,
 not recency or network location, determines which contacts are closest to a
-lookup target. All authenticated peers are retained locally, including peers
-sharing one prefix or ASN. There is no per-prefix, per-ASN, per-range, or fixed
-global active-peer count limit. The 512-entry pending limit applies only to
-unverified referrals and startup candidates, not authenticated peers.
+lookup target. All authenticated peers are considered for local admission,
+including peers sharing one prefix or ASN. Diversity is a supplemental
+contact preference, not a barrier to admission. Active routing is bounded
+locally at 512; pending referrals have a separate 512-entry cap. Neither
+number limits total network size.
 
 The peer database also keeps dynamic categories for friend identities, peers
 whose services were used, the closest 50 peers in each XOR coordinate, active
@@ -306,10 +312,12 @@ or authorize access to a service. Use `peer friend` separately for retention.
 
 Each node owns its own routing-table decisions. The current table separates
 active XOR contacts, unverified candidates, offline history, and a persisted
-secondary index capped at 512 unique identities. That local index has friend,
+secondary index capped at 512 unique identities. The active XOR view is also
+bounded locally at 512 peers, counting a peer once across both indexes. That
+local index has friend,
 recent-use, closest-coordinate, diversity, active, probation, and inactive
-categories. The live active XOR table itself has no fixed count ceiling. The
-50-contact warm-start floor is a target when enough eligible records exist,
+categories. The network has no fixed node-count ceiling. The 50-contact
+warm-start floor is a target when enough eligible records exist,
 not a requirement to invent or admit peers. The separate unverified-candidate
 queue is also capped at 512. Identity trust and friend retention are different
 local choices.

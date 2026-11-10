@@ -1,96 +1,54 @@
 # Setup
 
+## Install
+
+For Linux amd64, build the self-contained installer bundle with:
+
+```sh
+make package-linux
+```
+
+This produces `dist/vx6-linux-amd64.tar.gz`. Extract it on the target Linux
+system and run `sudo ./install.sh "$USER"`; it installs strongSwan/nftables,
+the binaries and systemd units, then configures and starts the helper for that
+normal account. Arch users can alternatively build/install the package in
+`deployments/arch/`, then run `sudo vx6-setup "$USER"`.
+
 ## Requirements
 
-- Go 1.24 or newer if you are building from source (see `go.mod`)
-- Qt 6 WebEngine if you are building the optional browser frontend from `products/browser/qt`
-- IPv6 enabled on the Linux machines that will run VX6
-- firewall rules that allow the VX6 listen port
+- Linux with working IPv6 connectivity and a reachable IPv6 endpoint.
+- VX6 binaries `vx6` and `vx6-ipsecd`.
+- Kernel XFRM support and systemd. The installer/package supplies strongSwan
+  and nftables for supported Linux distributions.
+- A regular login user configured for the root helper's Unix socket.
 
-## Build
+## Build From Source
 
-The core Linux build path is:
-
-```bash
+```sh
 make build
 ```
 
-This builds `vx6` and the separate privileged `vx6-ipsecd` helper. The helper
-is a distinct executable to keep IPsec/firewall administration out of the
-ordinary user-facing VX6 process. The optional desktop GUI has its own command
-and is built separately below. A package/installer that provisions the system
-service is still in progress; see the [packaging plan](packaging-plan.md).
+This builds `vx6` and the privileged helper separately. For a distributable
+amd64 bundle, run `make package-linux`. After package/bundle installation,
+configure the root helper for the normal account with `sudo vx6-setup "$USER"`.
+See the [Linux guide](LINUX.md).
 
-You can also build directly with Go:
+## Initialize and Run
 
-```bash
-go build ./cmd/vx6
-go build -o vx6-gui ./cmd/vx6-gui
-```
+On each machine, substitute its own reachable global IPv6 address:
 
-Build the Qt browser frontend separately:
-
-```bash
-cmake -S products/browser/qt -B products/browser/qt/build
-cmake --build products/browser/qt/build
-```
-
-## Install
-
-```bash
-make install
-```
-
-For staged packaging:
-
-```bash
-make install DESTDIR=/tmp/vx6-install-root
-```
-
-## First-Time Node Setup
-
-Create a config and identity:
-
-```bash
-vx6 init --name alice --listen '[::]:4242'
-```
-
-Optional:
-
-- add `--advertise` if you already know the public IPv6 address
-- add `--peer` to seed discovery from a known node
-- add `--hidden-node` if you do not want to publish an endpoint record
-- add `--downloads-dir` if you want received files somewhere else
-
-## Run the Node
-
-```bash
+```sh
+vx6 init --name ALICE --advertise '[2001:db8::10]:4242'
+vx6 doctor
 vx6 node
 ```
 
-## Check Status
+Exchange signed endpoint files using
+`vx6 identity export-endpoint --addr '[IPv6]:4242' --out peer.json`, then add
+the received record with `vx6 peer add --record peer.json`. Do not run the
+normal node process with `sudo`.
 
-```bash
-vx6 status
-```
-
-## Open the GUI
-
-```bash
-vx6-gui
-```
-
-The GUI opens a local browser page and calls the `vx6` binary underneath.
-
-## Open the browser frontend
-
-```bash
-products/browser/qt/build/vx6-browser
-```
-
-The browser frontend uses the same `vx6` backend and local control surface.
-
-## Linux-Specific Follow-Up
-
-- [Linux Guide](./LINUX.md)
-- [systemd](./systemd.md)
+See the concise [command workflow](commands.md), [service guide](services.md),
+and [IPsec guide](ipsec.md). A successful local `doctor` check is not proof of
+remote connectivity; service transfer must be verified separately on two
+reachable systems.

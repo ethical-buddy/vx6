@@ -703,14 +703,48 @@ func TestFiftySameRangeCandidatesFitThePendingWarmSet(t *testing.T) {
 	}
 }
 
-func TestActiveRoutingHasNoTenThousandPeerCeiling(t *testing.T) {
+func TestActiveRoutingIsBoundedAndPreservesPinnedPeers(t *testing.T) {
 	rt := NewRoutingTable("self")
-	const peerCount = 10001
+	const peerCount = maxActivePeers + 256
+	pinnedID := "peer-00000"
 	for i := 0; i < peerCount; i++ {
-		rt.AddNode(proto.NodeInfo{ID: fmt.Sprintf("peer-%05d", i), Addr: fmt.Sprintf("[2001:db8::%x]:4242", i+1)})
+		id := fmt.Sprintf("peer-%05d", i)
+		rt.AddNode(proto.NodeInfo{ID: id, Addr: fmt.Sprintf("[2001:db8::%x]:4242", i+1)})
+		if i == 0 && !rt.SetPinned(id, true) {
+			t.Fatal("failed to pin initial peer")
+		}
 	}
-	if got := len(rt.Nodes()); got != peerCount {
-		t.Fatalf("active peers = %d, want %d (no fixed 10,000 cap)", got, peerCount)
+	if got := len(rt.Nodes()); got != maxActivePeers {
+		t.Fatalf("active peers = %d, want local cap %d", got, maxActivePeers)
+	}
+	if _, ok := rt.ActiveNode(pinnedID); !ok {
+		t.Fatal("active routing limit evicted a pinned peer")
+	}
+	if got := len(rt.peerByID); got != maxActivePeers {
+		t.Fatalf("in-memory peer entries = %d, want bounded count %d", got, maxActivePeers)
+	}
+}
+
+func TestOfflineHistoryIsBoundedAndPreservesPinnedPeers(t *testing.T) {
+	rt := NewRoutingTable("self")
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pinnedID := "offline-00000"
+	for i := 0; i < maxOfflinePeers+88; i++ {
+		id := fmt.Sprintf("offline-%05d", i)
+		peer := proto.NodeInfo{ID: id, Addr: fmt.Sprintf("[2001:db8::%x]:4242", i+1)}
+		rt.AddNode(peer)
+		if i == 0 && !rt.SetPinned(id, true) {
+			t.Fatal("failed to pin peer before it went offline")
+		}
+		for miss := 0; miss < staleFailureThreshold; miss++ {
+			rt.RecordLivenessResult(id, start.Add(time.Duration(miss)*livenessProbeInterval), false)
+		}
+	}
+	if got := len(rt.offline); got != maxOfflinePeers {
+		t.Fatalf("offline hints = %d, want local cap %d", got, maxOfflinePeers)
+	}
+	if _, ok := rt.offline[pinnedID]; !ok {
+		t.Fatal("offline history cap evicted a pinned identity")
 	}
 }
 

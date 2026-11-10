@@ -49,3 +49,4 @@ scripts/make_vx6_education_proposal_docx.py
 
 products/apps/vx6comms-tauri/src-tauri/gen/
 /vx6-release
+/dist/

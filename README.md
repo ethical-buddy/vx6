@@ -56,6 +56,12 @@ for the current platform and security boundaries.
 
 ## First node
 
+On Linux amd64, build the installable bundle with `make package-linux`, then
+extract it on each machine and run `sudo ./install.sh "$USER"`. Arch users can
+install the Arch package and run `sudo vx6-setup "$USER"`. These steps install
+strongSwan and configure the privileged helper; keep the regular VX6 CLI
+running as your normal user.
+
 Initialize a node identity and configuration:
 
 ```sh
@@ -82,6 +88,11 @@ Publish a local service and connect to it from another node:
 ```
 
 The second command creates a local listener that forwards traffic to the discovered service. See [Usage](docs/usage.md) for complete workflows and [Commands](docs/commands.md) for CLI details.
+
+Public services are open to peers accepted by the node's IKE/IPsec policy; they
+are not anonymous unauthenticated Internet services. Run `vx6 doctor` to
+check local IPv6, identity, and IPsec-helper prerequisites. It does not test a
+remote peer or prove application traffic crossed ESP.
 
 ## Use the Go SDK
 

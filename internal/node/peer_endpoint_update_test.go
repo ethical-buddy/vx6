@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -9,6 +10,42 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/record"
 )
+
+type addressCaptureTunnel struct{}
+
+func (addressCaptureTunnel) PreparePeer(context.Context, record.EndpointRecord) error { return nil }
+func (addressCaptureTunnel) EnsurePeer(context.Context, record.EndpointRecord) error  { return nil }
+func (addressCaptureTunnel) RegisterProbePort(context.Context, string) error          { return nil }
+func (addressCaptureTunnel) AuthenticatePeer(context.Context, string) (record.EndpointRecord, bool) {
+	return record.EndpointRecord{}, false
+}
+
+func TestRuntimePeerTunnelUsesCurrentEndpointForEachOperation(t *testing.T) {
+	current := "[2001:db8::1]:4242"
+	var used string
+	tunnel := runtimePeerTunnel{
+		address: func() string { return current },
+		client: func(address string, _ identity.Identity) (PeerTunnel, error) {
+			used = address
+			return addressCaptureTunnel{}, nil
+		},
+	}
+	peer := record.EndpointRecord{NodeID: "peer"}
+	if err := tunnel.EnsurePeer(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	if used != current {
+		t.Fatalf("client created for %q, want current endpoint %q", used, current)
+	}
+
+	current = "[2001:db8::2]:4242"
+	if err := tunnel.PreparePeer(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	if used != current {
+		t.Fatalf("client kept stale endpoint %q, want refreshed endpoint %q", used, current)
+	}
+}
 
 func TestRegistryEndpointUpdateWinsOverStaleRoutingTableCopy(t *testing.T) {
 	id, err := identity.Generate()

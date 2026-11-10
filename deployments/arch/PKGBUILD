@@ -1,22 +1,30 @@
-# Maintainer: Your Name <you@example.com>
-pkgname=vx6-bin
+# Maintainer: Suryansh Deshwal <suryanshdeshwal@gmail.com>
+pkgname=vx6
 pkgver=1.0.0
-pkgrel=1
-pkgdesc="IPv6-first transport and service fabric"
+pkgrel=3
+pkgdesc="IPv6 peer-to-peer service sharing over authenticated IPsec"
 arch=('x86_64' 'aarch64')
-url="https://github.com/vx6/vx6"
-license=('MIT')
-depends=('glibc' 'strongswan')
-makedepends=('go')
-source=("vx6-${pkgver}.tar.gz::https://github.com/vx6/vx6/archive/v${pkgver}.tar.gz")
+url="https://github.com/ethical-buddy/vx6"
+license=('custom')
+depends=('glibc' 'strongswan' 'nftables')
+makedepends=('go' 'git')
+install=vx6.install
+source=("vx6::git+https://github.com/ethical-buddy/vx6.git#tag=v${pkgver}")
 sha256sums=('SKIP')
 
 build() {
-  cd "vx6-${pkgver}"
-  make build
+  cd "$srcdir/vx6"
+  make build VERSION="$pkgver"
 }
 
 package() {
-  cd "vx6-${pkgver}"
-  make DESTDIR="${pkgdir}" install
+  cd "$srcdir/vx6"
+  install -Dm755 vx6 "$pkgdir/usr/bin/vx6"
+  install -Dm755 vx6-ipsecd "$pkgdir/usr/bin/vx6-ipsecd"
+  install -Dm755 deployments/linux/vx6-setup "$pkgdir/usr/bin/vx6-setup"
+  install -Dm755 deployments/linux/install.sh "$pkgdir/usr/share/vx6/install.sh"
+  install -Dm644 LICENSE-COMMERCIAL.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE-COMMERCIAL.md"
+  install -Dm644 deployments/systemd/vx6.service "$pkgdir/usr/lib/systemd/user/vx6.service"
+  install -Dm644 deployments/systemd/vx6-ipsecd.service "$pkgdir/usr/lib/systemd/system/vx6-ipsecd.service"
+  install -Dm644 deployments/systemd/ipsecd.json.example "$pkgdir/etc/vx6/ipsecd.json.example"
 }

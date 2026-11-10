@@ -18,6 +18,8 @@ const K = 20
 
 const (
 	maxPendingCandidates  = 512
+	maxActivePeers        = 512
+	maxOfflinePeers       = 512
 	staleFailureThreshold = 3
 	livenessProbeInterval = 5 * time.Minute
 	peerProbationPeriod   = 2 * time.Hour
@@ -122,14 +124,24 @@ func (rt *RoutingTable) SetSelfNameHash(hash string) {
 
 // AddNode records an authenticated, successful peer exchange and makes the
 // peer eligible for active routing slots.
-func (rt *RoutingTable) AddNode(node proto.NodeInfo) {
+func (rt *RoutingTable) AddNode(node proto.NodeInfo) bool {
 	if node.ID == "" || node.ID == rt.SelfID || node.Addr == "" {
-		return
+		return false
 	}
 	now := time.Now()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	entry := rt.peerByID[node.ID]
+	if !rt.inIndexLocked(rt.Buckets[:], node.ID) && rt.activePeerCountLocked() >= maxActivePeers {
+		victim := rt.activeEvictionCandidateLocked(rt.bucketIndex(node.ID))
+		if victim == nil {
+			return false
+		}
+		rt.removeFromIndexLocked(rt.Buckets[:], victim.Node.ID)
+		rt.removeFromIndexLocked(rt.NameBuckets[:], victim.Node.ID)
+		delete(rt.peerByID, victim.Node.ID)
+		delete(rt.offline, victim.Node.ID)
+	}
 	if entry == nil {
 		entry = &bucketEntry{Node: node, ProbationUntil: now.Add(peerProbationPeriod)}
 		rt.peerByID[node.ID] = entry
@@ -164,6 +176,49 @@ func (rt *RoutingTable) AddNode(node proto.NodeInfo) {
 	if rt.SelfNameHash != "" {
 		rt.insertIndexLocked(rt.NameBuckets[:], entry, rt.nameBucketIndex(node))
 	}
+	return true
+}
+
+func (rt *RoutingTable) activePeerCountLocked() int {
+	count := 0
+	for _, bucket := range rt.Buckets {
+		count += len(bucket)
+	}
+	return count
+}
+
+// When the local active table is full, evict only from a bucket that has
+// redundancy. This preserves existing XOR-range coverage while allowing a new
+// peer to fill an empty range. Friends and pinned identities are retained.
+func (rt *RoutingTable) activeEvictionCandidateLocked(targetBucket int) *bucketEntry {
+	findWorst := func(bucket []*bucketEntry) *bucketEntry {
+		var worst *bucketEntry
+		for _, candidate := range bucket {
+			if candidate.Friend || candidate.Pinned {
+				continue
+			}
+			if worst == nil || peerRetentionLess(observationOf(worst), observationOf(candidate)) {
+				worst = candidate
+			}
+		}
+		return worst
+	}
+	if targetBucket >= 0 && targetBucket < len(rt.Buckets) && len(rt.Buckets[targetBucket]) > 1 {
+		if victim := findWorst(rt.Buckets[targetBucket]); victim != nil {
+			return victim
+		}
+	}
+	var worst *bucketEntry
+	for _, bucket := range rt.Buckets {
+		if len(bucket) <= 1 {
+			continue
+		}
+		candidate := findWorst(bucket)
+		if candidate != nil && (worst == nil || peerRetentionLess(observationOf(worst), observationOf(candidate))) {
+			worst = candidate
+		}
+	}
+	return worst
 }
 
 // UpdateKnownNode refreshes signed endpoint metadata for a peer this table
@@ -321,7 +376,9 @@ func (rt *RoutingTable) PromoteCandidate(nodeID string) {
 	}
 	rt.mu.Unlock()
 	if node.ID != "" {
-		rt.AddNode(node)
+		if !rt.AddNode(node) {
+			rt.AddCandidate(node)
+		}
 	}
 }
 
@@ -415,6 +472,7 @@ func (rt *RoutingTable) RecordLivenessResult(nodeID string, now time.Time, alive
 			entry.OfflineSince = now
 		}
 		rt.offline[nodeID] = entry
+		rt.trimOfflineLocked()
 		rt.removePeerIfUnindexedLocked(nodeID)
 	} else if entry.ProbeMisses >= staleFailureThreshold {
 		rt.removePendingLocked(nodeID)
@@ -423,11 +481,31 @@ func (rt *RoutingTable) RecordLivenessResult(nodeID string, now time.Time, alive
 				entry.OfflineSince = now
 			}
 			rt.offline[nodeID] = entry
+			rt.trimOfflineLocked()
 		} else {
 			delete(rt.peerByID, nodeID)
 		}
 	}
 	return removed
+}
+
+func (rt *RoutingTable) trimOfflineLocked() {
+	for len(rt.offline) > maxOfflinePeers {
+		var worst *bucketEntry
+		for _, candidate := range rt.offline {
+			if candidate.Friend || candidate.Pinned {
+				continue
+			}
+			if worst == nil || peerRetentionLess(observationOf(worst), observationOf(candidate)) {
+				worst = candidate
+			}
+		}
+		if worst == nil {
+			return
+		}
+		delete(rt.offline, worst.Node.ID)
+		delete(rt.peerByID, worst.Node.ID)
+	}
 }
 
 func (rt *RoutingTable) RecordUse(nodeID string, now time.Time, rtt time.Duration) {
@@ -897,7 +975,7 @@ func (rt *RoutingTable) insertIndexLocked(buckets [][]*bucketEntry, entry *bucke
 		return
 	}
 	// K is the normal referral/replication target, not a hard per-range
-	// ceiling. The local active-peer limit bounds total memory as the view grows.
+	// ceiling. A separate local active-peer limit bounds total routing memory.
 	buckets[idx] = append([]*bucketEntry{entry}, buckets[idx]...)
 }
 

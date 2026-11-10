@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+  printf 'Usage: sudo vx6-setup [LOGIN_USER]\n'
+  printf 'Configure vx6-ipsecd for one non-root local user and enable its system service.\n'
+}
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  usage
+  exit 0
+fi
+if [[ ${EUID} -ne 0 ]]; then
+  printf 'vx6-setup must run as root; use: sudo vx6-setup "$USER"\n' >&2
+  exit 1
+fi
+if (( $# > 1 )); then
+  usage >&2
+  exit 2
+fi
+
+login_user=${1:-${SUDO_USER:-}}
+if [[ -z $login_user || $login_user == root ]]; then
+  printf 'Specify the normal login user that will run VX6, not root.\n' >&2
+  usage >&2
+  exit 2
+fi
+if ! getent passwd "$login_user" >/dev/null; then
+  printf 'Unknown local user: %s\n' "$login_user" >&2
+  exit 1
+fi
+
+uid=$(id -u "$login_user")
+gid=$(id -g "$login_user")
+if [[ ! $uid =~ ^[0-9]+$ || ! $gid =~ ^[0-9]+$ || $uid == 0 || $gid == 0 ]]; then
+  printf 'Could not determine a non-root UID and primary GID for %s.\n' "$login_user" >&2
+  exit 1
+fi
+command -v vx6-ipsecd >/dev/null || {
+  printf 'vx6-ipsecd is missing; install the VX6 package first.\n' >&2
+  exit 1
+}
+command -v swanctl >/dev/null || {
+  printf 'strongSwan is missing; install strongSwan before configuring VX6.\n' >&2
+  exit 1
+}
+command -v systemctl >/dev/null || {
+  printf 'systemd is required by this Linux package.\n' >&2
+  exit 1
+}
+
+install -d -o root -g root -m 0755 /etc/vx6
+tmp=$(mktemp /etc/vx6/.ipsecd.json.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+printf '{\n  "socket": "/run/vx6/ipsecd.sock",\n  "state_dir": "/var/lib/vx6/ipsec",\n  "socket_gid": %s,\n  "allowed_uids": [%s]\n}\n' "$gid" "$uid" >"$tmp"
+chown root:root "$tmp"
+chmod 0644 "$tmp"
+if [[ -e /etc/vx6/ipsecd.json || -L /etc/vx6/ipsecd.json ]]; then
+  if [[ -L /etc/vx6/ipsecd.json || ! -f /etc/vx6/ipsecd.json ]]; then
+    printf 'Refusing to replace a non-regular /etc/vx6/ipsecd.json.\n' >&2
+    exit 1
+  fi
+  config_uid=$(stat -c '%u' /etc/vx6/ipsecd.json)
+  config_mode=$(stat -c '%a' /etc/vx6/ipsecd.json)
+  if [[ $config_uid != 0 ]] || (( (8#$config_mode & 8#22) != 0 )); then
+    printf '/etc/vx6/ipsecd.json must be root-owned and not group/other-writable.\n' >&2
+    exit 1
+  fi
+  if ! cmp -s "$tmp" /etc/vx6/ipsecd.json; then
+    backup="/etc/vx6/ipsecd.json.vx6-setup-backup-$(date +%Y%m%d%H%M%S)"
+    cp -p /etc/vx6/ipsecd.json "$backup"
+    printf 'Previous helper config backed up to %s\n' "$backup"
+  fi
+fi
+mv -f "$tmp" /etc/vx6/ipsecd.json
+trap - EXIT
+
+if [[ ${VX6_SETUP_NO_SYSTEMD:-0} != 1 ]]; then
+  unit=
+  for candidate in strongswan.service strongswan-starter.service strongswan-swanctl.service; do
+    if systemctl cat "$candidate" >/dev/null 2>&1; then
+      unit=$candidate
+      break
+    fi
+  done
+  if [[ -n $unit ]]; then
+    systemctl enable --now "$unit"
+  elif ! swanctl --list-sas >/dev/null 2>&1; then
+    printf 'No supported strongSwan systemd unit found and swanctl cannot reach charon.\n' >&2
+    printf 'Start the installed strongSwan service, then rerun vx6-setup.\n' >&2
+    exit 1
+  fi
+  systemctl daemon-reload
+  systemctl enable --now vx6-ipsecd.service
+fi
+
+printf 'VX6 IPsec helper configured for %s (uid=%s, primary_gid=%s).\n' "$login_user" "$uid" "$gid"
+if [[ ${VX6_SETUP_NO_SYSTEMD:-0} == 1 ]]; then
+  printf 'Systemd start skipped by VX6_SETUP_NO_SYSTEMD=1.\n'
+else
+  printf 'Enabled strongSwan and vx6-ipsecd. No logout or supplementary group change is required.\n'
+fi

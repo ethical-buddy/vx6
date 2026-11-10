@@ -90,6 +90,12 @@ func TestAcquireNodeLockPreventsSecondNodeStart(t *testing.T) {
 func TestPrintUsageHidesAddressRevealFlags(t *testing.T) {
 	var usage bytes.Buffer
 	printUsage(&usage)
+	if !strings.Contains(usage.String(), "vx6 doctor") || !strings.Contains(usage.String(), "Basic workflow:") {
+		t.Fatalf("usage is missing the basic workflow or local diagnostics: %q", usage.String())
+	}
+	if strings.Contains(usage.String(), "5-hop proxy") || strings.Contains(usage.String(), "hidden services via") {
+		t.Fatalf("basic usage should not advertise out-of-scope features: %q", usage.String())
+	}
 	if strings.Contains(usage.String(), "show-addresses") {
 		t.Fatalf("usage leaked address-reveal flag: %q", usage.String())
 	}
@@ -98,6 +104,84 @@ func TestPrintUsageHidesAddressRevealFlags(t *testing.T) {
 	printDebugUsage(&debugUsage)
 	if strings.Contains(debugUsage.String(), "show-addresses") {
 		t.Fatalf("debug usage leaked address-reveal flag: %q", debugUsage.String())
+	}
+}
+
+func TestDoctorExplainsMissingConfiguration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	output := captureStdout(t, func() {
+		if err := runDoctor(context.Background(), nil); err == nil {
+			t.Fatal("doctor should fail when the node has not been initialized")
+		}
+	})
+	if !strings.Contains(output, "FAIL\tidentity") || !strings.Contains(output, "vx6 init --name NAME") {
+		t.Fatalf("doctor did not provide actionable setup guidance: %q", output)
+	}
+}
+
+func TestServiceAddReportsSavedConfigAndReloadState(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VX6_CONFIG_PATH", configPath)
+	store, err := config.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	output := captureStdout(t, func() {
+		if err := runService([]string{"add", "--name", "web", "--target", "127.0.0.1:8080"}); err != nil {
+			t.Fatalf("add service: %v", err)
+		}
+	})
+	if !strings.Contains(output, "service_saved\tweb\tprotocol=tcp") || !strings.Contains(output, "service_update\treload_not_sent") {
+		t.Fatalf("service add did not explain its saved/reload state: %q", output)
+	}
+	_, services, err := store.ListServices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if services["web"].Target != "127.0.0.1:8080" {
+		t.Fatalf("service config not persisted: %#v", services["web"])
+	}
+}
+
+func TestValidateServiceRecordNameBindsOwnerAndService(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := record.NewServiceRecord(id, "SURYANSH", "web", "[2001:db8::1]:4242", time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateServiceRecordName("suryansh.web", service); err != nil {
+		t.Fatalf("canonical owner name should match: %v", err)
+	}
+	if err := validateServiceRecordName("THINK.web", service); err == nil {
+		t.Fatal("accepted a service record under a different owner name")
+	}
+	if err := validateServiceRecordName("SURYANSH.api", service); err == nil {
+		t.Fatal("accepted a service record under a different service name")
+	}
+}
+
+func TestServiceVisibilityLabels(t *testing.T) {
+	cases := []struct {
+		name string
+		in   record.ServiceRecord
+		want string
+	}{
+		{name: "public", want: "public"},
+		{name: "private", in: record.ServiceRecord{IsPrivate: true}, want: "private"},
+		{name: "hidden", in: record.ServiceRecord{IsHidden: true}, want: "hidden"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serviceVisibility(tc.in); got != tc.want {
+				t.Fatalf("serviceVisibility() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

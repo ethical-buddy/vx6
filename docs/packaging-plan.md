@@ -67,9 +67,14 @@ keys on ordinary removal. Remove only VX6-owned firewall state, never flush
 host-wide rules. Provide an explicit state-removal option. No NAT-T is part of
 the current IPv6-only requirement.
 
-The existing `deployments/arch/PKGBUILD` is a sketch, not a releasable package:
-it uses a placeholder maintainer, version, URL, and skipped checksum. Debian
-and RPM packages and signed repository metadata do not yet exist.
+The Arch recipe points at the project repository/tag, declares the current
+strongSwan and nftables runtime dependencies, and installs both binaries, the
+`vx6-setup` helper, systemd units, and project license. The user runs
+`sudo vx6-setup "$USER"`; it writes the real UID/primary GID and enables the
+strongSwan and VX6 helper services. The standalone amd64 bundle uses the same
+setup path and installs dependencies on Arch or Debian/Ubuntu. A clean package
+and bundle installation/upgrade test is still required. Debian/RPM packages
+and signed repository metadata do not yet exist.
 
 ### Windows platform group (later)
 

@@ -168,7 +168,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	var peerTunnel PeerTunnel = cfg.IPsecTunnel
 	if peerTunnel == nil {
-		client, err := ipsec.NewClient(ipsec.DefaultSocket(), cfg.AdvertiseAddr, cfg.Identity)
+		localAddress := currentIPsecLocalAddress(cfg)
+		client, err := ipsec.NewClient(ipsec.DefaultSocket(), localAddress, cfg.Identity)
 		if err != nil {
 			return fmt.Errorf("initialize Linux IPsec service client: %w", err)
 		}
@@ -178,7 +179,13 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			return fmt.Errorf("Linux IPsec control service is unavailable: %w", err)
 		}
 		cancel()
-		peerTunnel = client
+		peerTunnel = runtimePeerTunnel{
+			identity: cfg.Identity,
+			address:  func() string { return currentIPsecLocalAddress(cfg) },
+			client: func(address string, id identity.Identity) (PeerTunnel, error) {
+				return ipsec.NewClient(ipsec.DefaultSocket(), address, id)
+			},
+		}
 	}
 	cfg.IPsecTunnel = peerTunnel
 	guard := func(dialCtx context.Context, addr string) error {
@@ -1847,6 +1854,60 @@ func runtimeConfig(base Config) Config {
 		live.AdvertiseAddr = updated
 	}
 	return live
+}
+
+type runtimePeerTunnel struct {
+	identity identity.Identity
+	address  func() string
+	client   func(string, identity.Identity) (PeerTunnel, error)
+}
+
+func (t runtimePeerTunnel) withClient(run func(PeerTunnel) error) error {
+	address := t.address()
+	if address == "" {
+		return errors.New("no current local IPv6 endpoint is available for IPsec")
+	}
+	client, err := t.client(address, t.identity)
+	if err != nil {
+		return fmt.Errorf("initialize IPsec control client for %s: %w", address, err)
+	}
+	return run(client)
+}
+
+func (t runtimePeerTunnel) PreparePeer(ctx context.Context, peer record.EndpointRecord) error {
+	return t.withClient(func(client PeerTunnel) error { return client.PreparePeer(ctx, peer) })
+}
+
+func (t runtimePeerTunnel) EnsurePeer(ctx context.Context, peer record.EndpointRecord) error {
+	return t.withClient(func(client PeerTunnel) error { return client.EnsurePeer(ctx, peer) })
+}
+
+func (t runtimePeerTunnel) RegisterProbePort(ctx context.Context, port string) error {
+	return t.withClient(func(client PeerTunnel) error { return client.RegisterProbePort(ctx, port) })
+}
+
+func (t runtimePeerTunnel) AuthenticatePeer(ctx context.Context, remote string) (record.EndpointRecord, bool) {
+	var peer record.EndpointRecord
+	var authenticated bool
+	err := t.withClient(func(client PeerTunnel) error {
+		peer, authenticated = client.AuthenticatePeer(ctx, remote)
+		return nil
+	})
+	return peer, authenticated && err == nil
+}
+
+func currentIPsecLocalAddress(cfg Config) string {
+	updated, _, err := netutil.RefreshAdvertiseAddressWithAddrsAndTargets(
+		cfg.AdvertiseAddr,
+		cfg.ListenAddr,
+		currentInterfaceAddrs(),
+		advertiseTargets(cfg),
+		cfg.AdvertiseExplicit,
+	)
+	if err == nil && updated != "" {
+		return updated
+	}
+	return cfg.AdvertiseAddr
 }
 
 func runtimeServices(base Config) map[string]string {

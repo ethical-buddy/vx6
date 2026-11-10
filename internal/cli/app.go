@@ -63,6 +63,8 @@ func Run(ctx context.Context, args []string) error {
 		return runConnect(ctx, args[1:])
 	case "status":
 		return runStatus(ctx, args[1:])
+	case "doctor":
+		return runDoctor(ctx, args[1:])
 	case "node":
 		return runNode(ctx, args[1:])
 	case "reload":
@@ -89,72 +91,27 @@ func Run(ctx context.Context, args []string) error {
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "VX6")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "IPv6-first overlay transport with signed discovery, encrypted sessions, direct service sharing,")
-	fmt.Fprintln(w, "DHT-backed metadata lookup, and optional 5-hop proxy forwarding.")
+	fmt.Fprintln(w, "IPv6 peer-to-peer service sharing over authenticated IKEv2/IPsec connections.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp] [--relay on|off] [--relay-percent N] [--peer [ipv6]:port] [--hidden-node] [--setup-firewall] [--data-dir DIR] [--downloads-dir DIR]")
-	fmt.Fprintln(w, "  vx6 node")
-	fmt.Fprintln(w, "  vx6 reload")
-	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--protocol tcp|udp] [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
-	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 --private --allow-node NODE_ID [--allow-node NODE_ID ...]")
-	fmt.Fprintln(w, "  vx6 service remove --name NAME")
-	fmt.Fprintln(w, "  vx6 service allow --name NAME --node-id NODE_ID")
-	fmt.Fprintln(w, "  vx6 service revoke --name NAME --node-id NODE_ID")
-	fmt.Fprintln(w, "  vx6 connect --service NAME [--listen 127.0.0.1:2222] [--proxy] [--addr [ipv6]:port] [--protocol tcp|udp]")
-	fmt.Fprintln(w, "  vx6 send --file PATH (--to PEER | --addr [ipv6]:port) [--proxy]")
-	fmt.Fprintln(w, "  vx6 receive status")
-	fmt.Fprintln(w, "  vx6 receive allow --all | --node NAME")
-	fmt.Fprintln(w, "  vx6 receive deny --node NAME")
-	fmt.Fprintln(w, "  vx6 receive disable")
-	fmt.Fprintln(w, "  vx6 service")
-	fmt.Fprintln(w, "  vx6 peer")
-	fmt.Fprintln(w, "  vx6 list [--user USER] [--hidden]")
-	fmt.Fprintln(w, "  vx6 peer add --record ENDPOINT.json")
-	fmt.Fprintln(w, "  vx6 peer add --addr [ipv6]:port [--name NAME] (address only; IPsec requires a signed record)")
-	fmt.Fprintln(w, "  vx6 peer friend --record ENDPOINT.json (retain this identity locally)")
-	fmt.Fprintln(w, "  vx6 peer unfriend --node-id ID")
-	fmt.Fprintln(w, "  vx6 peer pin --record ENDPOINT.json (locally trust this public key; does not reserve its name)")
-	fmt.Fprintln(w, "  vx6 peer unpin --node-id ID")
-	fmt.Fprintln(w, "  vx6 peer revoke --node-id ID (local, persistent deny)")
-	fmt.Fprintln(w, "  vx6 identity")
-	fmt.Fprintln(w, "  vx6 identity rename --name NAME")
-	fmt.Fprintln(w, "  vx6 identity export-endpoint --addr [ipv6]:port --out FILE [--ttl 24h]")
-	fmt.Fprintln(w, "  vx6 status")
-	fmt.Fprintln(w, "  vx6 debug registry")
-	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
-	fmt.Fprintln(w, "  vx6 debug dht-status")
-	fmt.Fprintln(w, "  vx6 debug ebpf-status            (Linux only)")
-	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE   (Linux only)")
-	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE   (Linux only)")
-	fmt.Fprintln(w, "  vx6-gui")
+	fmt.Fprintln(w, "Basic workflow:")
+	fmt.Fprintln(w, "  vx6 init --name NAME --advertise '[GLOBAL-IPv6]:4242' [--peer '[PEER-IPv6]:4242']")
+	fmt.Fprintln(w, "  vx6 identity export-endpoint --addr '[GLOBAL-IPv6]:4242' --out identity.json")
+	fmt.Fprintln(w, "  vx6 peer add --record identity.json")
+	fmt.Fprintln(w, "  vx6 node                         start the node")
+	fmt.Fprintln(w, "  vx6 doctor                       check local setup")
+	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:PORT [--protocol tcp|udp]")
+	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:PORT --private --allow-node NODE_ID")
+	fmt.Fprintln(w, "  vx6 service check --name NODE.SERVICE   diagnose service discovery and owner identity")
+	fmt.Fprintln(w, "  vx6 connect --service NODE.SERVICE --listen 127.0.0.1:LOCAL_PORT")
+	fmt.Fprintln(w, "  vx6 peer check --name NODE [--ike]      check reachability; --ike verifies ESP setup")
+	fmt.Fprintln(w, "  vx6 list [--user NODE_NAME]")
+	fmt.Fprintln(w, "  vx6 status | vx6 reload")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Working features:")
-	fmt.Fprintln(w, "  - Signed endpoint and service discovery via peer-to-peer registry sync")
-	fmt.Fprintln(w, "  - DHT-backed endpoint/service key lookup")
-	fmt.Fprintln(w, "  - Encrypted file transfer with local receive permissions")
-	fmt.Fprintln(w, "  - Direct TCP and UDP service sharing")
-	fmt.Fprintln(w, "  - 5-hop proxy forwarding for direct services and files")
-	fmt.Fprintln(w, "  - Plain-TCP hidden services via 3 active intros, 2 standby intros, guards, and rendezvous relay")
-	fmt.Fprintln(w, "  - Direct IPv6 service sharing without peer sync using --addr")
+	fmt.Fprintln(w, "Other commands: peer, identity, service, send, receive, update, debug.")
+	fmt.Fprintln(w, "See docs/commands.md for details and docs/services.md for TCP/UDP limitations.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Experimental / not complete:")
-	fmt.Fprintln(w, "  - eBPF loader and attach path (embedded bytecode is present and tested)")
-	fmt.Fprintln(w, "  - QUIC is not active; VX6 control/TCP services use TCP and UDP services use UDP")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Examples:")
-	fmt.Fprintln(w, "  vx6 init --name alice --listen '[::]:4242' --peer '[::1]:4242'")
-	fmt.Fprintln(w, "  vx6 reload")
-	fmt.Fprintln(w, "  vx6 identity rename --name ally")
-	fmt.Fprintln(w, "  vx6 init --name ghost --advertise '[2001:db8::10]:4242' --hidden-node")
-	fmt.Fprintln(w, "  vx6 service add --name ssh --target 127.0.0.1:22")
-	fmt.Fprintln(w, "  vx6 service add --name admin --target 127.0.0.1:22 --hidden --alias hs-admin --intro-mode random")
-	fmt.Fprintln(w, "  vx6 service remove --name ssh")
-	fmt.Fprintln(w, "  vx6 connect --service alice.ssh --listen 127.0.0.1:2222")
-	fmt.Fprintln(w, "  vx6 connect --service ssh --addr '[2001:db8::10]:4242' --listen 127.0.0.1:2222")
-	fmt.Fprintln(w, "  vx6 connect --service alice.ssh --listen 127.0.0.1:2222 --proxy")
-	fmt.Fprintln(w, "  vx6 debug dht-get --service alice.ssh")
-	fmt.Fprintln(w, "  vx6 debug dht-get --service hs-admin")
+	fmt.Fprintln(w, "Transport: TCP control/service streams and explicitly configured UDP services.")
+	fmt.Fprintln(w, "QUIC and a general-purpose IP tunnel are not active. Public services still require IKE/IPsec peer authentication.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Storage:")
 	for _, line := range defaultStorageLines() {
@@ -719,7 +676,7 @@ func runConnect(ctx context.Context, args []string) error {
 		var err error
 		serviceRec, err = resolveServiceDistributed(ctx, cfg, finalSvc)
 		if err != nil {
-			return fmt.Errorf("service %q not found. try running 'vx6 list --user NAME' or 'vx6 list --hidden' to verify", finalSvc)
+			return fmt.Errorf("service %q could not be resolved: %w; run 'vx6 service check --name %s' and verify the owner with 'vx6 peer check --name NAME --ike'", finalSvc, err, finalSvc)
 		}
 	}
 	if !serviceRec.IsHidden && *addrFlag == "" {
@@ -810,6 +767,9 @@ func extractLeadingConnectService(args []string) (string, []string) {
 }
 
 func runService(args []string) error {
+	if len(args) >= 1 && args[0] == "check" {
+		return runServiceCheck(args[1:])
+	}
 	if len(args) >= 1 && args[0] == "add" {
 		fs := flag.NewFlagSet("service add", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -897,6 +857,8 @@ func runService(args []string) error {
 		if err := store.SetService(*name, entry); err != nil {
 			return err
 		}
+		fmt.Printf("service_saved\t%s\tprotocol=%s\n", *name, serviceProtocol)
+		printReloadHint(store.Path(), "service_update")
 		if entry.IsHidden {
 			fmt.Printf("hidden_alias\t%s\nhidden_invite\t%s\nhidden_profile\t%s\nintro_mode\t%s\n", entry.Alias, dht.ComposeHiddenLookupInvite(entry.Alias, entry.HiddenLookupSecret), entry.HiddenProfile, entry.IntroMode)
 		} else if entry.IsPrivate {
@@ -1011,6 +973,134 @@ func runService(args []string) error {
 	return nil
 }
 
+func runServiceCheck(args []string) error {
+	fs := flag.NewFlagSet("service check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	serviceName := fs.String("name", "", "local service name or remote NODE.SERVICE")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *serviceName == "" || fs.NArg() != 0 {
+		return errors.New("service check requires --name SERVICE or --name NODE.SERVICE")
+	}
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	requested := record.CanonicalServiceLookupKey(*serviceName)
+	if !strings.Contains(requested, ".") {
+		entry, ok := cfg.Services[requested]
+		if !ok {
+			return fmt.Errorf("local service %q is not configured; run 'vx6 list' and 'vx6 service add'", requested)
+		}
+		protocol := record.NormalizeServiceProtocol(entry.Protocol)
+		fmt.Printf("local_config\tpresent\tservice=%s\tprotocol=%s\ttarget=%s\n", requested, protocol, entry.Target)
+		if protocol == record.ServiceProtocolTCP {
+			conn, dialErr := net.DialTimeout("tcp", entry.Target, 2*time.Second)
+			if dialErr != nil {
+				fmt.Printf("local_backend\tunreachable\terror=%q\n", dialErr.Error())
+				return fmt.Errorf("local TCP service backend is not accepting connections at %s", entry.Target)
+			}
+			_ = conn.Close()
+			fmt.Println("local_backend\ttcp_accepting_connections")
+		} else {
+			fmt.Println("local_backend\tudp_target_configured\tactive_listener_cannot_be_proven_without_application_payload")
+		}
+		requested = record.FullServiceName(cfg.Node.Name, requested)
+	}
+	ownerName, localName, ok := strings.Cut(requested, ".")
+	if !ok || ownerName == "" || localName == "" || strings.Contains(localName, ".") {
+		return errors.New("service check expects NODE.SERVICE, such as SURYANSH.web")
+	}
+	requested = record.CanonicalServiceLookupKey(requested)
+	key := dht.ServiceKey(requested)
+	fmt.Printf("service_lookup\tname=%s\tkey=%s\n", requested, key)
+
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		return err
+	}
+	if cached, cacheErr := registry.ResolveServiceLocal(requested); cacheErr == nil {
+		fmt.Printf("local_registry\thit\towner=%s\taddress=%s\n", cached.NodeName, cached.Address)
+	} else {
+		fmt.Println("local_registry\tmiss")
+	}
+
+	client, err := newDHTClient(cfg)
+	if err != nil {
+		fmt.Printf("dht_client\tunavailable\terror=%q\n", err.Error())
+		return fmt.Errorf("create DHT lookup client: %w", err)
+	}
+	lookupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	result, lookupErr := client.RecursiveFindValueDetailed(lookupCtx, key)
+	cancel()
+	fmt.Printf("dht_result\toutcome=%s\tqueried=%d\tsources=%d\tverified=%t\trejected=%d\tconflicts=%d\n",
+		result.Outcome, result.QueriedNodes, result.SourceCount, result.Verified, result.RejectedValues, result.ConflictCount)
+	if errors.Is(lookupErr, dht.ErrConflictingValues) || len(result.ConflictValues) > 1 {
+		printDHTConflictCandidates(key, result.ConflictValues)
+		return fmt.Errorf("DHT returned conflicting service records for %s", requested)
+	}
+	if lookupErr != nil {
+		fmt.Printf("dht_error\t%q\n", lookupErr.Error())
+		return fmt.Errorf("service DHT lookup did not complete: %w", lookupErr)
+	}
+	var service record.ServiceRecord
+	if result.Value != "" {
+		if err := json.Unmarshal([]byte(result.Value), &service); err != nil {
+			return fmt.Errorf("DHT value is not a service record: %w", err)
+		}
+	} else {
+		privateService, privateErr := resolvePrivateServiceFromCatalog(context.Background(), client, requested)
+		if privateErr != nil {
+			return fmt.Errorf("DHT returned no public service record for %s and private catalog lookup failed: %w; verify the owner ran 'vx6 reload' after adding the service", requested, privateErr)
+		}
+		service = privateService
+		fmt.Println("private_catalog\tfound")
+	}
+	if err := record.VerifyServiceRecord(service, time.Now()); err != nil {
+		return fmt.Errorf("DHT service record signature or expiry check failed: %w", err)
+	}
+	if err := validateServiceRecordName(requested, service); err != nil {
+		return err
+	}
+	fmt.Printf("service_record\tvalid_signature\tprotocol=%s\tvisibility=%s\towner=%s\taddress=%s\texpires=%s\n",
+		record.NormalizeServiceProtocol(service.Protocol), serviceVisibility(service), service.NodeName, service.Address, service.ExpiresAt)
+
+	owner, ownerErr := resolveNodeDistributed(context.Background(), cfg, service.NodeName)
+	if ownerErr != nil {
+		fmt.Printf("owner_identity\tunresolved\terror=%q\n", ownerErr.Error())
+		return fmt.Errorf("service record is signed, but owner endpoint identity could not be resolved: %w", ownerErr)
+	}
+	if owner.NodeID != service.NodeID || owner.Address != service.Address || owner.PublicKey != service.PublicKey {
+		return errors.New("owner_identity\tmismatch: service record does not match the resolved signed endpoint")
+	}
+	fmt.Printf("owner_identity\tmatched_signed_endpoint\tnode_id=%s\n", owner.NodeID)
+	return nil
+}
+
+func serviceVisibility(service record.ServiceRecord) string {
+	switch {
+	case service.IsHidden:
+		return "hidden"
+	case service.IsPrivate:
+		return "private"
+	default:
+		return "public"
+	}
+}
+
+func validateServiceRecordName(requested string, service record.ServiceRecord) error {
+	actual := record.CanonicalServiceLookupKey(record.FullServiceName(service.NodeName, service.ServiceName))
+	if actual != record.CanonicalServiceLookupKey(requested) {
+		return fmt.Errorf("DHT returned a signed service record for %q, not requested service %q", actual, requested)
+	}
+	return nil
+}
+
 func requestConfiguredNodeReload(configPath string) error {
 	controlPath, err := config.RuntimeControlPath(configPath)
 	if err != nil {
@@ -1019,6 +1109,15 @@ func requestConfiguredNodeReload(configPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	return runtimectl.RequestReload(ctx, controlPath)
+}
+
+func printReloadHint(configPath, label string) {
+	if err := requestConfiguredNodeReload(configPath); err == nil {
+		fmt.Printf("%s\treload_sent\n", label)
+		return
+	} else {
+		fmt.Printf("%s\treload_not_sent\terror=%q\thint=%q\n", label, err.Error(), "if vx6 node is running, run vx6 reload; otherwise start it after configuration")
+	}
 }
 
 func runPeerFriend(action string, args []string) error {
@@ -1097,6 +1196,9 @@ func applyPeerFriend(cfg config.File, controlPath string, peer proto.NodeInfo, f
 }
 
 func runPeer(args []string) error {
+	if len(args) > 0 && args[0] == "check" {
+		return runPeerCheck(args[1:])
+	}
 	if len(args) > 0 && (args[0] == "friend" || args[0] == "unfriend") {
 		return runPeerFriend(args[0], args[1:])
 	}
@@ -1259,6 +1361,7 @@ func runPeer(args []string) error {
 				return err
 			}
 			fmt.Printf("known_peer\t%s\t%s\n", peer.NodeName, peer.Address)
+			printReloadHint(store.Path(), "peer_update")
 			return nil
 		}
 		if *addr == "" {
@@ -1331,6 +1434,107 @@ func runPeer(args []string) error {
 		fmt.Println("  (none)")
 	}
 	return nil
+}
+
+func runPeerCheck(args []string) error {
+	fs := flag.NewFlagSet("peer check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "known peer name")
+	nodeID := fs.String("node-id", "", "known peer NodeID")
+	checkIKE := fs.Bool("ike", false, "initiate/verify the authenticated IKEv2 ESP tunnel")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if (*name == "") == (*nodeID == "") || fs.NArg() != 0 {
+		return errors.New("peer check requires exactly one of --name or --node-id")
+	}
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		return err
+	}
+	if err := importConfiguredKnownPeers(cfg, registry); err != nil {
+		return err
+	}
+	peer, err := registry.ResolveLocal(*name, *nodeID)
+	if err != nil {
+		return fmt.Errorf("peer identity is not in the local verified directory: %w; add its signed endpoint record first", err)
+	}
+	if err := record.VerifyEndpointRecord(peer, time.Now()); err != nil {
+		return fmt.Errorf("stored peer record is not currently valid: %w", err)
+	}
+	if err := validatePinnedIdentity(cfg, peer); err != nil {
+		return err
+	}
+	fmt.Printf("peer\tname=%s\tnode_id=%s\taddress=%s\n", peer.NodeName, peer.NodeID, peer.Address)
+	fmt.Println("identity_record\tvalid_signed_record")
+
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	_, rtt, probeErr := liveness.Probe(probeCtx, peer.Address, false, 1500*time.Millisecond)
+	cancelProbe()
+	if probeErr != nil {
+		fmt.Printf("reachability\tno_vx6_pong\terror=%q\n", probeErr.Error())
+	} else {
+		fmt.Printf("reachability\tpong_received\trtt=%s\n", rtt.Round(time.Millisecond))
+		fmt.Println("reachability_note\tPONG proves only that a VX6 probe endpoint answered; it does not authenticate identity")
+	}
+
+	if !*checkIKE {
+		if probeErr != nil {
+			return fmt.Errorf("peer did not answer the liveness probe; check IPv6 routing and UDP port %s", probePortForEndpoint(peer.Address))
+		}
+		return nil
+	}
+	idStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		return err
+	}
+	id, err := idStore.Load()
+	if err != nil {
+		return err
+	}
+	ipsecClient, _, err := newIPsecDialGuard(cfg, id, registry, nil)
+	if err != nil {
+		return err
+	}
+	ikeCtx, cancelIKE := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancelIKE()
+	if err := ipsecClient.EnsurePeer(ikeCtx, peer); err != nil {
+		fmt.Printf("ike_esp\tfailed\terror=%q\n", err.Error())
+		return fmt.Errorf("IKE/ESP check failed: %w", err)
+	}
+	fmt.Println("ike_esp\tinstalled_authenticated_child_sa")
+	protectedCtx := vxtransport.WithDialGuard(ikeCtx, func(ctx context.Context, target string) error {
+		if target != peer.Address {
+			return fmt.Errorf("protected health check attempted unverified endpoint %s", target)
+		}
+		return ipsecClient.EnsurePeer(ctx, peer)
+	})
+	if err := liveness.TunnelPing(protectedCtx, cfg.Node.TransportMode, peer.Address, 5*time.Second); err != nil {
+		fmt.Printf("protected_path\tfailed\terror=%q\n", err.Error())
+		return fmt.Errorf("authenticated IPsec tunnel data-path check failed: %w", err)
+	}
+	fmt.Println("protected_path\ttcp_nonce_ping_passed")
+	return nil
+}
+
+func probePortForEndpoint(endpoint string) string {
+	address, err := liveness.ProbeAddress(endpoint)
+	if err != nil {
+		return "P+1"
+	}
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "P+1"
+	}
+	return "UDP/" + port
 }
 
 func runSend(ctx context.Context, args []string) error {
@@ -1646,6 +1850,102 @@ func runStatus(ctx context.Context, args []string) error {
 		RelayMode:       cfg.Node.RelayMode,
 		RelayPercent:    cfg.Node.RelayResourcePercent,
 	})
+	return nil
+}
+
+func runDoctor(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("doctor does not accept positional arguments")
+	}
+
+	failures := make([]string, 0, 3)
+	check := func(name string, err error) {
+		if err != nil {
+			fmt.Printf("FAIL\t%s\t%v\n", name, err)
+			failures = append(failures, name)
+			return
+		}
+		fmt.Printf("OK\t%s\n", name)
+	}
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		check("config", fmt.Errorf("%w; run 'vx6 init --name NAME' first", err))
+		return fmt.Errorf("VX6 setup is incomplete")
+	}
+	check("config", nil)
+
+	idStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		check("identity", err)
+		return fmt.Errorf("VX6 setup is incomplete")
+	}
+	id, err := idStore.Load()
+	if err != nil {
+		err = fmt.Errorf("%w; initialize with 'vx6 init --name NAME' or restore the identity backup", err)
+	}
+	check("identity", err)
+	if err != nil {
+		return fmt.Errorf("VX6 setup is incomplete")
+	}
+
+	interfaces, err := net.InterfaceAddrs()
+	if err != nil {
+		check("ipv6", err)
+	} else if _, err := netutil.PickGlobalIPv6(interfaces); err != nil {
+		check("ipv6", fmt.Errorf("no usable global IPv6 address found: %w", err))
+	} else {
+		check("ipv6", nil)
+	}
+
+	localAddress := cfg.Node.AdvertiseAddr
+	if localAddress == "" {
+		_, port, splitErr := net.SplitHostPort(cfg.Node.ListenAddr)
+		if splitErr != nil {
+			check("advertise_address", fmt.Errorf("invalid listen address: %w", splitErr))
+		} else {
+			localAddress, err = netutil.DetectAdvertiseAddress(port)
+			check("advertise_address", err)
+		}
+	} else {
+		check("advertise_address", transfer.ValidateIPv6Address(localAddress))
+	}
+	if localAddress != "" {
+		client, clientErr := ipsec.NewClient(ipsec.DefaultSocket(), localAddress, id)
+		if clientErr == nil {
+			checkCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			clientErr = client.Check(checkCtx)
+			cancel()
+		}
+		check("ipsec_helper", clientErr)
+		if clientErr != nil {
+			fmt.Println("HINT\tipsec_helper\tStart strongSwan and vx6-ipsecd; ensure this login UID is allowed in /etc/vx6/ipsecd.json and can access its socket group.")
+		}
+	}
+
+	controlPath, controlErr := config.RuntimeControlPath(store.Path())
+	if controlErr == nil {
+		statusCtx, cancel := context.WithTimeout(ctx, time.Second)
+		_, controlErr = runtimectl.RequestStatus(statusCtx, controlPath)
+		cancel()
+	}
+	if controlErr != nil {
+		fmt.Printf("WARN\tnode_process\tnot running; start it with 'vx6 node'\n")
+	} else {
+		fmt.Println("OK\tnode_process")
+	}
+	fmt.Println("INFO\tremote_peer_test\tnot performed; this command checks local prerequisites only")
+	if len(failures) != 0 {
+		return fmt.Errorf("doctor found %d failed local check(s)", len(failures))
+	}
 	return nil
 }
 

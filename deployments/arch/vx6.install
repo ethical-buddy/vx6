@@ -1,0 +1,12 @@
+post_install() {
+  cat <<'MSG'
+VX6 is installed. Configure the privileged IPsec helper for the normal login
+user with: sudo vx6-setup "$USER"
+This writes that user's actual UID and primary GID to /etc/vx6/ipsecd.json,
+starts strongSwan, and enables vx6-ipsecd. Do not run the VX6 node as root.
+MSG
+}
+
+post_upgrade() {
+  post_install
+}

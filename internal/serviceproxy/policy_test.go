@@ -100,6 +100,66 @@ func TestPublicServiceNeedsNoDHTIdentityRecord(t *testing.T) {
 	}
 }
 
+func TestMultipleTCPServicesShareThePeerListenerWithoutMixingTargets(t *testing.T) {
+	backends := make(map[string]net.Listener, 2)
+	for name, response := range map[string]string{"web": "web-response", "ssh": "ssh-response"} {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		backends[name] = listener
+		go func(listener net.Listener, response string) {
+			conn, err := listener.Accept()
+			if err == nil {
+				_, _ = io.WriteString(conn, response)
+				_ = conn.Close()
+			}
+		}(listener, response)
+	}
+	defer func() {
+		for _, listener := range backends {
+			_ = listener.Close()
+		}
+	}()
+
+	policies := map[string]ServicePolicy{
+		"web": {Target: backends["web"].Addr().String()},
+		"ssh": {Target: backends["ssh"].Addr().String()},
+	}
+	for service, want := range map[string]string{"web": "web-response", "ssh": "ssh-response"} {
+		service, want := service, want
+		t.Run(service, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			serverDone := make(chan error, 1)
+			go func() {
+				defer serverConn.Close()
+				serverDone <- HandleInboundWithPolicy(serverConn, policies, record.EndpointRecord{})
+			}()
+			payload, _ := json.Marshal(ConnectRequest{Version: 1, Action: "open", ServiceName: service})
+			if err := proto.WriteLengthPrefixed(clientConn, payload); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, len(want))
+			if _, err := io.ReadFull(clientConn, got); err != nil {
+				t.Fatalf("read %s response: %v", service, err)
+			}
+			if string(got) != want {
+				t.Fatalf("%s reached wrong target: got %q, want %q", service, got, want)
+			}
+			_ = clientConn.Close()
+			select {
+			case err := <-serverDone:
+				if err != nil {
+					t.Fatalf("handle %s: %v", service, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s handler did not finish", service)
+			}
+		})
+	}
+}
+
 func TestPrivateServiceRejectsMissingAuthenticatedIKERecord(t *testing.T) {
 	clientID, _ := identity.Generate()
 	clientConn, serverConn := net.Pipe()
