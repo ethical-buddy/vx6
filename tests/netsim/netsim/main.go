@@ -250,6 +250,9 @@ func cmdRun(args []string) (retErr error) {
 	settleGap := fs.Duration("settle-gap", 30*time.Second, "delay between settle snapshots")
 	probes := fs.Int("probes", 50, "random lookup probes per snapshot round")
 	restartCount := fs.Int("restart-count", 1, "nodes to restart after joining to check bbolt recovery (0 disables)")
+	lookupMode := fs.String("lookups", LookupModeAuto, "lookup mode: auto (exhaustive up to 10 nodes, else sample), exhaustive, or sample (-probes random pairs)")
+	idle := fs.Duration("idle", 0, "after the settle rounds, observe idle nodes (no lookups) for this long, e.g. 15m")
+	idleInterval := fs.Duration("idle-interval", time.Minute, "interval between idle captures")
 	p := paramFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -290,6 +293,9 @@ func cmdRun(args []string) (retErr error) {
 	if err := validateRunOptions(*settleRounds, *settleGap, *probes, *restartCount, len(t.Nodes)); err != nil {
 		return err
 	}
+	if err := validateMeasurementOptions(*lookupMode, *idle, *idleInterval); err != nil {
+		return err
+	}
 	securedOutDir, err := secureRunDirectory(*outDir, !*dry, true)
 	if err != nil {
 		return fmt.Errorf("secure output directory: %w", err)
@@ -315,6 +321,7 @@ func cmdRun(args []string) (retErr error) {
 	r := &runner{dry: *dry, log: logf}
 
 	sim := NewSimRun(t, r, *outDir, *simnodeBin)
+	sim.SetMeasurement(*lookupMode, *idle, *idleInterval)
 	started := time.Now().UTC()
 	hostMetricsStart := captureHostMetrics()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -328,6 +335,7 @@ func cmdRun(args []string) (retErr error) {
 		HostOS: runtime.GOOS, HostArch: runtime.GOARCH, GoVersion: runtime.Version(),
 		HostKernel: hostKernel, HostCPUModel: hostCPUModel, LogicalCPUs: runtime.NumCPU(),
 		SettleRounds: *settleRounds, SettleGap: *settleGap, ProbesPerRound: *probes,
+		LookupMode: sim.effectiveLookupMode(), IdleDuration: *idle,
 		RestartCount: *restartCount, DryRun: *dry}
 	defer func() {
 		report.FinishedAt = time.Now().UTC()
@@ -346,6 +354,7 @@ func cmdRun(args []string) (retErr error) {
 			report.CleanupStatus = "complete"
 		}
 		report.BGPConvergedMS = float64(sim.BGPConverged.Microseconds()) / 1000
+		report.Capacity = sim.capacity
 		finalizeReport(report)
 		if report.Verdict == "FAIL" && retErr == nil {
 			retErr = fmt.Errorf("simulation verdict FAIL: %s (see %s)", strings.Join(report.VerdictReasons, "; "),
@@ -369,6 +378,7 @@ func cmdRun(args []string) (retErr error) {
 	if partial != nil {
 		report.Rounds = partial.Rounds
 		report.Restarts = partial.Restarts
+		report.Idle = partial.Idle
 		report.RunID = runID
 		report.StartedAt = started
 		report.BuildRevision = buildRevision
@@ -434,6 +444,21 @@ func cmdTeardown(args []string) error {
 		return fmt.Errorf("remove FRR state: %w", err)
 	}
 	fmt.Printf("teardown complete for netsim run %s\n", t.RunID)
+	return nil
+}
+
+func validateMeasurementOptions(lookupMode string, idle, idleInterval time.Duration) error {
+	switch lookupMode {
+	case LookupModeAuto, LookupModeExhaustive, LookupModeSample:
+	default:
+		return fmt.Errorf("-lookups must be %s, %s or %s", LookupModeAuto, LookupModeExhaustive, LookupModeSample)
+	}
+	if idle < 0 || idle > 24*time.Hour {
+		return errors.New("-idle must be 0..24h")
+	}
+	if idle > 0 && (idleInterval < 5*time.Second || idleInterval > idle) {
+		return errors.New("-idle-interval must be at least 5s and no longer than -idle")
+	}
 	return nil
 }
 

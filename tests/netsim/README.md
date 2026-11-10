@@ -100,7 +100,7 @@ sudo env PATH=/usr/lib/frr:$PATH /tmp/vx6-netsim run \
   -tier1 2 -isps 2 -orgs 3 -attackers 1 \
   -nodes 10 -schedule 1,1,2,6 -seed 69 \
   -simnode /tmp/vx6-simnode -settle-rounds 4 -settle-gap 60s \
-  -probes 10 -restart-count 1 -out /var/tmp/vx6-netsim-10
+  -restart-count 1 -idle 15m -out /var/tmp/vx6-netsim-10
 ```
 
 Keep `-settle-gap` at 60 seconds or more. Joined nodes promote bootstrap
@@ -110,11 +110,58 @@ graceful-restart sample runs right after the last join wave, so on short runs
 it usually restarts a node that has no peers yet and proves only identity
 stability.
 
-`run` writes a verdict into the report. It exits non-zero with verdict
-**FAIL** when lookups ran but none found its known-existing target, or when no
-node had an active DHT peer in the final round; both lookup coverage rows are
-then marked FAILED. **PASS** only means the DHT formed and some lookups
-succeeded; read the found rate and per-round tables for anything more.
+### Lookups, per-node diagnostics and idle observation
+
+- `-lookups auto` (default) runs **exhaustive** lookups for meshes of up to 10
+  nodes: every round, every joined node resolves every other joined node once
+  by NodeID and once by canonical name, so the denominator is all ordered pairs.
+  Larger meshes use `-probes` random pairs (`-lookups sample`). Force either
+  mode with `-lookups exhaustive|sample`.
+- Every lookup records a per-round trace. The trace includes:
+  - the seeds;
+  - each queried responder and its result (ok, error or timeout);
+  - the returned contacts with their shared-prefix distance to the target;
+  - new versus duplicate candidates, and rejected referrals;
+  - whether the round made XOR progress;
+  - why the lookup stopped: found, converged with no unqueried contacts,
+    query/round limit, time budget, or failed peer queries.
+
+  Traces are saved in `lookups/<round>.json`.
+- Every round, every node's full read-only DHT state is saved to
+  `diagnostics/<round>/<node>.json`:
+  - Both XOR indexes of the one active peer set (NodeID and canonical-name
+    hash), with every non-empty bucket and its entries: name, NodeID, name
+    hash, endpoint, topology ASN and /48, success/failure counts, RTT,
+    first/last seen, last success/use/probe, offline and miss state,
+    probation, friend/used, and closest-ID/name rank.
+  - Offline and pending entries.
+  - The node's bbolt state: peer rows; category members for friends, used,
+    closest-id, closest-name, active, probation and inactive; and value
+    health/expiry without payloads. bbolt is read through the node's
+    already-open store; the simulator never opens the file a second time.
+
+  Each document marks in-memory (`"source": "memory"`) and persisted
+  (`"source": "bbolt"`) data. Nodes are also captured right before and right
+  after each restart (`diagnostics/restart-before-*`, `restart-after-*`).
+- `-idle 15m` keeps the nodes running after the settle rounds with no lookups,
+  and captures every node at idle start and then every `-idle-interval`
+  (default 1m). This shows real-time drift only: windows such as 2h probation
+  or 30-day address hints are not reached without an injected clock.
+- The report names the tested build revision and the DHT capacity policy the
+  running nodes report: K, pending-candidate cap, active/offline caps (or
+  "uncapped"), and warm-start floor. Build the simulator from the exact VX6
+  revision you are evaluating.
+
+### Verdict
+
+`run` exits non-zero on FAIL.
+
+- **Exhaustive mode:** PASS only if every known-target lookup in the final
+  settle round found its target. Otherwise FAIL, with not-found-among-reachable,
+  incomplete (transport or time budget) and request errors counted separately.
+- **Sample mode:** MEASURED, never PASS, because a sampled hit rate is a
+  measurement, not a readiness claim. It is FAIL only if no lookup found its
+  target or no node had a peer in the final round.
 
 The runner attempts cleanup on normal exit, error, SIGINT, and SIGTERM. If it is
 forcibly killed (for example, SIGKILL or host shutdown), inspect the report and
@@ -135,7 +182,7 @@ if both still match, so a reused PID is left alone.
 ## Evidence to return
 
 Each output directory contains `report.md`, `report.json`, `topology.json`,
-`commands.log`, per-round JSON, `snapshots/`, node state/logs, FRR logs, and
+`commands.log`, per-round JSON, `snapshots/`, `diagnostics/`, `lookups/`, node state/logs, FRR logs, and
 process manifests. Return the whole directory (or an archive) for each 3/5/10
 run, plus the exact command and host RAM/OS details. The report records binary
 hashes and the DHT lookup policy actually exposed by running nodes.

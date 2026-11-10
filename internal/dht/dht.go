@@ -570,6 +570,15 @@ func (s *Server) RecursiveBootstrapFindNodeDetailed(ctx context.Context, target 
 }
 
 func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, bootstrap bool) (NodeLookupResult, error) {
+	trace := lookupTraceFrom(ctx)
+	res, err := s.findNodeRounds(ctx, target, bootstrap, trace)
+	trace.finish(res, err)
+	return res, err
+}
+
+// findNodeRounds is the iterative node lookup. trace is nil unless a caller
+// attached one with WithLookupTrace; recording never changes the lookup.
+func (s *Server) findNodeRounds(ctx context.Context, target string, bootstrap bool, trace *LookupTrace) (NodeLookupResult, error) {
 	limits := s.LookupLimits()
 	ctx, cancel := boundedLookupContext(ctx, limits.TotalTimeout)
 	defer cancel()
@@ -599,6 +608,7 @@ func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, b
 			}
 		}
 	}
+	trace.start(target, known)
 	if !strings.HasPrefix(target, "node/name/") && len(matches) > 0 {
 		return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupFound}, nil
 	}
@@ -633,6 +643,10 @@ func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, b
 			}
 			return NodeLookupResult{Closest: sortedKnown(known, target, K), Outcome: LookupNotFound, QueriedNodes: queries, Rounds: rounds}, nil
 		}
+		var traced TraceRound
+		if trace != nil {
+			traced = TraceRound{Round: rounds, BestBefore: bestSharedPrefix(known, target)}
+		}
 		results := make(chan nodeQueryResult, len(batch))
 		for _, node := range batch {
 			queriedIDs[node.ID] = true
@@ -658,17 +672,45 @@ func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, b
 		for range batch {
 			select {
 			case <-ctx.Done():
+				if trace != nil {
+					traced.BestAfter = bestSharedPrefix(known, target)
+					traced.Progress = traced.BestAfter > traced.BestBefore
+					trace.addRound(traced)
+				}
 				return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupIncomplete, QueriedNodes: queries, Rounds: rounds}, fmt.Errorf("%w after %d queries: %w", ErrLookupIncomplete, queries, ctx.Err())
 			case result := <-results:
+				var query *TraceQuery
+				if trace != nil {
+					traced.Queries = append(traced.Queries, TraceQuery{Responder: traceContact(result.node, target),
+						Result: classifyQueryError(result.err)})
+					query = &traced.Queries[len(traced.Queries)-1]
+					if result.err != nil {
+						query.Error = result.err.Error()
+					}
+				}
 				if result.err != nil {
 					failures++
 					continue
 				}
 				for _, ref := range result.refs {
 					if VerifyNodeInfo(ref, time.Now()) != nil || ref.ID == "" || ref.Addr == "" {
+						if trace != nil {
+							traced.Rejected++
+						}
 						continue
 					}
-					if _, exists := known[ref.ID]; !exists {
+					_, exists := known[ref.ID]
+					if trace != nil {
+						contact := traceContact(ref, target)
+						contact.Duplicate = exists
+						query.Returned = append(query.Returned, contact)
+						if exists {
+							traced.Duplicates++
+						} else {
+							traced.NewCandidates++
+						}
+					}
+					if !exists {
 						known[ref.ID] = ref
 					}
 					if matchesNodeLookupTarget(ref, target) {
@@ -676,6 +718,11 @@ func (s *Server) recursiveFindNodeDetailed(ctx context.Context, target string, b
 					}
 				}
 			}
+		}
+		if trace != nil {
+			traced.BestAfter = bestSharedPrefix(known, target)
+			traced.Progress = traced.BestAfter > traced.BestBefore
+			trace.addRound(traced)
 		}
 		if !strings.HasPrefix(target, "node/name/") && len(matches) > 0 {
 			return NodeLookupResult{Matches: sortedKnown(matches, target, len(matches)), Closest: sortedKnown(known, target, K), Outcome: LookupFound, QueriedNodes: queries, Rounds: rounds}, nil

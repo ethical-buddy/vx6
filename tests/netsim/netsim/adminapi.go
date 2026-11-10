@@ -3,7 +3,10 @@
 
 package main
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // These mirror the JSON the simnode admin socket returns. They are duplicated
 // here (rather than imported) so the orchestrator stays decoupled from the
@@ -56,4 +59,58 @@ type LookupReport struct {
 	Queried        int     `json:"queried"`
 	LatencyMS      float64 `json:"latency_ms"`
 	Error          string  `json:"error,omitempty"`
+	// Trace is the per-round lookup path (exhaustive mode). It is written to
+	// lookups/<round>.json and stripped from report.json to keep that small.
+	Trace json.RawMessage `json:"trace,omitempty"`
+}
+
+// NodeDiagnostics is the subset of a simnode /diagnostics document the
+// runner summarizes; the full document is saved verbatim (plus ASN/prefix).
+type NodeDiagnostics struct {
+	Name    string  `json:"name"`
+	NodeID  string  `json:"node_id"`
+	Uptime  float64 `json:"uptime_sec"`
+	RSSKB   int     `json:"rss_kb"`
+	Records int     `json:"registry_records"`
+	DHT     struct {
+		Table struct {
+			Active    int                 `json:"active"`
+			Offline   int                 `json:"offline"`
+			Pending   int                 `json:"pending"`
+			IDIndex   DiagnosticIndexHead `json:"node_id_index"`
+			NameIndex DiagnosticIndexHead `json:"name_hash_index"`
+			Capacity  CapacityPolicy      `json:"capacity_policy"`
+			Offlines  []struct {
+				InProbation bool `json:"in_probation"`
+			} `json:"offline_peers"`
+		} `json:"table"`
+		Store *struct {
+			PeerRows   int                 `json:"peer_rows"`
+			Categories map[string][]string `json:"categories"`
+			Values     []struct {
+				Valid bool `json:"valid"`
+			} `json:"values"`
+		} `json:"store"`
+		StoreError   string `json:"store_error"`
+		CachedValues int    `json:"cached_values"`
+	} `json:"dht"`
+}
+
+type DiagnosticIndexHead struct {
+	Entries         int `json:"entries"`
+	NonEmptyBuckets int `json:"non_empty_buckets"`
+	Buckets         []struct {
+		Peers []struct {
+			InProbation bool `json:"in_probation"`
+		} `json:"peers"`
+	} `json:"buckets"`
+}
+
+// CapacityPolicy mirrors dht.CapacityPolicy.
+type CapacityPolicy struct {
+	K                    int `json:"k"`
+	MaxPendingCandidates int `json:"max_pending_candidates"`
+	MaxActivePeers       int `json:"max_active_peers"`
+	MaxOfflinePeers      int `json:"max_offline_peers"`
+	WarmStartFloor       int `json:"warm_start_candidates"`
 }

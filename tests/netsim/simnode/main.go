@@ -321,6 +321,29 @@ type LookupReport struct {
 	Queried        int     `json:"queried"`
 	LatencyMS      float64 `json:"latency_ms"`
 	Error          string  `json:"error,omitempty"`
+	// Trace is the per-round lookup path, included when requested.
+	Trace *dht.LookupTrace `json:"trace,omitempty"`
+}
+
+// Diagnostics is the full read-only per-node DHT state: both XOR indexes of
+// the in-memory table plus the node's already-open bbolt store.
+type Diagnostics struct {
+	Time     time.Time             `json:"time"`
+	Name     string                `json:"name"`
+	NodeID   string                `json:"node_id"`
+	NameHash string                `json:"name_hash"`
+	Addr     string                `json:"addr"`
+	Uptime   float64               `json:"uptime_sec"`
+	RSSKB    int                   `json:"rss_kb"`
+	Records  int                   `json:"registry_records"`
+	DHT      dht.ServerDiagnostics `json:"dht"`
+}
+
+func (a *adminState) diagnostics() Diagnostics {
+	recs, _ := a.registry.Snapshot()
+	now := time.Now().UTC()
+	return Diagnostics{Time: now, Name: a.name, NodeID: a.id, NameHash: dht.NodeNameHash(a.name), Addr: a.addr,
+		Uptime: time.Since(a.started).Seconds(), RSSKB: rssKB(), Records: len(recs), DHT: a.srv.Diagnostics(now)}
 }
 
 func (a *adminState) snapshot() Snapshot {
@@ -339,10 +362,15 @@ func (a *adminState) snapshot() Snapshot {
 			PeerTimeoutMS: limits.PeerTimeout.Milliseconds(), TotalTimeoutMS: limits.TotalTimeout.Milliseconds()}}
 }
 
-func (a *adminState) lookup(ctx context.Context, targetType, target string) LookupReport {
+func (a *adminState) lookup(ctx context.Context, targetType, target string, withTrace bool) LookupReport {
 	lookupTarget, expectedID, reportTarget, err := nodeLookupTarget(targetType, target)
 	if err != nil {
 		return LookupReport{TargetType: targetType, Outcome: "invalid_target", Error: err.Error()}
+	}
+	var trace *dht.LookupTrace
+	if withTrace {
+		trace = &dht.LookupTrace{}
+		ctx = dht.WithLookupTrace(ctx, trace)
 	}
 	t0 := time.Now()
 	res, err := a.srv.RecursiveFindNodeDetailed(ctx, lookupTarget)
@@ -357,6 +385,7 @@ func (a *adminState) lookup(ctx context.Context, targetType, target string) Look
 	if err != nil {
 		rep.Error = err.Error()
 	}
+	rep.Trace = trace
 	return rep
 }
 
@@ -398,6 +427,7 @@ func startAdmin(sock string, st *adminState) (net.Listener, error) {
 		writeHTTP(w, s)
 	})
 	mux.HandleFunc("/snapshot", func(w http.ResponseWriter, _ *http.Request) { writeHTTP(w, st.snapshot()) })
+	mux.HandleFunc("/diagnostics", func(w http.ResponseWriter, _ *http.Request) { writeHTTP(w, st.diagnostics()) })
 	mux.HandleFunc("/lookup", func(w http.ResponseWriter, r *http.Request) {
 		target := r.URL.Query().Get("target")
 		targetType := r.URL.Query().Get("type")
@@ -411,7 +441,7 @@ func startAdmin(sock string, st *adminState) (net.Listener, error) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
-		writeHTTP(w, st.lookup(ctx, targetType, target))
+		writeHTTP(w, st.lookup(ctx, targetType, target, r.URL.Query().Get("trace") == "1"))
 	})
 	go func() { _ = http.Serve(ln, mux) }()
 	return ln, nil

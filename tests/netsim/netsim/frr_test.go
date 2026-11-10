@@ -81,10 +81,22 @@ func TestIsProgramMatchesArgv0Only(t *testing.T) {
 }
 
 func TestRunVerdict(t *testing.T) {
-	ok := &Report{Rounds: []RoundReport{{Label: "settle-0", NodesJoined: 3, SnapshotsOK: 3, MaxActivePeers: 2}},
+	// A sampled run with hits is measured, never a blanket PASS.
+	sampled := &Report{LookupMode: LookupModeSample, Rounds: []RoundReport{{Label: "settle-0", NodesJoined: 3, SnapshotsOK: 3, MaxActivePeers: 2}},
 		Totals: LookupStats{Attempts: 10, N: 10, Found: 9}}
-	if v, reasons := runVerdict(ok); v != "PASS" || len(reasons) != 0 {
-		t.Fatalf("healthy run: %s %v", v, reasons)
+	if v, _ := runVerdict(sampled); v != "MEASURED" {
+		t.Fatalf("sampled run: %s", v)
+	}
+	// Exhaustive mode passes only with 100% in the final round.
+	full := &Report{LookupMode: LookupModeExhaustive, Rounds: []RoundReport{
+		{Label: "settle-0", NodesJoined: 3, SnapshotsOK: 3, MaxActivePeers: 2, Lookups: LookupStats{Attempts: 12, N: 12, Found: 10}},
+		{Label: "settle-1", NodesJoined: 3, SnapshotsOK: 3, MaxActivePeers: 2, Lookups: LookupStats{Attempts: 12, N: 12, Found: 12}}}}
+	if v, reasons := runVerdict(full); v != "PASS" || len(reasons) != 0 {
+		t.Fatalf("exhaustive 100%% final round: %s %v", v, reasons)
+	}
+	full.Rounds[1].Lookups = LookupStats{Attempts: 12, N: 12, Found: 11, Missed: 1, Other: 1}
+	if v, reasons := runVerdict(full); v != "FAIL" || len(reasons) != 1 {
+		t.Fatalf("exhaustive 11/12: %s %v", v, reasons)
 	}
 	dead := &Report{Rounds: []RoundReport{{Label: "settle-1", NodesJoined: 5, SnapshotsOK: 5, MaxActivePeers: 0}},
 		Totals: LookupStats{Attempts: 62, N: 62, Found: 0}}

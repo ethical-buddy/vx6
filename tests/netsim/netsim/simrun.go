@@ -39,6 +39,28 @@ type SimRun struct {
 	frrAcct  frrAccount
 	// BGPConverged is how long inter-AS routing took to converge.
 	BGPConverged time.Duration
+	// Measurement options (see SetMeasurement).
+	lookupMode   string
+	idle         time.Duration
+	idleInterval time.Duration
+	capacity     *CapacityPolicy
+}
+
+// SetMeasurement selects the lookup mode and the idle observation window.
+func (s *SimRun) SetMeasurement(lookupMode string, idle, idleInterval time.Duration) {
+	s.lookupMode, s.idle, s.idleInterval = lookupMode, idle, idleInterval
+}
+
+// effectiveLookupMode resolves "auto" against the topology size.
+func (s *SimRun) effectiveLookupMode() string {
+	switch s.lookupMode {
+	case LookupModeExhaustive, LookupModeSample:
+		return s.lookupMode
+	}
+	if len(s.t.Nodes) <= exhaustiveMaxNodes {
+		return LookupModeExhaustive
+	}
+	return LookupModeSample
 }
 
 // bgpConvergeTimeout bounds the wait for inter-AS routes before nodes join.
@@ -305,6 +327,13 @@ type Report struct {
 	SnapshotErrors int                `json:"snapshot_errors_total"`
 	CleanupStatus  string             `json:"cleanup_status,omitempty"`
 	BGPConvergedMS float64            `json:"bgp_converged_ms,omitempty"`
+	// LookupMode is exhaustive (every ordered pair, by ID and name) or sample.
+	LookupMode string `json:"lookup_mode"`
+	// Capacity is the routing-table capacity policy reported by the nodes.
+	Capacity *CapacityPolicy `json:"dht_capacity_policy,omitempty"`
+	// Idle holds the post-measurement idle captures (no lookups).
+	Idle         []IdleSample  `json:"idle,omitempty"`
+	IdleDuration time.Duration `json:"idle_duration_ns,omitempty"`
 	// Verdict is PASS, FAIL or PREVIEW (dry run). A FAIL makes `run` exit
 	// non-zero so a broken fabric cannot produce a green run.
 	Verdict        string          `json:"verdict"`
@@ -357,6 +386,9 @@ type RoundReport struct {
 	RoundDurationMS    float64             `json:"round_duration_ms"`
 	Lookups            LookupStats         `json:"lookups"`
 	Probes             []LookupReport      `json:"probes"`
+	// Nodes summarizes every node's diagnostics at this round; the full
+	// documents are in diagnostics/<label>/.
+	Nodes []NodeRoundSummary `json:"nodes,omitempty"`
 }
 
 type RouteDiversityStats struct {
@@ -479,6 +511,11 @@ func (s *SimRun) DriveWaves(ctx context.Context, settleRounds int, gap time.Dura
 			return rep, err
 		}
 	}
+	idle, err := s.runIdle(ctx, joined, s.idle, s.idleInterval)
+	rep.Idle = idle
+	if err != nil {
+		return rep, fmt.Errorf("idle observation: %w", err)
+	}
 	return rep, nil
 }
 
@@ -491,6 +528,10 @@ func (s *SimRun) restartNode(ctx context.Context, node Node) (RestartReport, err
 	}
 	evidence.NodeID = before.NodeID
 	evidence.ActivePeersBefore = before.Active
+	if _, err := s.captureDiagnostics(ctx, "restart-before-"+node.Name, []Node{node}); err != nil {
+		evidence.Error = err.Error()
+		return evidence, err
+	}
 	key := node.NS + "/" + filepath.Base(s.simnode)
 	process, ok := s.procs[key]
 	if !ok {
@@ -538,6 +579,10 @@ func (s *SimRun) restartNode(ctx context.Context, node Node) (RestartReport, err
 		return evidence, err
 	}
 	evidence.ActivePeersAfter = after.Active
+	if _, err := s.captureDiagnostics(ctx, "restart-after-"+node.Name, []Node{node}); err != nil {
+		evidence.Error = err.Error()
+		return evidence, err
+	}
 	evidence.IdentityStable = before.NodeID != "" && before.NodeID == after.NodeID && before.NameHash == after.NameHash
 	active := make(map[string]struct{}, len(after.Peers))
 	for _, peer := range after.Peers {
@@ -692,7 +737,29 @@ func (s *SimRun) snapshotRound(ctx context.Context, label string, joined []Node,
 		rr.Diversity.AvgUniqueASNsPerTable = float64(totalUniqueASNs) / float64(n)
 		rr.Diversity.MinUniqueASNsPerTable = minUniqueASNs
 	}
-	rr.Lookups, rr.Probes = s.runProbes(ctx, joined, probes, rng)
+	nodes, err := s.captureDiagnostics(ctx, label, joined)
+	if err != nil {
+		return rr, err
+	}
+	for _, node := range nodes {
+		if node.capacityCaptured && s.capacity == nil {
+			policy := node.capacity
+			s.capacity = &policy
+		}
+	}
+	var reports []LookupReport
+	if s.effectiveLookupMode() == LookupModeExhaustive {
+		reports = s.exhaustiveLookups(ctx, joined)
+		rr.Lookups = lookupStatsFromReports(reports)
+	} else {
+		rr.Lookups, reports = s.runProbes(ctx, joined, probes, rng)
+	}
+	attachSourceStats(nodes, reports)
+	rr.Nodes = sortedSummaries(nodes)
+	rr.Probes, err = s.writeLookupTraces(label, reports)
+	if err != nil {
+		return rr, err
+	}
 	rr.RoundDurationMS = float64(time.Since(started).Microseconds()) / 1000
 	return rr, nil
 }
@@ -863,29 +930,45 @@ func finalizeReport(report *Report) {
 	report.Verdict, report.VerdictReasons = runVerdict(report)
 }
 
-// runVerdict fails a live run whose measurements show the DHT never worked:
-// no lookup found a known-existing target, or joined nodes ended with no
-// active peers. It does not judge performance; thresholds stay with readers.
+// runVerdict judges a live run.
+//
+// Exhaustive mode (small stable meshes): PASS only if every known-target
+// lookup in the final measurement round found its target; anything else is
+// FAIL, with incomplete (transport/time budget) and not-found counted apart.
+// Sample mode: the result is MEASURED, never PASS, because a sampled hit rate
+// is not a readiness claim; it is FAIL only when the DHT clearly never worked.
 func runVerdict(report *Report) (string, []string) {
 	if report.DryRun {
 		return "PREVIEW", nil
 	}
 	var reasons []string
+	if len(report.Rounds) == 0 {
+		return "FAIL", []string{"no measurement rounds completed"}
+	}
+	last := report.Rounds[len(report.Rounds)-1]
+	if last.NodesJoined > 1 && last.SnapshotsOK > 0 && last.MaxActivePeers == 0 {
+		reasons = append(reasons, fmt.Sprintf("no node had an active DHT peer in the final round (%s)", last.Label))
+	}
+	if report.LookupMode == LookupModeExhaustive {
+		l := last.Lookups
+		if l.Attempts == 0 {
+			reasons = append(reasons, fmt.Sprintf("no exhaustive lookups ran in the final round (%s)", last.Label))
+		} else if l.Found != l.Attempts {
+			reasons = append(reasons, fmt.Sprintf("final round %s found %d of %d known targets (not found among reachable peers %d, incomplete/conflict %d, admin request errors %d); exhaustive small-mesh lookups require 100%%",
+				last.Label, l.Found, l.Attempts, l.NotFound, l.Other, l.Errors))
+		}
+		if len(reasons) > 0 {
+			return "FAIL", reasons
+		}
+		return "PASS", nil
+	}
 	if report.Totals.Attempts > 0 && report.Totals.Found == 0 {
 		reasons = append(reasons, fmt.Sprintf("no lookup found its known-existing target (0 of %d attempts)", report.Totals.Attempts))
-	}
-	if n := len(report.Rounds); n > 0 {
-		last := report.Rounds[n-1]
-		if last.NodesJoined > 1 && last.SnapshotsOK > 0 && last.MaxActivePeers == 0 {
-			reasons = append(reasons, fmt.Sprintf("no node had an active DHT peer in the final round (%s)", last.Label))
-		}
-	} else {
-		reasons = append(reasons, "no measurement rounds completed")
 	}
 	if len(reasons) > 0 {
 		return "FAIL", reasons
 	}
-	return "PASS", nil
+	return "MEASURED", []string{"sampled lookups: see found/incomplete/not-found denominators; a nonzero hit rate is not a readiness verdict"}
 }
 
 func min(a, b int) int {
