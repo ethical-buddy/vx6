@@ -1441,6 +1441,11 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.Endpoi
 		for _, result := range results {
 			synced[result.addr] = struct{}{}
 			if result.err != nil {
+				// Every failed target is backed off by NoteFailure below and then
+				// skipped without further logs, so record why it failed.
+				if !result.logged {
+					fmt.Fprintf(log, "[SYNC] Target %s failed: %v\n", result.addr, result.err)
+				}
 				if cfg.DHT != nil && cfg.DHT.RT != nil && result.nodeID != "" {
 					cfg.DHT.RT.NoteFailure(result.nodeID)
 				}
@@ -1482,6 +1487,8 @@ type syncResult struct {
 	peer     *record.EndpointRecord
 	nodeID   string
 	err      error
+	// logged is set when syncTarget already logged err.
+	logged bool
 }
 
 func syncTargetBatch(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, targets []string) []syncResult {
@@ -1533,7 +1540,21 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.Endp
 		}
 	}
 	peer, known := endpointRecordByAddress(cfg, addr)
-	wantIdentity := !known
+	// Offer our signed identity whenever we have one. A responder learns an
+	// initiator only from this exchange (it prepares the caller for tunnel
+	// authentication), and its authenticated tunnel check rejects callers it
+	// has not prepared. Holding the responder's signed record (for example a
+	// bootstrap seed imported from a file) says nothing about whether the
+	// responder knows us, so it must not suppress the exchange: otherwise
+	// that first contact fails at the tunnel ping, probe backoff skips the
+	// target, and a node whose only contacts are such seeds stays isolated.
+	// Once the peer has answered us recently it has prepared us, so later
+	// rounds keep the compact probe; after the cache expires (or the peer
+	// restarts) we introduce ourselves again. Hidden-endpoint nodes keep the
+	// plain probe for known peers so they do not hand their signed endpoint
+	// record to every peer they sync with.
+	recentlyLinked := cfg.livenessCache != nil && cfg.livenessCache.IsAlive(addr, time.Now())
+	wantIdentity := !known || (rec != nil && !cfg.HideEndpoint && !recentlyLinked)
 	var identityRecord *record.EndpointRecord
 	var err error
 	if wantIdentity {
@@ -1548,6 +1569,7 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.Endp
 	if err != nil {
 		fmt.Fprintf(log, "[SYNC] Skipping target without a VX6 PONG: %s: %v\n", addr, err)
 		result.err = fmt.Errorf("VX6 liveness probe failed: %w", err)
+		result.logged = true
 		if known {
 			result.nodeID = peer.NodeID
 		}
