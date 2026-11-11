@@ -49,8 +49,10 @@ import (
 	"github.com/vx6/vx6/internal/dht"
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/liveness"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/record"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const interlockEnv = "VX6_NETSIM_NO_IPSEC"
@@ -212,11 +214,12 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	srv := dht.NewServerWithIdentity(id)
+	tunnel := &passThroughTunnel{peers: make(map[string]record.EndpointRecord)}
 	cfg := node.Config{
 		Name: *name, NodeID: id.NodeID, ListenAddr: *listen, AdvertiseAddr: *listen,
 		DataDir: dataDir, ConfigPath: configPath, PeerAddrs: seedAddrs,
 		Services: map[string]string{}, DHT: srv, Identity: id, Registry: registry,
-		IPsecTunnel:     &passThroughTunnel{peers: make(map[string]record.EndpointRecord)},
+		IPsecTunnel:     tunnel,
 		RefreshServices: func() map[string]string { return map[string]string{} },
 	}
 
@@ -228,6 +231,7 @@ func run() error {
 
 	admin, err := startAdmin(filepath.Join(*dir, "admin.sock"), &adminState{
 		name: *name, id: id.NodeID, addr: *listen, srv: srv, registry: registry, started: time.Now(),
+		guard: newLookupDialGuard(registry, srv, tunnel, liveness.NewCache(20*time.Second)),
 	})
 	if err != nil {
 		return err
@@ -270,6 +274,8 @@ type adminState struct {
 	srv            *dht.Server
 	registry       *discovery.Registry
 	started        time.Time
+	// guard applies the node's peer-dial rules to admin-API lookups.
+	guard vxtransport.DialGuard
 }
 
 // Snapshot is the per-node DHT state the orchestrator collects.
@@ -440,6 +446,9 @@ func startAdmin(sock string, st *adminState) (net.Listener, error) {
 			timeout = time.Duration(v) * time.Second
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		if st.guard != nil {
+			ctx = vxtransport.WithDialGuard(ctx, st.guard)
+		}
 		defer cancel()
 		writeHTTP(w, st.lookup(ctx, targetType, target, r.URL.Query().Get("trace") == "1"))
 	})
