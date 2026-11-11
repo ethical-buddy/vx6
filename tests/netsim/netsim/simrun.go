@@ -40,15 +40,28 @@ type SimRun struct {
 	// BGPConverged is how long inter-AS routing took to converge.
 	BGPConverged time.Duration
 	// Measurement options (see SetMeasurement).
-	lookupMode   string
-	idle         time.Duration
-	idleInterval time.Duration
-	capacity     *CapacityPolicy
+	lookupMode      string
+	offTableLookups bool
+	idle            time.Duration
+	idleInterval    time.Duration
+	capacity        *CapacityPolicy
+}
+
+type offTableTarget struct {
+	NodeID   string
+	NameHash string
+	Name     string
+}
+
+type offTableProbe struct {
+	Source Node
+	Target Node
+	Type   string
 }
 
 // SetMeasurement selects the lookup mode and the idle observation window.
-func (s *SimRun) SetMeasurement(lookupMode string, idle, idleInterval time.Duration) {
-	s.lookupMode, s.idle, s.idleInterval = lookupMode, idle, idleInterval
+func (s *SimRun) SetMeasurement(lookupMode string, offTableLookups bool, idle, idleInterval time.Duration) {
+	s.lookupMode, s.offTableLookups, s.idle, s.idleInterval = lookupMode, offTableLookups, idle, idleInterval
 }
 
 // effectiveLookupMode resolves "auto" against the topology size.
@@ -328,7 +341,8 @@ type Report struct {
 	CleanupStatus  string             `json:"cleanup_status,omitempty"`
 	BGPConvergedMS float64            `json:"bgp_converged_ms,omitempty"`
 	// LookupMode is exhaustive (every ordered pair, by ID and name) or sample.
-	LookupMode string `json:"lookup_mode"`
+	LookupMode      string `json:"lookup_mode"`
+	OffTableLookups bool   `json:"off_table_lookups"`
 	// Capacity is the routing-table capacity policy reported by the nodes.
 	Capacity *CapacityPolicy `json:"dht_capacity_policy,omitempty"`
 	// Idle holds the post-measurement idle captures (no lookups).
@@ -367,25 +381,29 @@ type RestartReport struct {
 }
 
 type RoundReport struct {
-	Label              string              `json:"label"`
-	Time               time.Time           `json:"time"`
-	NodesJoined        int                 `json:"nodes_joined"`
-	SnapshotsOK        int                 `json:"snapshots_ok"`
-	SnapshotErrors     int                 `json:"snapshot_errors"`
-	SnapshotErrorNodes []string            `json:"snapshot_error_nodes,omitempty"`
-	LookupPolicy       *LookupPolicy       `json:"lookup_policy,omitempty"`
-	AvgActivePeers     float64             `json:"avg_active_peers"`
-	MinActivePeers     int                 `json:"min_active_peers"`
-	MaxActivePeers     int                 `json:"max_active_peers"`
-	AvgRSSKB           float64             `json:"avg_rss_kb"`
-	MinRSSKB           int                 `json:"min_rss_kb"`
-	MaxRSSKB           int                 `json:"max_rss_kb"`
-	TotalRSSKB         int                 `json:"total_rss_kb"`
-	Diversity          RouteDiversityStats `json:"route_diversity"`
-	JoinDurationMS     float64             `json:"join_duration_ms"`
-	RoundDurationMS    float64             `json:"round_duration_ms"`
-	Lookups            LookupStats         `json:"lookups"`
-	Probes             []LookupReport      `json:"probes"`
+	Label                    string              `json:"label"`
+	Time                     time.Time           `json:"time"`
+	NodesJoined              int                 `json:"nodes_joined"`
+	SnapshotsOK              int                 `json:"snapshots_ok"`
+	SnapshotErrors           int                 `json:"snapshot_errors"`
+	SnapshotErrorNodes       []string            `json:"snapshot_error_nodes,omitempty"`
+	LookupPolicy             *LookupPolicy       `json:"lookup_policy,omitempty"`
+	AvgActivePeers           float64             `json:"avg_active_peers"`
+	MinActivePeers           int                 `json:"min_active_peers"`
+	MaxActivePeers           int                 `json:"max_active_peers"`
+	AvgRSSKB                 float64             `json:"avg_rss_kb"`
+	MinRSSKB                 int                 `json:"min_rss_kb"`
+	MaxRSSKB                 int                 `json:"max_rss_kb"`
+	TotalRSSKB               int                 `json:"total_rss_kb"`
+	Diversity                RouteDiversityStats `json:"route_diversity"`
+	JoinDurationMS           float64             `json:"join_duration_ms"`
+	RoundDurationMS          float64             `json:"round_duration_ms"`
+	Lookups                  LookupStats         `json:"lookups"`
+	Probes                   []LookupReport      `json:"probes"`
+	OffTableQueriesAvailable int                 `json:"off_table_queries_available"`
+	OffTableQueriesSelected  int                 `json:"off_table_queries_selected"`
+	OffTableStatusErrors     int                 `json:"off_table_status_errors"`
+	OffTableDiagnosticErrors int                 `json:"off_table_diagnostic_errors"`
 	// Nodes summarizes every node's diagnostics at this round; the full
 	// documents are in diagnostics/<label>/.
 	Nodes []NodeRoundSummary `json:"nodes,omitempty"`
@@ -752,7 +770,12 @@ func (s *SimRun) snapshotRound(ctx context.Context, label string, joined []Node,
 		reports = s.exhaustiveLookups(ctx, joined)
 		rr.Lookups = lookupStatsFromReports(reports)
 	} else {
-		rr.Lookups, reports = s.runProbes(ctx, joined, probes, rng)
+		if s.offTableLookups && strings.HasPrefix(label, "settle-") {
+			rr.Lookups, reports, rr.OffTableQueriesAvailable, rr.OffTableQueriesSelected,
+				rr.OffTableStatusErrors, rr.OffTableDiagnosticErrors = s.runOffTableProbes(ctx, joined, probes, rng)
+		} else {
+			rr.Lookups, reports = s.runProbes(ctx, joined, probes, rng)
+		}
 	}
 	attachSourceStats(nodes, reports)
 	rr.Nodes = sortedSummaries(nodes)
@@ -808,6 +831,112 @@ func (s *SimRun) runProbes(ctx context.Context, joined []Node, probes int, rng *
 	}
 	st := lookupStatsFromReports(reportsForStats)
 	return st, reports
+}
+
+// runOffTableProbes measures referrals by selecting only targets absent from
+// each source's active routing snapshot taken immediately before the lookup.
+func (s *SimRun) runOffTableProbes(ctx context.Context, joined []Node, probes int, rng *rand.Rand) (LookupStats, []LookupReport, int, int, int, int) {
+	var reports, counted []LookupReport
+	if len(joined) < 2 || probes <= 0 {
+		return LookupStats{}, reports, 0, 0, 0, 0
+	}
+	targets := make(map[string]offTableTarget, len(joined))
+	statusErrors := 0
+	for _, node := range joined {
+		var info struct {
+			NodeID   string `json:"node_id"`
+			Name     string `json:"name"`
+			NameHash string `json:"name_hash"`
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := s.adminGet(callCtx, node, "/status", &info)
+		cancel()
+		if err == nil && info.NodeID != "" && info.Name != "" && info.NameHash != "" {
+			targets[node.Name] = offTableTarget{NodeID: info.NodeID, Name: info.Name, NameHash: info.NameHash}
+		} else {
+			statusErrors++
+		}
+	}
+	diagnostics := make(map[string]NodeDiagnostics, len(joined))
+	diagnosticErrors := 0
+	for _, source := range joined {
+		var diag NodeDiagnostics
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := s.adminGet(callCtx, source, "/diagnostics", &diag)
+		cancel()
+		if err == nil {
+			diagnostics[source.Name] = diag
+		} else {
+			diagnosticErrors++
+		}
+	}
+	pairs := selectOffTableProbes(joined, targets, diagnostics)
+	rng.Shuffle(len(pairs), func(i, j int) { pairs[i], pairs[j] = pairs[j], pairs[i] })
+	available := len(pairs)
+	if len(pairs) > probes {
+		pairs = pairs[:probes]
+	}
+	for _, selected := range pairs {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		target := targets[selected.Target.Name]
+		value := target.NodeID
+		state := "absent_from_active_node_id_index_at_probe_selection"
+		if selected.Type == "name" {
+			value = target.Name
+			state = "absent_from_active_name_hash_index_at_probe_selection"
+		}
+		var rep LookupReport
+		path := "/lookup?type=" + selected.Type + "&target=" + url.QueryEscape(value) + "&timeout_s=10"
+		if err := s.adminGet(ctx, selected.Source, path, &rep); err != nil {
+			rep = LookupReport{Source: selected.Source.Name, TargetType: selected.Type, Outcome: "admin_error", Error: err.Error()}
+		}
+		rep.Source = selected.Source.Name
+		rep.ExpectedNodeID = target.NodeID
+		rep.SourceTargetState = state
+		reports = append(reports, rep)
+		counted = append(counted, rep)
+	}
+	return lookupStatsFromReports(counted), reports, available, len(pairs), statusErrors, diagnosticErrors
+}
+
+func selectOffTableProbes(nodes []Node, targets map[string]offTableTarget, diagnostics map[string]NodeDiagnostics) []offTableProbe {
+	var probes []offTableProbe
+	for _, source := range nodes {
+		diag, ok := diagnostics[source.Name]
+		if !ok {
+			continue
+		}
+		idSet := make(map[string]struct{}, diag.DHT.Table.IDIndex.Entries)
+		for _, bucket := range diag.DHT.Table.IDIndex.Buckets {
+			for _, peer := range bucket.Peers {
+				idSet[peer.NodeID] = struct{}{}
+			}
+		}
+		nameSet := make(map[string]struct{}, diag.DHT.Table.NameIndex.Entries)
+		for _, bucket := range diag.DHT.Table.NameIndex.Buckets {
+			for _, peer := range bucket.Peers {
+				nameSet[peer.NameHash] = struct{}{}
+			}
+		}
+		for _, targetNode := range nodes {
+			if source.Name == targetNode.Name {
+				continue
+			}
+			target, ok := targets[targetNode.Name]
+			if !ok {
+				continue
+			}
+			if _, known := idSet[target.NodeID]; !known {
+				probes = append(probes, offTableProbe{Source: source, Target: targetNode, Type: "id"})
+			}
+			if _, known := nameSet[target.NameHash]; !known {
+				probes = append(probes, offTableProbe{Source: source, Target: targetNode, Type: "name"})
+			}
+		}
+	}
+	return probes
 }
 
 func (s *SimRun) writeRound(i int, rr RoundReport) error {

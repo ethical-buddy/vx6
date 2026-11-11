@@ -5,6 +5,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,6 +69,91 @@ func TestAttachSourceStatsSeparatesOutcomes(t *testing.T) {
 	}
 	if b := nodes[1]; b.LookupsAsSource != 1 || b.IncompleteAsSource != 1 {
 		t.Fatalf("B: %+v", b)
+	}
+}
+
+func TestSelectOffTableProbesUsesEachXORIndex(t *testing.T) {
+	nodes := []Node{{Name: "A"}, {Name: "B"}, {Name: "C"}}
+	targets := map[string]offTableTarget{
+		"A": {NodeID: "id-a", NameHash: "hash-a", Name: "A"},
+		"B": {NodeID: "id-b", NameHash: "hash-b", Name: "B"},
+		"C": {NodeID: "id-c", NameHash: "hash-c", Name: "C"},
+	}
+	var a NodeDiagnostics
+	a.DHT.Table.IDIndex.Buckets = []struct {
+		Peers []DiagnosticPeerHead `json:"peers"`
+	}{{Peers: []DiagnosticPeerHead{{NodeID: "id-b"}}}}
+	a.DHT.Table.NameIndex.Buckets = []struct {
+		Peers []DiagnosticPeerHead `json:"peers"`
+	}{{Peers: []DiagnosticPeerHead{{NameHash: "hash-c"}}}}
+	var b NodeDiagnostics
+	b.DHT.Table.IDIndex.Buckets = []struct {
+		Peers []DiagnosticPeerHead `json:"peers"`
+	}{{Peers: []DiagnosticPeerHead{{NodeID: "id-a"}}}}
+	b.DHT.Table.NameIndex.Buckets = []struct {
+		Peers []DiagnosticPeerHead `json:"peers"`
+	}{{Peers: []DiagnosticPeerHead{{NameHash: "hash-a"}}}}
+	selected := selectOffTableProbes(nodes, targets, map[string]NodeDiagnostics{"A": a, "B": b})
+	if len(selected) != 4 {
+		t.Fatalf("selected %d off-table queries, want 4: %+v", len(selected), selected)
+	}
+	want := map[string]bool{"A/id/C": true, "A/name/B": true, "B/id/C": true, "B/name/C": true}
+	for _, probe := range selected {
+		key := probe.Source.Name + "/" + probe.Type + "/" + probe.Target.Name
+		if !want[key] {
+			t.Errorf("unexpected off-table query %q", key)
+		}
+		delete(want, key)
+	}
+	for key := range want {
+		t.Errorf("missing off-table query %q", key)
+	}
+}
+
+func TestOffTableCountsAppearInJSONAndMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	report := &Report{OffTableLookups: true, LookupMode: LookupModeSample,
+		Rounds: []RoundReport{{Label: "settle-0", OffTableQueriesAvailable: 17,
+			OffTableQueriesSelected: 8, OffTableStatusErrors: 1, OffTableDiagnosticErrors: 2}}}
+	if err := writeReportFiles(dir, report); err != nil {
+		t.Fatal(err)
+	}
+	jsonData, err := os.ReadFile(filepath.Join(dir, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"off_table_lookups": true`, `"off_table_queries_available": 17`, `"off_table_queries_selected": 8`} {
+		if !strings.Contains(string(jsonData), field) {
+			t.Errorf("report.json missing %s", field)
+		}
+	}
+	markdown, err := os.ReadFile(filepath.Join(dir, "report.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(markdown), "8/17") || !strings.Contains(string(markdown), "1/2") {
+		t.Fatalf("Markdown report does not show off-table denominators and preflight errors:\n%s", markdown)
+	}
+}
+
+func TestCoverageDoesNotClaimOffTableLookupWithoutEligibleQueries(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selected int
+		want     string
+	}{{"none eligible", 0, "NOT EXERCISED"}, {"queries selected", 3, "EXERCISED"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := coverage(&Report{OffTableLookups: true, Rounds: []RoundReport{{OffTableQueriesSelected: tc.selected}}})
+			for _, item := range items {
+				if item.name == "Lookup of targets absent from the corresponding local XOR index" {
+					if item.status != tc.want {
+						t.Fatalf("status %q, want %q", item.status, tc.want)
+					}
+					return
+				}
+			}
+			t.Fatal("off-table coverage row missing")
+		})
 	}
 }
 

@@ -48,6 +48,20 @@ func coverage(report *Report) []coverageItem {
 		{"Per-node XOR indexes and bbolt state", "EXERCISED", "Every round saves each node's NodeID and name-hash XOR indexes, offline/pending entries and bbolt categories/values (diagnostics/<round>/), read through the node's own open store."},
 		{"IKEv2/IPsec confidentiality and authentication", "NOT EXERCISED", "The scale tier uses an explicit pass-through tunnel. Use the separate two-peer IPsec suite."},
 	}
+	offTableQueries := 0
+	for _, round := range report.Rounds {
+		offTableQueries += round.OffTableQueriesSelected
+	}
+	if report.OffTableLookups && offTableQueries > 0 {
+		items = append(items, coverageItem{"Lookup of targets absent from the corresponding local XOR index", "EXERCISED",
+			fmt.Sprintf("%d ID/name queries were selected only after checking the source's relevant active index; per-query index state and lookup traces are in the report.", offTableQueries)})
+	} else if report.OffTableLookups {
+		items = append(items, coverageItem{"Lookup of targets absent from the corresponding local XOR index", "NOT EXERCISED",
+			"The mode was enabled, but no eligible source-target queries were selected; a zero eligible denominator is not referral-lookup evidence."})
+	} else {
+		items = append(items, coverageItem{"Lookup of targets absent from the corresponding local XOR index", "NOT EXERCISED",
+			"Use -lookups sample -off-table-probes to deliberately select targets missing from the requester's relevant active index."})
+	}
 	if !report.DryRun && report.Totals.Attempts > 0 && report.Totals.Found == 0 {
 		for i := range items {
 			if items[i].name == "Identity-ID lookup" || items[i].name == "Canonical-name lookup" {
@@ -117,10 +131,10 @@ func writeReportFiles(dir string, report *Report) error {
 	}
 	fmt.Fprintf(&b, "## Tested revision\n\n- VX6 build revision: `%s`\n- DHT capacity policy (reported by the running nodes): %s\n- Lookup mode: **%s**\n\n",
 		report.BuildRevision, capacity, report.LookupMode)
-	fmt.Fprintf(&b, "## Configuration\n\n- Sim nodes: %d\n- IPsec nodes: %d (not launched by this scale runner)\n- ASes: %d tier-1, %d ISP, %d org, %d attacker\n- Seed: %d\n- Join schedule: `%s`\n- Signed bootstrap contacts per join: %d\n- Sampled graceful restarts: %d\n- Post-join settle rounds: %d at %s each\n- Probe pairs per round: %d (one ID and one name lookup per pair)\n- Lookup timeout: 10 seconds\n\n",
+	fmt.Fprintf(&b, "## Configuration\n\n- Sim nodes: %d\n- IPsec nodes: %d (not launched by this scale runner)\n- ASes: %d tier-1, %d ISP, %d org, %d attacker\n- Seed: %d\n- Join schedule: `%s`\n- Signed bootstrap contacts per join: %d\n- Sampled graceful restarts: %d\n- Post-join settle rounds: %d at %s each\n- Probe limit per round: %d (normal mode: source-target pairs, each by ID and name; off-table mode: individual lookup queries)\n- Off-table lookup mode: **%t** (settle rounds only; target must be absent from its corresponding active XOR index)\n- Lookup timeout: 10 seconds\n\n",
 		report.Params.Nodes, report.Params.IPsecNodes, report.Params.Tier1, report.Params.ISPs, report.Params.Orgs,
 		report.Params.Attackers, report.Params.Seed, report.Params.Schedule, report.Params.Seeds,
-		report.RestartCount, report.SettleRounds, report.SettleGap, report.ProbesPerRound)
+		report.RestartCount, report.SettleRounds, report.SettleGap, report.ProbesPerRound, report.OffTableLookups)
 	duration := report.FinishedAt.Sub(report.StartedAt)
 	totals := report.Totals
 	fmt.Fprintf(&b, "## Overall Results\n\n- Wall-clock run duration: **%s**\n- DHT snapshots: **%d successful**, **%d failed**\n- Lookup attempts/completed: **%d/%d**; exact expected target found: **%d (%.1f%% of completed)**\n- Expected target not returned: **%d**; reachable-view not found: **%d**; incomplete/conflict: **%d**\n- Admin/request errors: **%d**; DHT lookup errors: **%d**\n- Lookup latency p50/p95/p99: **%.2f / %.2f / %.2f ms**\n- Peer queries average/p50/p95: **%.2f / %d / %d**; lookup rounds average/p50/p95: **%.2f / %.0f / %.0f**\n- Simnode combined process CPU time: **%d ms**; host-wide CPU busy estimate: **%.1f%%**\n- Host available memory start/end: **%d / %d MiB**\n\nHost CPU and free-memory values are machine-wide context, not attribution to VX6. Simnode CPU is the sum of measured process user+system time. Per-node RSS comes from each simnode snapshot.\n\n",
@@ -130,14 +144,14 @@ func writeReportFiles(dir string, report *Report) error {
 		totals.AvgQueries, totals.P50Queries, totals.P95Queries, totals.AvgRound, totals.P50Rounds, totals.P95Rounds,
 		report.HostResources.SimnodeCPUTimeMS, report.HostResources.HostCPUUtilizationPct,
 		report.HostResources.StartMemoryAvailableKB/1024, report.HostResources.EndMemoryAvailableKB/1024)
-	fmt.Fprintf(&b, "## Results by Round\n\n| Round | Joined | Snapshots OK/errors | Avg peers | Unique ASNs avg/min/max | Max same ASN /48 | Avg/min/max RSS (MiB/node) | Total node RSS (MiB) | Join ms | Round ms | Lookups attempted/completed | Found | Not found | Missed | Other | Admin/lookup errors | p50/p95/p99 ms | Avg queries/rounds |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	fmt.Fprintf(&b, "## Results by Round\n\n| Round | Joined | Snapshots OK/errors | Avg peers | Unique ASNs avg/min/max | Max same ASN /48 | Avg/min/max RSS (MiB/node) | Total node RSS (MiB) | Join ms | Round ms | Lookups attempted/completed | Found | Not found | Missed | Other | Admin/lookup errors | Off-table selected/eligible | Preflight status/diagnostics errors | p50/p95/p99 ms | Avg queries/rounds |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	var observed *LookupPolicy
 	for _, round := range report.Rounds {
 		l := round.Lookups
 		if observed == nil && round.LookupPolicy != nil {
 			observed = round.LookupPolicy
 		}
-		fmt.Fprintf(&b, "| %s | %d | %d/%d | %.2f | %.2f/%d/%d | %d/%d | %.2f/%.2f/%.2f | %.2f | %.2f | %.2f | %d/%d | %d | %d | %d | %d | %d/%d | %.2f/%.2f/%.2f | %.2f/%.2f |\n",
+		fmt.Fprintf(&b, "| %s | %d | %d/%d | %.2f | %.2f/%d/%d | %d/%d | %.2f/%.2f/%.2f | %.2f | %.2f | %.2f | %d/%d | %d | %d | %d | %d | %d/%d | %d/%d | %d/%d | %.2f/%.2f/%.2f | %.2f/%.2f |\n",
 			round.Label, round.NodesJoined, round.SnapshotsOK, round.SnapshotErrors, round.AvgActivePeers,
 			round.Diversity.AvgUniqueASNsPerTable, round.Diversity.MinUniqueASNsPerTable,
 			round.Diversity.MaxUniqueASNsPerTable, round.Diversity.MaxPeersFromOneASN,
@@ -145,6 +159,8 @@ func writeReportFiles(dir string, report *Report) error {
 			float64(round.AvgRSSKB)/1024, float64(round.MinRSSKB)/1024, float64(round.MaxRSSKB)/1024,
 			float64(round.TotalRSSKB)/1024, round.JoinDurationMS, round.RoundDurationMS,
 			l.Attempts, l.N, l.Found, l.NotFound, l.Missed, l.Other, l.Errors, l.LookupErrors,
+			round.OffTableQueriesSelected, round.OffTableQueriesAvailable,
+			round.OffTableStatusErrors, round.OffTableDiagnosticErrors,
 			l.P50ms, l.P95ms, l.P99ms, l.AvgQueries, l.AvgRound)
 	}
 	fmt.Fprintf(&b, "\n")
