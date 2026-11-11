@@ -44,6 +44,8 @@ type NodeRoundSummary struct {
 	StoreClosestName   int    `json:"bbolt_closest_name"`
 	StoreValues        int    `json:"bbolt_values"`
 	StoreValidValues   int    `json:"bbolt_valid_values"`
+	XORPlacementChecks int    `json:"xor_bucket_placement_checks"`
+	XORPlacementErrors int    `json:"xor_bucket_placement_errors"`
 	CachedValues       int    `json:"cached_values"`
 	StoreError         string `json:"store_error,omitempty"`
 	RSSKB              int    `json:"rss_kb"`
@@ -67,6 +69,15 @@ func (s *SimRun) captureDiagnostics(ctx context.Context, label string, nodes []N
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	mapWriter, err := newRoutingMapWriter(s.dir, label)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if mapWriter != nil {
+			_ = mapWriter.close()
+		}
+	}()
 	addressASN := s.addressASN()
 	summaries := make([]NodeRoundSummary, 0, len(nodes))
 	for _, node := range nodes {
@@ -97,8 +108,20 @@ func (s *SimRun) captureDiagnostics(ctx context.Context, label string, nodes []N
 			summaries = append(summaries, summary)
 			continue
 		}
-		summaries = append(summaries, summarizeDiagnostics(label, diag))
+		summary = summarizeDiagnostics(label, diag)
+		checks, failures, err := mapWriter.add(label, diag)
+		if err != nil {
+			summary.CaptureError = "routing map: " + err.Error()
+		} else {
+			summary.XORPlacementChecks = checks
+			summary.XORPlacementErrors = failures
+		}
+		summaries = append(summaries, summary)
 	}
+	if err := mapWriter.close(); err != nil {
+		return summaries, fmt.Errorf("close XOR routing map: %w", err)
+	}
+	mapWriter = nil
 	return summaries, nil
 }
 

@@ -80,19 +80,11 @@ func TestSelectOffTableProbesUsesEachXORIndex(t *testing.T) {
 		"C": {NodeID: "id-c", NameHash: "hash-c", Name: "C"},
 	}
 	var a NodeDiagnostics
-	a.DHT.Table.IDIndex.Buckets = []struct {
-		Peers []DiagnosticPeerHead `json:"peers"`
-	}{{Peers: []DiagnosticPeerHead{{NodeID: "id-b"}}}}
-	a.DHT.Table.NameIndex.Buckets = []struct {
-		Peers []DiagnosticPeerHead `json:"peers"`
-	}{{Peers: []DiagnosticPeerHead{{NameHash: "hash-c"}}}}
+	a.DHT.Table.IDIndex.Buckets = []DiagnosticBucketHead{{Peers: []DiagnosticPeerHead{{NodeID: "id-b"}}}}
+	a.DHT.Table.NameIndex.Buckets = []DiagnosticBucketHead{{Peers: []DiagnosticPeerHead{{NameHash: "hash-c"}}}}
 	var b NodeDiagnostics
-	b.DHT.Table.IDIndex.Buckets = []struct {
-		Peers []DiagnosticPeerHead `json:"peers"`
-	}{{Peers: []DiagnosticPeerHead{{NodeID: "id-a"}}}}
-	b.DHT.Table.NameIndex.Buckets = []struct {
-		Peers []DiagnosticPeerHead `json:"peers"`
-	}{{Peers: []DiagnosticPeerHead{{NameHash: "hash-a"}}}}
+	b.DHT.Table.IDIndex.Buckets = []DiagnosticBucketHead{{Peers: []DiagnosticPeerHead{{NodeID: "id-a"}}}}
+	b.DHT.Table.NameIndex.Buckets = []DiagnosticBucketHead{{Peers: []DiagnosticPeerHead{{NameHash: "hash-a"}}}}
 	selected := selectOffTableProbes(nodes, targets, map[string]NodeDiagnostics{"A": a, "B": b})
 	if len(selected) != 4 {
 		t.Fatalf("selected %d off-table queries, want 4: %+v", len(selected), selected)

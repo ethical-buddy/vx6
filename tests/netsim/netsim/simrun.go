@@ -47,6 +47,8 @@ type SimRun struct {
 	capacity        *CapacityPolicy
 }
 
+const maxAdminResponseBytes = 64 << 20
+
 type offTableTarget struct {
 	NodeID   string
 	NameHash string
@@ -310,7 +312,7 @@ func (s *SimRun) adminGet(ctx context.Context, n Node, path string, v any) error
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("admin API returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(v)
+	return json.NewDecoder(io.LimitReader(resp.Body, maxAdminResponseBytes)).Decode(v)
 }
 
 // Report is the simulation output.
@@ -819,7 +821,7 @@ func (s *SimRun) runProbes(ctx context.Context, joined []Node, probes int, rng *
 		}
 		for _, query := range []struct{ kind, value string }{{"id", target.NodeID}, {"name", target.Name}} {
 			var rep LookupReport
-			path := "/lookup?type=" + query.kind + "&target=" + url.QueryEscape(query.value) + "&timeout_s=10"
+			path := "/lookup?type=" + query.kind + "&target=" + url.QueryEscape(query.value) + "&timeout_s=10&trace=1"
 			if err := s.adminGet(ctx, src, path, &rep); err != nil {
 				rep = LookupReport{Source: src.Name, TargetType: query.kind, Outcome: "admin_error", Error: err.Error()}
 			}
@@ -888,7 +890,7 @@ func (s *SimRun) runOffTableProbes(ctx context.Context, joined []Node, probes in
 			state = "absent_from_active_name_hash_index_at_probe_selection"
 		}
 		var rep LookupReport
-		path := "/lookup?type=" + selected.Type + "&target=" + url.QueryEscape(value) + "&timeout_s=10"
+		path := "/lookup?type=" + selected.Type + "&target=" + url.QueryEscape(value) + "&timeout_s=10&trace=1"
 		if err := s.adminGet(ctx, selected.Source, path, &rep); err != nil {
 			rep = LookupReport{Source: selected.Source.Name, TargetType: selected.Type, Outcome: "admin_error", Error: err.Error()}
 		}
@@ -1075,6 +1077,17 @@ func runVerdict(report *Report) (string, []string) {
 		return "FAIL", []string{"no measurement rounds completed"}
 	}
 	last := report.Rounds[len(report.Rounds)-1]
+	xorPlacementChecks, xorPlacementErrors := 0, 0
+	for _, node := range last.Nodes {
+		xorPlacementChecks += node.XORPlacementChecks
+		xorPlacementErrors += node.XORPlacementErrors
+	}
+	if xorPlacementErrors > 0 {
+		reasons = append(reasons, fmt.Sprintf("final round has %d incorrect XOR bucket placements across %d checked entries", xorPlacementErrors, xorPlacementChecks))
+	}
+	if xorPlacementChecks == 0 && last.SnapshotsOK > 0 && len(last.Nodes) > 0 {
+		reasons = append(reasons, "final round captured no XOR bucket placement checks")
+	}
 	if last.NodesJoined > 1 && last.SnapshotsOK > 0 && last.MaxActivePeers == 0 {
 		reasons = append(reasons, fmt.Sprintf("no node had an active DHT peer in the final round (%s)", last.Label))
 	}
