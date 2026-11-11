@@ -645,7 +645,12 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 			})
 		})
 	}()
-	assertEchoEventually(t, hiddenAddr, "hidden rendezvous path")
+	// Each failed hidden dial attempt can wait a full rendezvousJoinTimeout
+	// (8s) for a peer that never joins, for example while intro or guard
+	// registrations are still settling right after startup, so allow several
+	// attempts rather than the 5s used for direct paths. About one run in 30
+	// needed three or four dials (76-94s) while registrations settled.
+	assertEchoWithin(t, hiddenAddr, "hidden rendezvous path", 2*time.Minute)
 
 	waitForCondition(t, 5*time.Second, func() bool {
 		traceMu.Lock()
@@ -659,49 +664,85 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	traceMu.Lock()
 	gotTraces := append([]onion.TraceEvent(nil), traces...)
 	traceMu.Unlock()
-	filtered := make([]onion.TraceEvent, 0, len(gotTraces))
+	// Traces are emitted before each circuit is dialed, and the client runs
+	// several rendezvous attempts in parallel (each with its own rendezvous
+	// ID), so traces also include losing and failed attempts. Only circuits of
+	// the same rendezvous session are bound to be disjoint: the owner excludes
+	// that session's client relays. Group by session and check every session
+	// in which both sides built a circuit.
+	type rendezvousSides struct {
+		client []onion.TraceEvent
+		owner  []onion.TraceEvent
+	}
+	sessions := map[string]*rendezvousSides{}
+	rendezvousTraces := 0
 	for _, trace := range gotTraces {
-		if trace.Purpose == "hidden-rendezvous" {
-			filtered = append(filtered, trace)
+		if trace.Purpose != "hidden-rendezvous" {
+			continue
 		}
-	}
-	if len(filtered) < 2 {
-		t.Fatalf("expected at least two hidden rendezvous traces, got %d total and %d rendezvous traces", len(gotTraces), len(filtered))
-	}
-	var pair []onion.TraceEvent
-	for i := 0; i < len(filtered); i++ {
-		for j := i + 1; j < len(filtered); j++ {
-			if filtered[i].TargetAddr == "" || filtered[i].TargetAddr != filtered[j].TargetAddr {
-				continue
-			}
-			if len(filtered[i].RelayAddrs) != 3 || len(filtered[j].RelayAddrs) != 3 {
-				continue
-			}
-			pair = []onion.TraceEvent{filtered[i], filtered[j]}
-			break
+		rendezvousTraces++
+		if trace.Session == "" {
+			t.Fatalf("hidden rendezvous trace without a session: %+v", trace)
 		}
-		if len(pair) == 2 {
-			break
+		if len(trace.RelayAddrs) != 3 {
+			t.Fatalf("expected 3 relays per hidden rendezvous circuit, got %+v", trace)
 		}
-	}
-	if len(pair) != 2 {
-		t.Fatalf("expected one successful hidden rendezvous pair with a shared target, got %+v", filtered)
-	}
-
-	seenRelays := map[string]struct{}{}
-	for _, trace := range pair {
 		for _, addr := range trace.RelayAddrs {
-			if _, ok := seenRelays[addr]; ok {
-				t.Fatalf("expected disjoint hidden-service relay sets, duplicate %s detected", addr)
-			}
 			if addr == client.listenAddr {
-				t.Fatalf("requester node should not be reused as a hidden-service relay: %s", addr)
+				t.Fatalf("requester node should not be reused as a hidden-service relay: %+v", trace)
 			}
-			seenRelays[addr] = struct{}{}
+		}
+		sides := sessions[trace.Session]
+		if sides == nil {
+			sides = &rendezvousSides{}
+			sessions[trace.Session] = sides
+		}
+		switch trace.Role {
+		case "client":
+			sides.client = append(sides.client, trace)
+		case "owner":
+			sides.owner = append(sides.owner, trace)
+		default:
+			t.Fatalf("hidden rendezvous trace with unknown role: %+v", trace)
 		}
 	}
-	if len(seenRelays) != 6 {
-		t.Fatalf("expected 6 unique hidden-service relays, got %d", len(seenRelays))
+	matched := 0
+	for id, sides := range sessions {
+		if len(sides.client) > 1 {
+			t.Fatalf("rendezvous session %s has %d client circuits, want at most 1", id, len(sides.client))
+		}
+		// A losing attempt can be cancelled after its intro request went out
+		// (owner side only) or before the owner answered (client side only).
+		if len(sides.client) == 0 || len(sides.owner) == 0 {
+			continue
+		}
+		matched++
+		clientRelays := map[string]struct{}{}
+		for _, addr := range sides.client[0].RelayAddrs {
+			if _, ok := clientRelays[addr]; ok {
+				t.Fatalf("client rendezvous circuit reuses relay %s: %+v", addr, sides.client[0])
+			}
+			clientRelays[addr] = struct{}{}
+		}
+		for _, owner := range sides.owner {
+			ownerRelays := map[string]struct{}{}
+			for _, addr := range owner.RelayAddrs {
+				if _, ok := clientRelays[addr]; ok {
+					t.Fatalf("expected disjoint hidden-service relay sets in session %s, duplicate %s detected (client %v, owner %v)",
+						id, addr, sides.client[0].RelayAddrs, owner.RelayAddrs)
+				}
+				if _, ok := ownerRelays[addr]; ok {
+					t.Fatalf("owner rendezvous circuit reuses relay %s: %+v", addr, owner)
+				}
+				ownerRelays[addr] = struct{}{}
+			}
+			if owner.TargetAddr == "" {
+				t.Fatalf("owner rendezvous circuit has no target: %+v", owner)
+			}
+		}
+	}
+	if matched == 0 {
+		t.Fatalf("expected at least one rendezvous session with client and owner circuits, got %d rendezvous traces in %d sessions", rendezvousTraces, len(sessions))
 	}
 
 	traceMu.Lock()
@@ -1500,8 +1541,13 @@ func assertEchoRoundTrip(t *testing.T, addr, message string) {
 
 func assertEchoEventually(t *testing.T, addr, message string) {
 	t.Helper()
+	assertEchoWithin(t, addr, message, 5*time.Second)
+}
 
-	deadline := time.Now().Add(5 * time.Second)
+func assertEchoWithin(t *testing.T, addr, message string, window time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(window)
 	for time.Now().Before(deadline) {
 		err := func() error {
 			conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)

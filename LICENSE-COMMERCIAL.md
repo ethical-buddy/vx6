@@ -9,7 +9,9 @@ MAINTAINER & COMMERCIAL LICENSING CLAUSE (ADDENDUM)
 1. Sole Authority: Suryansh Deshwal (https://github.com/ethical-buddy;
    suryanshdeshwal@gmail.com) is the sole inventor and maintainer and the
    rights holder for the VX6 software project, including its commercial
-   licensing rights.
+   licensing rights.(contributors will be on hall of fame for Opensource work,
+   but commercial rights and plans are only under the sole maintainer i.e suryansh
+   deshwal
 2. Commercial Exceptions: Any use of this software that falls outside the 
    "Non-Commercial Purpose" defined below is strictly prohibited unless 
    explicit, separate written permission or a commercial license is granted 
