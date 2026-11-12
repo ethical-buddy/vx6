@@ -1027,10 +1027,6 @@ func routingIDBytes(value string) []byte {
 		encoded = strings.TrimPrefix(value, "node/name/")
 	case strings.HasPrefix(value, "node/id/"):
 		encoded = strings.TrimPrefix(value, "node/id/vx6_")
-	default:
-		// Name coordinates and refresh targets are already full SHA-256
-		// digests. Treat canonical bare digests as coordinates, not labels to hash.
-		encoded = value
 	}
 	if len(encoded) == sha256.Size*2 {
 		if decoded, err := hex.DecodeString(encoded); err == nil {
