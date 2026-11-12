@@ -1,0 +1,4 @@
+{
+  "error": "read protocol header: EOF",
+  "response": "connection_dropped"
+}

@@ -1,0 +1,17 @@
+vx6-d3be15d67a58991b: #1, ESTABLISHED, IKEv2, 6dcd188a91d641f3_i 5f76063f37262da9_r*
+  local  '56:b0:b5:51:3d:9d:fd:09:7d:67:bc:92:f5:5f:6d:9e:6c:6c:ca:09' @ fd42:6:9caf:2::20[500]
+  remote 'd3:9f:6e:d5:5c:45:f4:67:36:2c:e6:da:6d:4c:3f:98:30:0b:8a:b7' @ fd42:6:9caf:1::10[500]
+  AES_GCM_16-128/PRF_HMAC_SHA2_256/CURVE_25519
+  established 4s ago, rekeying in 13257s
+  vx6-d3be15d67a58991b-in: #3, reqid 2, INSTALLED, TUNNEL, ESP:AES_GCM_16-128
+    installed 4s ago, rekeying in 3382s, expires in 3956s
+    in  ca22fab9, 162134 bytes,   311 packets,     0s ago
+    out c108081c,  34466 bytes,   267 packets,     0s ago
+    local  fd42:6:9caf:2::20/128[tcp/4242] fd42:6:9caf:2::20/128[udp/4244]
+    remote fd42:6:9caf:1::10/128[tcp] fd42:6:9caf:1::10/128[udp]
+  vx6-d3be15d67a58991b-out: #4, reqid 1, INSTALLED, TUNNEL, ESP:AES_GCM_16-128
+    installed 3s ago, rekeying in 3347s, expires in 3957s
+    in  cdf2ddb0,  18200 bytes,   138 packets,     2s ago
+    out caf25ddc,  21615 bytes,   148 packets,     2s ago
+    local  fd42:6:9caf:2::20/128[tcp] fd42:6:9caf:2::20/128[udp]
+    remote fd42:6:9caf:1::10/128[tcp/4242] fd42:6:9caf:1::10/128[udp/4244]

@@ -1,0 +1,1 @@
+/vx6-test/vx6-dhtprobe --type update_ip --action update_ip --target node/id/vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2 --data-kind endpoint --record-name ALPHA --record-address \[fd42:6:9caf:1::10\]:4242 --sequence 4 --tamper-signature --expect-drop --peer-record /tmp/peer-b.json --out /results/dht/reject-bad-endpoint-signature

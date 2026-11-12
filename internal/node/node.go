@@ -328,7 +328,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		}
 	}()
 	if cfg.ControlInfoPath != "" {
-		controlServer, err := runtimectl.StartWithPeerHandlers(cfg.ControlInfoPath, os.Getpid(), func() error {
+		controlServer, err := runtimectl.StartWithPeerHandlersAndDiagnostics(cfg.ControlInfoPath, os.Getpid(), func() error {
 			if cfg.Reload == nil {
 				return fmt.Errorf("reload channel is not configured")
 			}
@@ -400,6 +400,12 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				return peerStore.SetFriend(peer, true, time.Now())
 			}
 			return peerStore.SetFriendByID(peer.ID, false)
+		}, func() (json.RawMessage, error) {
+			liveCfg := runtimeConfig(cfg)
+			if liveCfg.DHT == nil || liveCfg.DHT.RT == nil {
+				return nil, errors.New("DHT diagnostics are unavailable")
+			}
+			return json.Marshal(liveCfg.DHT.Diagnostics(time.Now()))
 		})
 		if err != nil {
 			return err

@@ -1,0 +1,18 @@
+Transit sniffer is forwarding between the two isolated peer networks.
+
+=== Ping before IPsec negotiation (baseline) ===
+
+=== Two full VX6 nodes: DHT wire requests over authenticated ESP ===
+Waiting for the one-minute bbolt peer-store flush.
+
+=== VX6 service request through tunnel ===
+
+=== Private service lookup and allowlist enforcement ===
+PASS: authenticated peer without allowlist entry was denied.
+PASS: after owner allowlisted ALPHA NodeID, the same private service returned its sentinel.
+
+=== Untrusted cleartext probe of the VX6 listener ===
+
+=== Ping after CHILD_SA establishment ===
+
+=== Revoke the connected peer and verify active SA removal ===

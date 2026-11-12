@@ -25,6 +25,17 @@ results=${VX6_E2E_RESULTS_DIR:-"/tmp/vx6-ipsec-e2e-$run_id"}
 work=$(mktemp -d)
 mkdir -p "$results"
 capture_pid=
+ula_slot=$(( $$ % 60000 + 1000 ))
+printf -v ula_slot_hex '%x' "$ula_slot"
+net_a_prefix="fd42:6:${ula_slot_hex}:1"
+net_b_prefix="fd42:6:${ula_slot_hex}:2"
+net_a_subnet="${net_a_prefix}::/64"
+net_b_subnet="${net_b_prefix}::/64"
+peer_a_ip="${net_a_prefix}::10"
+peer_b_ip="${net_b_prefix}::20"
+router_a_ip="${net_a_prefix}::2"
+router_b_ip="${net_b_prefix}::2"
+impostor_ip="${net_b_prefix}::30"
 
 cleanup() {
   local status=${1:-$?}
@@ -68,17 +79,18 @@ docker build -f "$repo_root/tests/ipsec-e2e/Dockerfile" -t "$image" "$repo_root"
 GOCACHE="${GOCACHE:-/tmp/vx6-go-build}" GOMODCACHE="${GOMODCACHE:-/tmp/vx6-go-mod}" go build -o "$work/vx6" ./cmd/vx6
 GOCACHE="${GOCACHE:-/tmp/vx6-go-build}" GOMODCACHE="${GOMODCACHE:-/tmp/vx6-go-mod}" go build -o "$work/vx6-ipsecd" ./cmd/vx6-ipsecd
 GOCACHE="${GOCACHE:-/tmp/vx6-go-build}" GOMODCACHE="${GOMODCACHE:-/tmp/vx6-go-mod}" go build -o "$work/vx6-e2e-peer" ./tests/ipsec-e2e/peer
+GOCACHE="${GOCACHE:-/tmp/vx6-go-build}" GOMODCACHE="${GOMODCACHE:-/tmp/vx6-go-mod}" go build -o "$work/vx6-dhtprobe" ./tests/ipsec-e2e/dhtprobe
 
-docker network create --ipv6 --subnet fd42:6:1::/64 "$network_a" >/dev/null
-docker network create --ipv6 --subnet fd42:6:2::/64 "$network_b" >/dev/null
-docker run -d --name "$peer_a" --network "$network_a" --ip6 fd42:6:1::10 --privileged -v "$work:/vx6-test:ro" "$image" >/dev/null
-docker run -d --name "$peer_b" --network "$network_b" --ip6 fd42:6:2::20 --privileged -v "$work:/vx6-test:ro" "$image" >/dev/null
+docker network create --ipv6 --subnet "$net_a_subnet" "$network_a" >/dev/null
+docker network create --ipv6 --subnet "$net_b_subnet" "$network_b" >/dev/null
+docker run -d --name "$peer_a" --network "$network_a" --ip6 "$peer_a_ip" --privileged -v "$work:/vx6-test:ro" -v "$results:/results" "$image" >/dev/null
+docker run -d --name "$peer_b" --network "$network_b" --ip6 "$peer_b_ip" --privileged -v "$work:/vx6-test:ro" -v "$results:/results" "$image" >/dev/null
 docker run -d --name "$sniffer" --privileged -v "$results:/captures" "$image" >/dev/null
-docker network connect --ip6 fd42:6:1::2 "$network_a" "$sniffer"
-docker network connect --ip6 fd42:6:2::2 "$network_b" "$sniffer"
+docker network connect --ip6 "$router_a_ip" "$network_a" "$sniffer"
+docker network connect --ip6 "$router_b_ip" "$network_b" "$sniffer"
 docker exec "$sniffer" sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
-docker exec "$peer_a" ip -6 route add fd42:6:2::/64 via fd42:6:1::2
-docker exec "$peer_b" ip -6 route add fd42:6:1::/64 via fd42:6:2::2
+docker exec "$peer_a" ip -6 route add "$net_b_subnet" via "$router_a_ip"
+docker exec "$peer_b" ip -6 route add "$net_a_subnet" via "$router_b_ip"
 
 peer_exec() { local container=$1; shift; docker exec "$container" "$@"; }
 for peer in "$peer_a" "$peer_b"; do
@@ -132,11 +144,11 @@ init_peer() {
   peer_exec "$container" sh -c "printf '%s\\n' '{\"socket\":\"/run/vx6/ipsecd.sock\",\"state_dir\":\"/var/lib/vx6/ipsec\",\"socket_gid\":1000,\"allowed_uids\":[0]}' > /etc/vx6/ipsecd.json"
   start_ipsecd "$container"
 }
-init_peer "$peer_a" alpha fd42:6:1::10
-init_peer "$peer_b" beta fd42:6:2::20
+init_peer "$peer_a" alpha "$peer_a_ip"
+init_peer "$peer_b" beta "$peer_b_ip"
 
-peer_exec "$peer_a" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 identity export-endpoint --addr '[fd42:6:1::10]:4242' --out /tmp/peer-a.json
-peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 identity export-endpoint --addr '[fd42:6:2::20]:4242' --out /tmp/peer-b.json
+peer_exec "$peer_a" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 identity export-endpoint --addr "[$peer_a_ip]:4242" --out /tmp/peer-a.json
+peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 identity export-endpoint --addr "[$peer_b_ip]:4242" --out /tmp/peer-b.json
 docker cp "$peer_a:/tmp/peer-a.json" "$work/peer-a.json"
 docker cp "$peer_b:/tmp/peer-b.json" "$work/peer-b.json"
 docker cp "$work/peer-b.json" "$peer_a:/tmp/peer-b.json"
@@ -146,9 +158,9 @@ peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/
 
 if [[ ${VX6_E2E_SKIP_WRONG_KEY:-0} != 1 ]]; then
 printf '\n=== Prepare a different-key IKE impostor at the expected address ===\n' | tee -a "$results/topology.txt"
-docker run -d --name "$impostor" --network "$network_b" --ip6 fd42:6:2::30 --privileged -v "$work:/vx6-test:ro" "$image" >/dev/null
+docker run -d --name "$impostor" --network "$network_b" --ip6 "$impostor_ip" --privileged -v "$work:/vx6-test:ro" "$image" >/dev/null
 start_charon "$impostor"
-init_peer "$impostor" impostor fd42:6:2::20
+init_peer "$impostor" impostor "$peer_b_ip"
 docker cp "$work/peer-a.json" "$impostor:/tmp/peer-a.json"
 
 printf 'Preparing the wrong-key responder...\n' | tee -a "$results/topology.txt"
@@ -156,9 +168,9 @@ stop_ipsec_daemons "$peer_b"
 peer_exec "$peer_b" ip -6 xfrm state flush
 peer_exec "$peer_b" ip -6 xfrm policy flush
 docker network disconnect "$network_b" "$peer_b"
-peer_exec "$impostor" ip -6 addr add fd42:6:2::20/64 dev eth0
-peer_exec "$impostor" ip -6 route add fd42:6:1::/64 via fd42:6:2::2
-peer_exec "$sniffer" ip -6 neigh flush to fd42:6:2::20 >/dev/null 2>&1 || true
+peer_exec "$impostor" ip -6 addr add "$peer_b_ip/64" dev eth0
+peer_exec "$impostor" ip -6 route add "$net_a_subnet" via "$router_b_ip"
+peer_exec "$sniffer" ip -6 neigh flush to "$peer_b_ip" >/dev/null 2>&1 || true
 sleep 2
 stop_ipsec_daemons "$peer_a"
 peer_exec "$peer_a" ip -6 xfrm state flush
@@ -246,8 +258,8 @@ if [[ ${VX6_E2E_WRONG_KEY_ONLY:-0} == 1 ]]; then
   exit 0
 fi
 
-peer_exec "$impostor" ip -6 addr del fd42:6:2::20/64 dev eth0
-docker network connect --ip6 fd42:6:2::20 "$network_b" "$peer_b"
+peer_exec "$impostor" ip -6 addr del "$peer_b_ip/64" dev eth0
+docker network connect --ip6 "$peer_b_ip" "$network_b" "$peer_b"
 peer_exec "$sniffer" ip -6 neigh flush dev eth1 >/dev/null 2>&1 || true
 peer_exec "$sniffer" ip -6 neigh flush dev eth2 >/dev/null 2>&1 || true
 peer_exec "$peer_a" ip -6 neigh flush dev eth0 >/dev/null 2>&1 || true
@@ -276,9 +288,11 @@ fi
 marker="VX6_PRIVATE_SENTINEL_$run_id"
 docker exec -d "$peer_b" sh -c "mkdir -p /tmp/www; printf '%s\\n' '$marker' >/tmp/www/index.html; exec python3 -m http.server 9000 --bind :: --directory /tmp/www >/tmp/http.log 2>&1"
 peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 service add --name e2e --target '[::1]:9000'
+peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 service add --name admin --target '[::1]:9002' --private
 udp_marker="VX6_UDP_SENTINEL_$run_id"
 docker exec -d "$peer_b" sh -c "exec python3 -u -c 'import socket; s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); s.bind((\"::1\",9001)); exec(\"while True: data,addr=s.recvfrom(65507); s.sendto(data,addr)\")' >/tmp/udp-echo.log 2>&1"
 peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 service add --protocol udp --name media --target '[::1]:9001'
+docker exec -d "$peer_b" sh -c "mkdir -p /tmp/admin; printf '%s\\n' 'VX6_PRIVATE_ADMIN_SENTINEL' >/tmp/admin/index.html; exec python3 -m http.server 9002 --bind :: --directory /tmp/admin >/tmp/admin-http.log 2>&1"
 
 docker exec "$sniffer" ip -br link | tee "$results/sniffer-interfaces.txt"
 printf 'Transit sniffer is forwarding between the two isolated peer networks.\n' | tee "$results/topology.txt"
@@ -287,14 +301,124 @@ capture_pid=1
 sleep 1
 
 printf '\n=== Ping before IPsec negotiation (baseline) ===\n' | tee -a "$results/topology.txt"
-peer_exec "$peer_a" ping -6 -c 2 -W 2 fd42:6:2::20 2>&1 | tee "$results/ping-before.txt" || true
+peer_exec "$peer_a" ping -6 -c 2 -W 2 "$peer_b_ip" 2>&1 | tee "$results/ping-before.txt" || true
 
-docker exec -d "$peer_b" sh -c 'exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6-e2e-peer >/tmp/vx6-node-b.log 2>&1'
+docker exec -d "$peer_b" sh -c 'exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 node >/tmp/vx6-node-b.log 2>&1'
 for attempt in $(seq 1 30); do
   peer_exec "$peer_b" sh -c 'ss -ltn | grep -q ":4242"' && break
   sleep 1
 done
-docker exec -d "$peer_a" sh -c "exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 connect --service e2e --addr '[fd42:6:2::20]:4242' --listen 127.0.0.1:18080 >/tmp/vx6-connect.log 2>&1"
+peer_exec "$peer_b" sh -c 'ss -ltn | grep -q ":4242"'
+docker exec -d "$peer_a" sh -c 'exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 node >/tmp/vx6-node-a.log 2>&1'
+for attempt in $(seq 1 30); do
+  peer_exec "$peer_a" sh -c 'ss -ltn | grep -q ":4242"' && break
+  sleep 1
+done
+peer_exec "$peer_a" sh -c 'ss -ltn | grep -q ":4242"'
+
+printf '\n=== Two full VX6 nodes: DHT wire requests over authenticated ESP ===\n' | tee -a "$results/topology.txt"
+converged=0
+for attempt in $(seq 1 30); do
+  peer_exec "$peer_a" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 debug dht-snapshot >"$results/dht-alpha-before.json"
+  peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 debug dht-snapshot >"$results/dht-beta-before.json"
+  if python3 - "$results/dht-alpha-before.json" "$results/dht-beta-before.json" <<'PY'
+import json, sys
+active = [json.load(open(path))["table"]["active"] for path in sys.argv[1:]]
+raise SystemExit(0 if all(count > 0 for count in active) else 1)
+PY
+  then
+    converged=1
+    break
+  fi
+  sleep 1
+done
+if ((converged == 0)); then
+  printf 'FAIL: both nodes did not independently populate their active XOR routing tables within 30 seconds.\n' >&2
+  exit 1
+fi
+alpha_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["node_id"])' "$work/peer-a.json")
+beta_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["node_id"])' "$work/peer-b.json")
+beta_upper_id="vx6_$(printf '%s' "${beta_id#vx6_}" | tr '[:lower:]' '[:upper:]')"
+alpha_name_hash=$(printf 'vx6/node-name/v1\0%s' ALPHA | sha256sum | cut -d' ' -f1)
+beta_name_hash=$(printf 'vx6/node-name/v1\0%s' BETA | sha256sum | cut -d' ' -f1)
+run_dht_case() {
+  local scenario=$1; shift
+  local scenario_dir="/results/dht/$scenario"
+  mkdir -p "$results/dht/$scenario"
+  printf '%q ' /vx6-test/vx6-dhtprobe "$@" --peer-record /tmp/peer-b.json --out "$scenario_dir" >"$results/dht/$scenario/command.txt"
+  printf '\n' >>"$results/dht/$scenario/command.txt"
+  docker exec "$peer_a" env VX6_CONFIG_PATH=/root/.config/vx6/config.json \
+    /vx6-test/vx6-dhtprobe "$@" --peer-record /tmp/peer-b.json --out "$scenario_dir"
+}
+run_dht_case bootstrap --type bootstrap --action find_node --target "$alpha_id"
+run_dht_case name-find-node --type lookup_name --action find_node --target "$beta_name_hash"
+run_dht_case id-find-node --type lookup_key --action find_node --target "$beta_id"
+run_dht_case name-find-value --type lookup_name --action find_value --target "$beta_name_hash"
+run_dht_case id-find-value --type lookup_key --action find_value --target "$beta_id"
+run_dht_case public-service-lookup --type lookup_service --action find_value --target service/BETA.e2e
+run_dht_case private-catalog-lookup --type lookup_private --action find_value --target private-catalog/BETA
+run_dht_case endpoint-update-id --type update_ip --action update_ip --target "node/id/$alpha_id" --data-kind endpoint --record-name ALPHA --record-address "[$peer_a_ip]:4242" --sequence 2
+run_dht_case endpoint-update-name --type update_ip --action update_ip --target "node/name/$alpha_name_hash" --data-kind endpoint --record-name ALPHA --record-address "[$peer_a_ip]:4242" --sequence 3
+run_dht_case public-service-store --type update --action store --target service/ALPHA.probe --data-kind service --record-name ALPHA --record-address "[$peer_a_ip]:4242" --service-name probe
+run_dht_case reject-unknown-field --type lookup_key --action find_node --target "$beta_id" --corrupt unknown-field --expect-drop
+run_dht_case reject-duplicate-field --type lookup_key --action find_node --target "$beta_id" --corrupt duplicate-field --expect-drop
+run_dht_case reject-uppercase-hash --type lookup_key --action find_node --target "$beta_upper_id" --corrupt uppercase-hash --expect-drop
+run_dht_case reject-oversized-frame --type lookup_key --action find_node --target "$beta_id" --corrupt oversized --expect-drop
+run_dht_case reject-bad-endpoint-signature --type update_ip --action update_ip --target "node/id/$alpha_id" --data-kind endpoint --record-name ALPHA --record-address "[$peer_a_ip]:4242" --sequence 4 --tamper-signature --expect-drop
+peer_exec "$peer_b" swanctl --list-sas >"$results/dht-sas-beta.txt"
+peer_exec "$peer_b" ip -6 -s xfrm state >"$results/dht-xfrm-beta.txt"
+printf 'Waiting for the one-minute bbolt peer-store flush.\n' | tee -a "$results/topology.txt"
+sleep 61
+peer_exec "$peer_a" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 debug dht-snapshot >"$results/dht-alpha-after.json"
+peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 debug dht-snapshot >"$results/dht-beta-after.json"
+python3 - "$results/dht" "$results/dht-beta-after.json" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+snapshot = json.loads(pathlib.Path(sys.argv[2]).read_text())
+required = ["bootstrap", "name-find-node", "id-find-node", "name-find-value", "id-find-value",
+            "public-service-lookup", "private-catalog-lookup", "endpoint-update-id",
+            "endpoint-update-name", "public-service-store", "reject-unknown-field",
+            "reject-duplicate-field", "reject-uppercase-hash", "reject-oversized-frame",
+            "reject-bad-endpoint-signature"]
+for name in required:
+    result = json.loads((root / name / "result.json").read_text())
+    if result.get("passed") is not True:
+        raise SystemExit(f"DHT scenario failed: {name}: {result}")
+for name in ("name-find-node", "id-find-node", "bootstrap"):
+    response = json.loads((root / name / "response.json").read_text())
+    if len(response.get("nodes", [])) > 4:
+        raise SystemExit(f"{name}: referral cap exceeded")
+    if not response.get("nodes"):
+        raise SystemExit(f"{name}: expected a referral from the converged two-node table")
+for name in ("public-service-lookup", "private-catalog-lookup"):
+    response = json.loads((root / name / "response.json").read_text())
+    if not response.get("value"):
+        raise SystemExit(f"{name}: expected service/catalog value, got empty response")
+store = snapshot.get("store", {})
+if not store:
+    raise SystemExit("post-test snapshot has no bbolt peer-store diagnostics")
+catalog_response = json.loads((root / "private-catalog-lookup" / "response.json").read_text())
+catalog_value = json.loads(catalog_response["value"])
+catalog = json.loads(catalog_value["value"]) if "value" in catalog_value else catalog_value
+private_service_names = [entry.get("service_name") for entry in catalog.get("services", [])]
+findings = []
+if "admin" in private_service_names:
+    findings.append({"severity": "medium", "finding": "private service catalog metadata is visible to any authenticated DHT peer",
+                     "evidence": "lookup_private response contains service name 'admin' and its signed service record; this reveals metadata but does not authorize service access"})
+value_keys = {item.get("key") for item in store.get("values", [])}
+expected_bbolt_keys = {"service/BETA.e2e", "private-catalog/BETA", "service/ALPHA.probe",
+                       f"node/id/{json.loads((root / 'endpoint-update-id' / 'request.json').read_text())['target'].removeprefix('node/id/')}",
+                       f"node/name/{json.loads((root / 'endpoint-update-name' / 'request.json').read_text())['target'].removeprefix('node/name/')}"}
+missing = sorted(expected_bbolt_keys - value_keys)
+if missing:
+    raise SystemExit(f"expected records missing from post-test bbolt snapshot: {missing}")
+(root / "security-findings.json").write_text(json.dumps(findings, indent=2) + "\n")
+(root / "scenario-summary.json").write_text(json.dumps({"passed_scenarios": required, "count": len(required),
+    "bbolt_store_categories": store.get("categories", {}), "bbolt_value_keys": sorted(value_keys),
+    "private_catalog_service_names_visible": private_service_names, "security_findings": findings}, indent=2) + "\n")
+PY
+docker exec -d "$peer_a" sh -c 'exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 connect --service BETA.e2e --listen 127.0.0.1:18080 >/tmp/vx6-connect.log 2>&1'
+printf '%s\n' 'vx6 connect --service BETA.e2e --listen 127.0.0.1:18080' >"$results/service-connect-command.txt"
 
 for attempt in $(seq 1 30); do
   peer_exec "$peer_a" sh -c 'ss -ltn | grep -q ":18080"' && break
@@ -304,9 +428,11 @@ printf '\n=== VX6 service request through tunnel ===\n' | tee -a "$results/topol
 peer_exec "$peer_a" curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:18080/ \
   | tee "$results/service-response.txt"
 grep -Fx "$marker" "$results/service-response.txt" >/dev/null
+peer_exec "$peer_a" cat /tmp/vx6-connect.log >"$results/service-connect.log" 2>&1 || true
 
 peer_exec "$peer_a" swanctl --list-sas >"$results/sas-before-udp.txt"
-docker exec -d "$peer_a" sh -c "exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 connect --service media --addr '[fd42:6:2::20]:4242' --protocol udp --listen 127.0.0.1:18081 >/tmp/vx6-udp-connect.log 2>&1"
+docker exec -d "$peer_a" sh -c 'exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 connect --service BETA.media --listen 127.0.0.1:18081 >/tmp/vx6-udp-connect.log 2>&1'
+printf '%s\n' 'vx6 connect --service BETA.media --listen 127.0.0.1:18081' >"$results/udp-service-connect-command.txt"
 for attempt in $(seq 1 30); do
   peer_exec "$peer_a" sh -c 'ss -lun | grep -q ":18081"' && break
   sleep 1
@@ -315,6 +441,7 @@ peer_exec "$peer_a" python3 -c 'import socket,sys; s=socket.socket(socket.AF_INE
   | tee "$results/udp-service-response.txt"
 grep -Fx "$udp_marker" "$results/udp-service-response.txt" >/dev/null
 peer_exec "$peer_a" swanctl --list-sas >"$results/sas-after-udp.txt"
+peer_exec "$peer_a" cat /tmp/vx6-udp-connect.log >"$results/udp-service-connect.log" 2>&1 || true
 awk '($1 == "in" || $1 == "out") && $6 ~ /^packets/ {sum += $5} END {print sum+0}' "$results/sas-before-udp.txt" >"$results/sa-packets-before-udp.count"
 awk '($1 == "in" || $1 == "out") && $6 ~ /^packets/ {sum += $5} END {print sum+0}' "$results/sas-after-udp.txt" >"$results/sa-packets-after-udp.count"
 read -r packets_before_udp <"$results/sa-packets-before-udp.count"
@@ -324,8 +451,35 @@ if ((packets_after_udp <= packets_before_udp)); then
   exit 1
 fi
 
+printf '\n=== Private service lookup and allowlist enforcement ===\n' | tee -a "$results/topology.txt"
+docker exec -d "$peer_a" sh -c 'exec env VX6_CONFIG_PATH=/root/.config/vx6/config.json /vx6-test/vx6 connect --service BETA.admin --listen 127.0.0.1:18082 >/tmp/vx6-private-connect.log 2>&1'
+printf '%s\n' 'vx6 connect --service BETA.admin --listen 127.0.0.1:18082' >"$results/private-service-connect-command.txt"
+for attempt in $(seq 1 30); do
+  peer_exec "$peer_a" sh -c 'ss -ltn | grep -q ":18082"' && break
+  sleep 1
+done
+peer_exec "$peer_a" sh -c 'ss -ltn | grep -q ":18082"'
+if peer_exec "$peer_a" curl --max-time 8 --fail --silent --show-error http://127.0.0.1:18082/ \
+  >"$results/private-service-denied-response.txt" 2>"$results/private-service-denied-error.txt"; then
+  printf 'FAIL: a peer outside the private-service allowlist received a response.\n' >&2
+  exit 1
+fi
+if grep -Fq 'VX6_PRIVATE_ADMIN_SENTINEL' "$results/private-service-denied-response.txt"; then
+  printf 'FAIL: private service content reached a non-allowlisted peer.\n' >&2
+  exit 1
+fi
+printf 'PASS: authenticated peer without allowlist entry was denied.\n' | tee -a "$results/topology.txt"
+peer_exec "$peer_b" env VX6_CONFIG_PATH=/root/.config/vx6/config.json \
+  /vx6-test/vx6 service allow --name admin --node-id "$alpha_id" >"$results/private-service-allow.txt"
+sleep 1
+peer_exec "$peer_a" curl --max-time 8 --fail --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 \
+  http://127.0.0.1:18082/ | tee "$results/private-service-allowed-response.txt"
+grep -Fx 'VX6_PRIVATE_ADMIN_SENTINEL' "$results/private-service-allowed-response.txt" >/dev/null
+peer_exec "$peer_a" cat /tmp/vx6-private-connect.log >"$results/private-service-connect.log" 2>&1 || true
+printf 'PASS: after owner allowlisted ALPHA NodeID, the same private service returned its sentinel.\n' | tee -a "$results/topology.txt"
+
 printf '\n=== Untrusted cleartext probe of the VX6 listener ===\n' | tee -a "$results/topology.txt"
-if docker exec "$sniffer" timeout 3 nc -6 -z fd42:6:2::20 4242; then
+if docker exec "$sniffer" timeout 3 nc -6 -z "$peer_b_ip" 4242; then
   printf 'FAIL: an untrusted non-IPsec TCP probe connected to the VX6 listener.\n' | tee "$results/clear-probe.txt"
   exit 1
 else
@@ -334,7 +488,7 @@ fi
 
 printf '\n=== Ping after CHILD_SA establishment ===\n' | tee -a "$results/topology.txt"
 peer_exec "$peer_a" swanctl --list-sas | tee "$results/sas-a-before-post-ping.txt" >/dev/null
-peer_exec "$peer_a" ping -6 -c 2 -W 2 fd42:6:2::20 2>&1 | tee "$results/ping-after.txt"
+peer_exec "$peer_a" ping -6 -c 2 -W 2 "$peer_b_ip" 2>&1 | tee "$results/ping-after.txt"
 peer_exec "$peer_a" swanctl --list-sas | tee "$results/sas-a.txt"
 peer_exec "$peer_b" swanctl --list-sas | tee "$results/sas-b.txt"
 peer_exec "$peer_a" ip -6 -s xfrm state | tee "$results/xfrm-a.txt"
@@ -347,8 +501,8 @@ capture_pid=
 tcpdump -nnr "$results/wire.pcap" >"$results/packets.txt" 2>"$results/tcpdump-summary.txt"
 tcpdump -nnr "$results/wire.pcap" 'ip6 proto 50' 2>/dev/null | wc -l >"$results/esp-packets.count"
 tcpdump -nnr "$results/wire.pcap" 'udp port 500 or udp port 4500' 2>/dev/null | wc -l >"$results/ike-packets.count"
-tcpdump -nnr "$results/wire.pcap" 'ip6 and host fd42:6:1::10 and host fd42:6:2::20 and (tcp port 4242 or udp port 4244)' 2>/dev/null | wc -l >"$results/clear-vx6-port-packets.count"
-tcpdump -nnr "$results/wire.pcap" 'icmp6 and host fd42:6:1::10 and host fd42:6:2::20' 2>/dev/null | wc -l >"$results/clear-peer-icmp6-packets.count"
+tcpdump -nnr "$results/wire.pcap" "ip6 and host $peer_a_ip and host $peer_b_ip and (tcp port 4242 or udp port 4244)" 2>/dev/null | wc -l >"$results/clear-vx6-port-packets.count"
+tcpdump -nnr "$results/wire.pcap" "icmp6 and host $peer_a_ip and host $peer_b_ip" 2>/dev/null | wc -l >"$results/clear-peer-icmp6-packets.count"
 awk '$1 == "in" {in_packets += $5} $1 == "out" {out_packets += $5} END {print in_packets+0, out_packets+0}' "$results/sas-a-before-post-ping.txt" >"$results/sa-counters-before-ping.txt"
 awk '$1 == "in" {in_packets += $5} $1 == "out" {out_packets += $5} END {print in_packets+0, out_packets+0}' "$results/sas-a.txt" >"$results/sa-counters-after-ping.txt"
 read -r in_before out_before <"$results/sa-counters-before-ping.txt"

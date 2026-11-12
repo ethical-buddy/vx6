@@ -1,0 +1,64 @@
+src fd42:6:9caf:2::20 dst fd42:6:9caf:1::10
+	proto esp spi 0xcaf25ddc(3404881372) reqid 1(0x00000001) mode tunnel
+	replay-window 0 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0xc624b44f71fb1470d15f36cfd16b407d4385a1e2 (160 bits) 128
+	lastused 2026-11-12 08:44:23
+	anti-replay context: seq 0x0, oseq 0x94, bitmap 0x00000000
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3488(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  21615(bytes), 148(packets)
+	  add 2026-11-12 08:44:21 use 2026-11-12 08:44:23
+	stats:
+	  replay-window 0 replay 0 failed 0
+src fd42:6:9caf:1::10 dst fd42:6:9caf:2::20
+	proto esp spi 0xcdf2ddb0(3455245744) reqid 1(0x00000001) mode tunnel
+	replay-window 32 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0x0108881a002fcbbaf422a9e7c9dac7fe50663d5a (160 bits) 128
+	lastused 2026-11-12 08:44:23
+	anti-replay context: seq 0x8a, oseq 0x0, bitmap 0xffffffff
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3350(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  18200(bytes), 138(packets)
+	  add 2026-11-12 08:44:21 use 2026-11-12 08:44:23
+	stats:
+	  replay-window 0 replay 0 failed 0
+src fd42:6:9caf:2::20 dst fd42:6:9caf:1::10
+	proto esp spi 0xc108081c(3238529052) reqid 2(0x00000002) mode tunnel
+	replay-window 0 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0xd1ee2bf8fcbb3abcde62bb682280cb33f5d2ac4b (160 bits) 128
+	lastused 2026-11-12 08:44:24
+	anti-replay context: seq 0x0, oseq 0x10b, bitmap 0x00000000
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3408(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  34466(bytes), 267(packets)
+	  add 2026-11-12 08:44:20 use 2026-11-12 08:44:20
+	stats:
+	  replay-window 0 replay 0 failed 0
+src fd42:6:9caf:1::10 dst fd42:6:9caf:2::20
+	proto esp spi 0xca22fab9(3391290041) reqid 2(0x00000002) mode tunnel
+	replay-window 32 seq 0x00000000 flag af-unspec (0x00100000)
+	aead rfc4106(gcm(aes)) 0x913db7b073d61920fb2ba75bfbe044d91769214e (160 bits) 128
+	lastused 2026-11-12 08:44:24
+	anti-replay context: seq 0x137, oseq 0x0, bitmap 0xffffffff
+	lifetime config:
+	  limit: soft (INF)(bytes), hard (INF)(bytes)
+	  limit: soft (INF)(packets), hard (INF)(packets)
+	  expire add: soft 3386(sec), hard 3960(sec)
+	  expire use: soft 0(sec), hard 0(sec)
+	lifetime current:
+	  162134(bytes), 311(packets)
+	  add 2026-11-12 08:44:20 use 2026-11-12 08:44:20
+	stats:
+	  replay-window 0 replay 0 failed 0

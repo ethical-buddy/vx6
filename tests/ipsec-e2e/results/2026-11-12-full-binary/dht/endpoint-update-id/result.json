@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "referrals": 0,
+  "remote_node_id": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_action": "update_ip",
+  "request_bytes": 1266,
+  "request_target": "node/id/vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+  "request_type": "update_ip",
+  "response_type": "update_ip",
+  "transport": "TCP guarded by IKEv2/ESP",
+  "value_bytes": 0,
+  "verified_referrals": 0
+}

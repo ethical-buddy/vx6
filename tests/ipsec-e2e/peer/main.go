@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
+	"github.com/vx6/vx6/internal/dht"
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/ipsec"
@@ -116,6 +117,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	controlInfoPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
 	registry, err := discovery.NewRegistry(filepath.Join(cfg.Node.DataDir, "registry.json"))
 	if err != nil {
 		return err
@@ -151,9 +156,12 @@ func run() error {
 		AdvertiseAddr: cfg.Node.AdvertiseAddr, AdvertiseExplicit: cfg.Node.AdvertiseAddr != "",
 		TransportMode: cfg.Node.TransportMode, RelayMode: cfg.Node.RelayMode,
 		RelayResourcePercent: cfg.Node.RelayResourcePercent, DataDir: cfg.Node.DataDir,
+		ConfigPath: store.Path(),
 		ReceiveDir: cfg.Node.DownloadDir, FileReceiveMode: cfg.Node.FileReceiveMode,
 		AllowedFileSenders: cfg.Node.AllowedFileSenders, Identity: id,
-		Registry: registry, Services: services, ServicePolicies: servicePolicies,
+		ControlInfoPath: controlInfoPath,
+		DHT:             dht.NewServerWithIdentity(id),
+		Registry:        registry, Services: services, ServicePolicies: servicePolicies,
 		RefreshServicePolicies: func() map[string]serviceproxy.ServicePolicy {
 			fresh, err := store.Load()
 			if err != nil {

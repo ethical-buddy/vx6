@@ -1,0 +1,11 @@
+{
+  "drop_error": "read protocol header: EOF",
+  "expected_drop": true,
+  "passed": true,
+  "remote_node_id": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_action": "find_node",
+  "request_bytes": 165,
+  "request_target": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_type": "lookup_key",
+  "transport": "TCP guarded by IKEv2/ESP"
+}

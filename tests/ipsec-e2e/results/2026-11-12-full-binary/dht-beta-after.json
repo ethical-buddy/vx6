@@ -1,0 +1,187 @@
+{
+  "table": {
+    "source": "memory",
+    "self_id": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+    "self_name_hash": "1e80f85f02464480007fee0e48c5646fa59f071709c7e53da893e28137485e50",
+    "active": 1,
+    "offline": 0,
+    "pending": 0,
+    "node_id_index": {
+      "space": "node_id",
+      "entries": 1,
+      "non_empty_buckets": 1,
+      "occupancy_histogram": {
+        "1": 1
+      },
+      "buckets": [
+        {
+          "index": 255,
+          "peers": [
+            {
+              "name": "ALPHA",
+              "node_id": "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+              "name_hash": "afab28e759479bd62956468473130129cbb4e54c4206d6eb53359c2481d5fce9",
+              "addr": "[fd42:6:9caf:1::10]:4242",
+              "state": "active",
+              "success_count": 27,
+              "fail_count": 0,
+              "first_seen": "2026-11-12T08:44:23.633657177Z",
+              "last_seen": "2026-11-12T08:45:17.726271453Z",
+              "last_success": "2026-11-12T08:45:17.726271453Z",
+              "last_used": "0001-01-01T00:00:00Z",
+              "last_failure": "2026-11-12T08:45:17.694208755Z",
+              "last_probe": "2026-11-12T08:45:17.726271453Z",
+              "last_probe_failure": "0001-01-01T00:00:00Z",
+              "next_probe_at": "2026-11-12T08:46:56.223901944Z",
+              "offline_since": "0001-01-01T00:00:00Z",
+              "probation_until": "2026-11-12T10:44:23.633657177Z",
+              "in_probation": true
+            }
+          ]
+        }
+      ]
+    },
+    "name_hash_index": {
+      "space": "name_hash",
+      "entries": 1,
+      "non_empty_buckets": 1,
+      "occupancy_histogram": {
+        "1": 1
+      },
+      "buckets": [
+        {
+          "index": 255,
+          "peers": [
+            {
+              "name": "ALPHA",
+              "node_id": "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+              "name_hash": "afab28e759479bd62956468473130129cbb4e54c4206d6eb53359c2481d5fce9",
+              "addr": "[fd42:6:9caf:1::10]:4242",
+              "state": "active",
+              "success_count": 27,
+              "fail_count": 0,
+              "first_seen": "2026-11-12T08:44:23.633657177Z",
+              "last_seen": "2026-11-12T08:45:17.726271453Z",
+              "last_success": "2026-11-12T08:45:17.726271453Z",
+              "last_used": "0001-01-01T00:00:00Z",
+              "last_failure": "2026-11-12T08:45:17.694208755Z",
+              "last_probe": "2026-11-12T08:45:17.726271453Z",
+              "last_probe_failure": "0001-01-01T00:00:00Z",
+              "next_probe_at": "2026-11-12T08:46:56.223901944Z",
+              "offline_since": "0001-01-01T00:00:00Z",
+              "probation_until": "2026-11-12T10:44:23.633657177Z",
+              "in_probation": true
+            }
+          ]
+        }
+      ]
+    },
+    "capacity_policy": {
+      "k": 20,
+      "max_pending_candidates": 512,
+      "max_active_peers": 0,
+      "max_offline_peers": 0,
+      "warm_start_candidates": 50
+    }
+  },
+  "store": {
+    "source": "bbolt",
+    "peer_rows": 1,
+    "name_index_rows": 1,
+    "diversity_rows": 1,
+    "categories": {
+      "active": [
+        "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+      ],
+      "closest-id": [
+        "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+      ],
+      "closest-name": [
+        "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+      ],
+      "friends": [],
+      "inactive": [],
+      "probation": [
+        "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+      ],
+      "used": []
+    },
+    "values": [
+      {
+        "key": "node/id/vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+        "bytes": 1012,
+        "valid": true,
+        "family": "endpoint:vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+        "issued_at": "2026-11-12T08:44:19Z",
+        "expires_at": "2026-11-12T09:04:19Z"
+      },
+      {
+        "key": "node/id/vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+        "bytes": 1013,
+        "valid": true,
+        "family": "endpoint:vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+        "issued_at": "2026-11-12T08:44:24Z",
+        "expires_at": "2026-11-12T09:44:24Z"
+      },
+      {
+        "key": "node/name/1e80f85f02464480007fee0e48c5646fa59f071709c7e53da893e28137485e50",
+        "bytes": 1010,
+        "valid": true,
+        "family": "endpoint:vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+        "issued_at": "2026-11-12T08:44:19Z",
+        "expires_at": "2026-11-12T09:04:19Z"
+      },
+      {
+        "key": "node/name/afab28e759479bd62956468473130129cbb4e54c4206d6eb53359c2481d5fce9",
+        "bytes": 1011,
+        "valid": true,
+        "family": "endpoint:vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+        "issued_at": "2026-11-12T08:44:24Z",
+        "expires_at": "2026-11-12T09:44:24Z"
+      },
+      {
+        "key": "private-catalog/BETA",
+        "bytes": 1385,
+        "valid": true,
+        "family": "private-catalog:vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253:BETA",
+        "issued_at": "2026-11-12T08:45:17Z",
+        "expires_at": "2026-11-12T09:05:17Z"
+      },
+      {
+        "key": "service/ALPHA.probe",
+        "bytes": 990,
+        "valid": true,
+        "family": "service:vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2:ALPHA.probe",
+        "issued_at": "2026-11-12T08:44:24Z",
+        "expires_at": "2026-11-12T09:44:24Z"
+      },
+      {
+        "key": "service/BETA.e2e",
+        "bytes": 984,
+        "valid": true,
+        "family": "service:vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253:BETA.e2e",
+        "issued_at": "2026-11-12T08:45:17Z",
+        "expires_at": "2026-11-12T09:05:17Z"
+      },
+      {
+        "key": "service/BETA.media",
+        "bytes": 988,
+        "valid": true,
+        "family": "service:vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253:BETA.media",
+        "issued_at": "2026-11-12T08:45:17Z",
+        "expires_at": "2026-11-12T09:05:17Z"
+      }
+    ]
+  },
+  "cached_values": 8,
+  "cached_value_keys": [
+    "node/id/vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+    "node/id/vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+    "node/name/1e80f85f02464480007fee0e48c5646fa59f071709c7e53da893e28137485e50",
+    "node/name/afab28e759479bd62956468473130129cbb4e54c4206d6eb53359c2481d5fce9",
+    "private-catalog/BETA",
+    "service/ALPHA.probe",
+    "service/BETA.e2e",
+    "service/BETA.media"
+  ]
+}

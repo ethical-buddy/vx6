@@ -24,6 +24,20 @@ type SignedEnvelope struct {
 	Signature          string `json:"signature"`
 }
 
+// WrapSignedValue validates a signed DHT record and binds it to a lookup key
+// in a publisher-authenticated envelope. Network replicas use this envelope
+// to preserve the record's origin while authenticating the storing publisher.
+func WrapSignedValue(publisher identity.Identity, key, value string, now time.Time) (string, error) {
+	validated, err := validateInnerLookupValue(key, value, now)
+	if err != nil {
+		return "", err
+	}
+	if !validated.verified {
+		return "", fmt.Errorf("cannot wrap an unverified value for key %q", key)
+	}
+	return wrapSignedEnvelope(publisher, key, value, validated, now)
+}
+
 func maybeDecodeEnvelope(raw string) (SignedEnvelope, bool, error) {
 	var env SignedEnvelope
 	if err := json.Unmarshal([]byte(raw), &env); err != nil {

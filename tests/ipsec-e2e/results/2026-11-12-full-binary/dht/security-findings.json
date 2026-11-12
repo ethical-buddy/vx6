@@ -1,0 +1,7 @@
+[
+  {
+    "severity": "medium",
+    "finding": "private service catalog metadata is visible to any authenticated DHT peer",
+    "evidence": "lookup_private response contains service name 'admin' and its signed service record; this reveals metadata but does not authorize service access"
+  }
+]

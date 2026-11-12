@@ -1,0 +1,1 @@
+/vx6-test/vx6-dhtprobe --type lookup_name --action find_node --target 1e80f85f02464480007fee0e48c5646fa59f071709c7e53da893e28137485e50 --peer-record /tmp/peer-b.json --out /results/dht/name-find-node

@@ -1,0 +1,1 @@
+/vx6-test/vx6-dhtprobe --type lookup_private --action find_value --target private-catalog/BETA --peer-record /tmp/peer-b.json --out /results/dht/private-catalog-lookup

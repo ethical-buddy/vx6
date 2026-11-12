@@ -19,10 +19,11 @@ import (
 const requestTimeout = 2 * time.Second
 
 const (
-	ActionStatus     = "status"
-	ActionReload     = "reload"
-	ActionPeerUse    = "peer_use"
-	ActionPeerFriend = "peer_friend"
+	ActionStatus      = "status"
+	ActionReload      = "reload"
+	ActionPeerUse     = "peer_use"
+	ActionPeerFriend  = "peer_friend"
+	ActionDHTSnapshot = "dht_snapshot"
 )
 
 type Info struct {
@@ -68,21 +69,23 @@ type Request struct {
 }
 
 type Response struct {
-	OK     bool    `json:"ok"`
-	Error  string  `json:"error,omitempty"`
-	Status *Status `json:"status,omitempty"`
+	OK          bool            `json:"ok"`
+	Error       string          `json:"error,omitempty"`
+	Status      *Status         `json:"status,omitempty"`
+	DHTSnapshot json.RawMessage `json:"dht_snapshot,omitempty"`
 }
 
 type Server struct {
-	infoPath     string
-	listener     net.Listener
-	token        string
-	pid          int
-	reloadFn     func() error
-	statusFn     func() Status
-	peerUseFn    func(proto.NodeInfo) error
-	peerFriendFn func(proto.NodeInfo, bool) error
-	closeOnce    sync.Once
+	infoPath      string
+	listener      net.Listener
+	token         string
+	pid           int
+	reloadFn      func() error
+	statusFn      func() Status
+	peerUseFn     func(proto.NodeInfo) error
+	peerFriendFn  func(proto.NodeInfo, bool) error
+	dhtSnapshotFn func() (json.RawMessage, error)
+	closeOnce     sync.Once
 }
 
 func Start(infoPath string, pid int, reloadFn func() error, statusFn func() Status) (*Server, error) {
@@ -90,6 +93,10 @@ func Start(infoPath string, pid int, reloadFn func() error, statusFn func() Stat
 }
 
 func StartWithPeerHandlers(infoPath string, pid int, reloadFn func() error, statusFn func() Status, peerUseFn func(proto.NodeInfo) error, peerFriendFn func(proto.NodeInfo, bool) error) (*Server, error) {
+	return StartWithPeerHandlersAndDiagnostics(infoPath, pid, reloadFn, statusFn, peerUseFn, peerFriendFn, nil)
+}
+
+func StartWithPeerHandlersAndDiagnostics(infoPath string, pid int, reloadFn func() error, statusFn func() Status, peerUseFn func(proto.NodeInfo) error, peerFriendFn func(proto.NodeInfo, bool) error, dhtSnapshotFn func() (json.RawMessage, error)) (*Server, error) {
 	if infoPath == "" {
 		return nil, fmt.Errorf("runtime control path is required")
 	}
@@ -111,14 +118,15 @@ func StartWithPeerHandlers(infoPath string, pid int, reloadFn func() error, stat
 	}
 
 	s := &Server{
-		infoPath:     infoPath,
-		listener:     listener,
-		token:        token,
-		pid:          pid,
-		reloadFn:     reloadFn,
-		statusFn:     statusFn,
-		peerUseFn:    peerUseFn,
-		peerFriendFn: peerFriendFn,
+		infoPath:      infoPath,
+		listener:      listener,
+		token:         token,
+		pid:           pid,
+		reloadFn:      reloadFn,
+		statusFn:      statusFn,
+		peerUseFn:     peerUseFn,
+		peerFriendFn:  peerFriendFn,
+		dhtSnapshotFn: dhtSnapshotFn,
 	}
 	if err := s.writeInfoFile(); err != nil {
 		_ = listener.Close()
@@ -202,6 +210,17 @@ func RequestStatus(ctx context.Context, infoPath string) (Status, error) {
 func RequestReload(ctx context.Context, infoPath string) error {
 	_, err := send(ctx, infoPath, ActionReload)
 	return err
+}
+
+func RequestDHTSnapshot(ctx context.Context, infoPath string) (json.RawMessage, error) {
+	resp, err := send(ctx, infoPath, ActionDHTSnapshot)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.DHTSnapshot) == 0 {
+		return nil, fmt.Errorf("runtime control returned no DHT snapshot")
+	}
+	return resp.DHTSnapshot, nil
 }
 
 func send(ctx context.Context, infoPath, action string) (Response, error) {
@@ -324,6 +343,17 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(Response{OK: true})
+	case ActionDHTSnapshot:
+		if s.dhtSnapshotFn == nil {
+			_ = json.NewEncoder(conn).Encode(Response{Error: "DHT diagnostics are unavailable"})
+			return
+		}
+		snapshot, err := s.dhtSnapshotFn()
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(Response{OK: true, DHTSnapshot: snapshot})
 	default:
 		_ = json.NewEncoder(conn).Encode(Response{Error: "unknown runtime control action"})
 	}

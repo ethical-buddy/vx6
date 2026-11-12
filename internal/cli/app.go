@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -124,6 +125,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
 	fmt.Fprintln(w, "  vx6 debug dht-status")
+	fmt.Fprintln(w, "  vx6 debug dht-snapshot")
 	fmt.Fprintln(w, "  vx6 debug ebpf-status            (Linux only)")
 	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE   (Linux only)")
 	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE   (Linux only)")
@@ -1852,6 +1854,8 @@ func runDebug(ctx context.Context, args []string) error {
 		return runDebugDHTGet(ctx, args[1:])
 	case "dht-status":
 		return runDebugDHTStatus(ctx, args[1:])
+	case "dht-snapshot":
+		return runDebugDHTSnapshot(ctx, args[1:])
 	case "ebpf-status":
 		return runDebugEBPFStatus(args[1:]...)
 	case "ebpf-attach":
@@ -1873,6 +1877,7 @@ func printDebugUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
 	fmt.Fprintln(w, "  vx6 debug dht-status")
+	fmt.Fprintln(w, "  vx6 debug dht-snapshot")
 	fmt.Fprintln(w, "  vx6 debug bootstrap-info")
 	printDebugEBPFUsage(w)
 	printDebugFirewallUsage(w)
@@ -2069,6 +2074,32 @@ func runDebugDHTStatus(ctx context.Context, args []string) error {
 		return err
 	}
 	printRuntimeStatus("ONLINE", status)
+	return nil
+}
+
+func runDebugDHTSnapshot(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("debug dht-snapshot", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
+	snapshot, err := runtimectl.RequestDHTSnapshot(ctx, controlPath)
+	if err != nil {
+		return err
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, snapshot, "", "  "); err != nil {
+		return fmt.Errorf("format DHT snapshot: %w", err)
+	}
+	fmt.Println(pretty.String())
 	return nil
 }
 

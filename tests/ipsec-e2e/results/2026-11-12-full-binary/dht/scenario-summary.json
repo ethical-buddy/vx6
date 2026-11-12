@@ -1,0 +1,57 @@
+{
+  "passed_scenarios": [
+    "bootstrap",
+    "name-find-node",
+    "id-find-node",
+    "name-find-value",
+    "id-find-value",
+    "public-service-lookup",
+    "private-catalog-lookup",
+    "endpoint-update-id",
+    "endpoint-update-name",
+    "public-service-store",
+    "reject-unknown-field",
+    "reject-duplicate-field",
+    "reject-uppercase-hash",
+    "reject-oversized-frame",
+    "reject-bad-endpoint-signature"
+  ],
+  "count": 15,
+  "bbolt_store_categories": {
+    "active": [
+      "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+    ],
+    "closest-id": [
+      "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+    ],
+    "closest-name": [
+      "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+    ],
+    "friends": [],
+    "inactive": [],
+    "probation": [
+      "vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2"
+    ],
+    "used": []
+  },
+  "bbolt_value_keys": [
+    "node/id/vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+    "node/id/vx6_a73a3acc5b2b8d061968f96120ab3bcdb7a0c26768b0880718350ef7aaab75f2",
+    "node/name/1e80f85f02464480007fee0e48c5646fa59f071709c7e53da893e28137485e50",
+    "node/name/afab28e759479bd62956468473130129cbb4e54c4206d6eb53359c2481d5fce9",
+    "private-catalog/BETA",
+    "service/ALPHA.probe",
+    "service/BETA.e2e",
+    "service/BETA.media"
+  ],
+  "private_catalog_service_names_visible": [
+    "admin"
+  ],
+  "security_findings": [
+    {
+      "severity": "medium",
+      "finding": "private service catalog metadata is visible to any authenticated DHT peer",
+      "evidence": "lookup_private response contains service name 'admin' and its signed service record; this reveals metadata but does not authorize service access"
+    }
+  ]
+}

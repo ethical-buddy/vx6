@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "referrals": 1,
+  "remote_node_id": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_action": "find_node",
+  "request_bytes": 144,
+  "request_target": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_type": "lookup_key",
+  "response_type": "lookup_key",
+  "transport": "TCP guarded by IKEv2/ESP",
+  "value_bytes": 0,
+  "verified_referrals": 1
+}

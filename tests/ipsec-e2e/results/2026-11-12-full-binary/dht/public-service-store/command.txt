@@ -1,0 +1,1 @@
+/vx6-test/vx6-dhtprobe --type update --action store --target service/ALPHA.probe --data-kind service --record-name ALPHA --record-address \[fd42:6:9caf:1::10\]:4242 --service-name probe --peer-record /tmp/peer-b.json --out /results/dht/public-service-store

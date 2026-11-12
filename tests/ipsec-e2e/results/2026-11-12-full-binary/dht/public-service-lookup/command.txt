@@ -1,0 +1,1 @@
+/vx6-test/vx6-dhtprobe --type lookup_service --action find_value --target service/BETA.e2e --peer-record /tmp/peer-b.json --out /results/dht/public-service-lookup

@@ -100,6 +100,26 @@ func TestPeerUseAndFriendActionsReachDaemonHandlers(t *testing.T) {
 	}
 }
 
+func TestDHTSnapshotActionReturnsReadOnlyPayload(t *testing.T) {
+	infoPath := filepath.Join(t.TempDir(), "node.control.json")
+	want := json.RawMessage(`{"table":{"active":2},"store":{"peer_rows":2}}`)
+	server, err := StartWithPeerHandlersAndDiagnostics(infoPath, 99, nil, nil, nil, nil, func() (json.RawMessage, error) {
+		return want, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	got, err := RequestDHTSnapshot(context.Background(), infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("snapshot=%s, want %s", got, want)
+	}
+}
+
 func TestRequestFailsWithBadToken(t *testing.T) {
 	t.Parallel()
 

@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "referrals": 1,
+  "remote_node_id": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_action": "find_value",
+  "request_bytes": 97,
+  "request_target": "service/BETA.e2e",
+  "request_type": "lookup_service",
+  "response_type": "lookup_service",
+  "transport": "TCP guarded by IKEv2/ESP",
+  "value_bytes": 984,
+  "verified_referrals": 1
+}

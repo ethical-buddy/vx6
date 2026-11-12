@@ -1,0 +1,11 @@
+pcap=/tmp/vx6-ipsec-e2e-suite-20261112-141402-995090/positive-control/wire.pcap
+ESP packets: 4650
+IKE UDP packets: 12
+Clear VX6-port packets: 0
+Clear peer-to-peer ICMPv6 packets: 14
+Clear echo packets after IKE began: 4
+Peer SA packet counters before/after post-tunnel ping (in,out): 1149/1176 -> 1149/1176
+ICMPv6 verdict: diagnostic only; current CHILD_SA selectors cover TCP/UDP, not ICMPv6
+Service sentinel in capture: no
+UDP service response: VX6_UDP_SENTINEL_20261112-141414-999111
+ESP SA packet count before/after UDP exchange: 1963/1972

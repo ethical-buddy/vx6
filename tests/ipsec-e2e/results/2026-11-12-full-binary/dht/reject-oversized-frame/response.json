@@ -1,0 +1,4 @@
+{
+  "error": "write payload: write tcp [fd42:6:9caf:1::10]:40256-\u003e[fd42:6:9caf:2::20]:4242: write: connection reset by peer",
+  "response": "connection_dropped"
+}

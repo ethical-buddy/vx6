@@ -1,0 +1,1 @@
+/vx6-test/vx6-dhtprobe --type lookup_key --action find_node --target vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253 --corrupt oversized --expect-drop --peer-record /tmp/peer-b.json --out /results/dht/reject-oversized-frame

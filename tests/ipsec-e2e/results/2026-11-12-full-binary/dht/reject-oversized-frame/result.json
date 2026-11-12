@@ -1,0 +1,10 @@
+{
+  "drop_error": "write payload: write tcp [fd42:6:9caf:1::10]:40256-\u003e[fd42:6:9caf:2::20]:4242: write: connection reset by peer",
+  "expected_drop": true,
+  "passed": true,
+  "remote_node_id": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_action": "find_node",
+  "request_target": "vx6_28bd5441a9d0cf1a37d9a8ca0d6a5a891652ac96322ec0161159db93b7bf3253",
+  "request_type": "lookup_key",
+  "transport": "TCP guarded by IKEv2/ESP"
+}
