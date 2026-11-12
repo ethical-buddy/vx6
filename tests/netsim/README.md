@@ -24,11 +24,19 @@ confidentiality or IKE authentication.
 - Writes exact lookup outcomes, observed lookup limits, latency/query-count
   percentiles, convergence snapshots, route ASN/prefix distribution, per-node
   RSS, aggregate simnode CPU time, host CPU/memory context, logs, and hashes.
+- Saves a full XOR routing map at every diagnostic capture. The runner
+  recomputes each active peer's expected bucket independently for both indexes
+  and fails the final run if a stored peer is in the wrong bucket. It also
+  compares each local table with a test-wide census and reports whether the
+  globally nearest K contacts per bucket are locally present.
 
 The attacker-AS entries in this version are ordinary honest simnodes. The run
 does **not** yet inject poisoned referrals, partitions, address changes, liveness
 expiry, churn schedules, or eclipse attacks. Those are not proven by running
-this harness. The real-IPsec two-peer suite remains the evidence for IKE/ESP.
+this harness. Its measured lookup types are NodeID and canonical-name hash;
+bootstrap joining is exercised as a lifecycle, but signed UpdateIP propagation
+and public/private service-record resolution are not yet part of the scale run.
+The real-IPsec two-peer suite remains the evidence for IKE/ESP.
 
 ## Build and inspect without changing the host
 
@@ -126,7 +134,7 @@ stability.
   - why the lookup stopped: found, converged with no unqueried contacts,
     query/round limit, time budget, or failed peer queries.
 
-  Traces are saved in `lookups/<round>.json`.
+  Traces are saved in `lookups/<round>.json`, including off-table probes.
 - Every round, every node's full read-only DHT state is saved to
   `diagnostics/<round>/<node>.json`:
   - Both XOR indexes of the one active peer set (NodeID and canonical-name
@@ -139,6 +147,14 @@ stability.
     closest-id, closest-name, active, probation and inactive; and value
     health/expiry without payloads. bbolt is read through the node's
     already-open store; the simulator never opens the file a second time.
+
+  `routing-map/<capture>.csv.gz` gives compact rows for each locally stored
+  peer and each globally nearest-K contact missing from that table: owner,
+  index, actual/recomputed bucket, local/global rank, XOR distance, and present
+  or missing status. Wrong local bucket placement fails the run; nearest-K
+  omissions are reported as coverage gaps. The census is limited to the nodes
+  successfully captured in that round. The full JSON diagnostics remain the
+  source for all stored peer metadata and bbolt categories.
 
   Each document marks in-memory (`"source": "memory"`) and persisted
   (`"source": "bbolt"`) data. Nodes are also captured right before and right

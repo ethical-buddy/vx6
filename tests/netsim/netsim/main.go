@@ -248,7 +248,8 @@ func cmdRun(args []string) (retErr error) {
 	simnodeBin := fs.String("simnode", "simnode", "path to the simnode binary")
 	settleRounds := fs.Int("settle-rounds", 6, "snapshot rounds to take after the last join")
 	settleGap := fs.Duration("settle-gap", 30*time.Second, "delay between settle snapshots")
-	probes := fs.Int("probes", 50, "random lookup probes per snapshot round")
+	probes := fs.Int("probes", 50, "lookup sample limit per snapshot round (off-table mode counts individual queries)")
+	offTableProbes := fs.Bool("off-table-probes", false, "on settle rounds, probe targets absent from the corresponding active XOR index")
 	restartCount := fs.Int("restart-count", 1, "nodes to restart after joining to check bbolt recovery (0 disables)")
 	lookupMode := fs.String("lookups", LookupModeAuto, "lookup mode: auto (exhaustive up to 10 nodes, else sample), exhaustive, or sample (-probes random pairs)")
 	idle := fs.Duration("idle", 0, "after the settle rounds, observe idle nodes (no lookups) for this long, e.g. 15m")
@@ -296,6 +297,9 @@ func cmdRun(args []string) (retErr error) {
 	if err := validateMeasurementOptions(*lookupMode, *idle, *idleInterval); err != nil {
 		return err
 	}
+	if *offTableProbes && *lookupMode != LookupModeSample {
+		return errors.New("-off-table-probes requires sample lookup mode; use -lookups sample")
+	}
 	securedOutDir, err := secureRunDirectory(*outDir, !*dry, true)
 	if err != nil {
 		return fmt.Errorf("secure output directory: %w", err)
@@ -321,7 +325,7 @@ func cmdRun(args []string) (retErr error) {
 	r := &runner{dry: *dry, log: logf}
 
 	sim := NewSimRun(t, r, *outDir, *simnodeBin)
-	sim.SetMeasurement(*lookupMode, *idle, *idleInterval)
+	sim.SetMeasurement(*lookupMode, *offTableProbes, *idle, *idleInterval)
 	started := time.Now().UTC()
 	hostMetricsStart := captureHostMetrics()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -335,7 +339,7 @@ func cmdRun(args []string) (retErr error) {
 		HostOS: runtime.GOOS, HostArch: runtime.GOARCH, GoVersion: runtime.Version(),
 		HostKernel: hostKernel, HostCPUModel: hostCPUModel, LogicalCPUs: runtime.NumCPU(),
 		SettleRounds: *settleRounds, SettleGap: *settleGap, ProbesPerRound: *probes,
-		LookupMode: sim.effectiveLookupMode(), IdleDuration: *idle,
+		LookupMode: sim.effectiveLookupMode(), OffTableLookups: *offTableProbes, IdleDuration: *idle,
 		RestartCount: *restartCount, DryRun: *dry}
 	defer func() {
 		report.FinishedAt = time.Now().UTC()

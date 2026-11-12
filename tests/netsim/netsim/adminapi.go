@@ -48,17 +48,18 @@ type PeerView struct {
 }
 
 type LookupReport struct {
-	Source         string  `json:"source,omitempty"`
-	TargetType     string  `json:"target_type"`
-	Target         string  `json:"target"`
-	ExpectedNodeID string  `json:"expected_node_id,omitempty"`
-	Outcome        string  `json:"outcome"`
-	Found          bool    `json:"found_expected"`
-	MatchCount     int     `json:"match_count"`
-	Rounds         int     `json:"rounds"`
-	Queried        int     `json:"queried"`
-	LatencyMS      float64 `json:"latency_ms"`
-	Error          string  `json:"error,omitempty"`
+	Source            string  `json:"source,omitempty"`
+	TargetType        string  `json:"target_type"`
+	Target            string  `json:"target"`
+	ExpectedNodeID    string  `json:"expected_node_id,omitempty"`
+	SourceTargetState string  `json:"source_target_state,omitempty"`
+	Outcome           string  `json:"outcome"`
+	Found             bool    `json:"found_expected"`
+	MatchCount        int     `json:"match_count"`
+	Rounds            int     `json:"rounds"`
+	Queried           int     `json:"queried"`
+	LatencyMS         float64 `json:"latency_ms"`
+	Error             string  `json:"error,omitempty"`
 	// Trace is the per-round lookup path (exhaustive mode). It is written to
 	// lookups/<round>.json and stripped from report.json to keep that small.
 	Trace json.RawMessage `json:"trace,omitempty"`
@@ -74,13 +75,15 @@ type NodeDiagnostics struct {
 	Records int     `json:"registry_records"`
 	DHT     struct {
 		Table struct {
-			Active    int                 `json:"active"`
-			Offline   int                 `json:"offline"`
-			Pending   int                 `json:"pending"`
-			IDIndex   DiagnosticIndexHead `json:"node_id_index"`
-			NameIndex DiagnosticIndexHead `json:"name_hash_index"`
-			Capacity  CapacityPolicy      `json:"capacity_policy"`
-			Offlines  []struct {
+			SelfID       string              `json:"self_id"`
+			SelfNameHash string              `json:"self_name_hash"`
+			Active       int                 `json:"active"`
+			Offline      int                 `json:"offline"`
+			Pending      int                 `json:"pending"`
+			IDIndex      DiagnosticIndexHead `json:"node_id_index"`
+			NameIndex    DiagnosticIndexHead `json:"name_hash_index"`
+			Capacity     CapacityPolicy      `json:"capacity_policy"`
+			Offlines     []struct {
 				InProbation bool `json:"in_probation"`
 			} `json:"offline_peers"`
 		} `json:"table"`
@@ -97,13 +100,21 @@ type NodeDiagnostics struct {
 }
 
 type DiagnosticIndexHead struct {
-	Entries         int `json:"entries"`
-	NonEmptyBuckets int `json:"non_empty_buckets"`
-	Buckets         []struct {
-		Peers []struct {
-			InProbation bool `json:"in_probation"`
-		} `json:"peers"`
-	} `json:"buckets"`
+	Entries         int                    `json:"entries"`
+	NonEmptyBuckets int                    `json:"non_empty_buckets"`
+	Buckets         []DiagnosticBucketHead `json:"buckets"`
+}
+
+type DiagnosticBucketHead struct {
+	Index int                  `json:"index"`
+	Peers []DiagnosticPeerHead `json:"peers"`
+}
+
+type DiagnosticPeerHead struct {
+	Name        string `json:"name"`
+	NodeID      string `json:"node_id"`
+	NameHash    string `json:"name_hash"`
+	InProbation bool   `json:"in_probation"`
 }
 
 // CapacityPolicy mirrors dht.CapacityPolicy.

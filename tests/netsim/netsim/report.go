@@ -42,11 +42,26 @@ func coverage(report *Report) []coverageItem {
 		{"Canonical-name lookup", "EXERCISED", "The admin adapter canonicalizes the name and sends only its name-hash coordinate into DHT lookup."},
 		{"Routing snapshots and lookup outcomes", "EXERCISED", "Per-node snapshots and per-probe details are retained in report.json and snapshots/."},
 		{"DHT restart and bbolt recovery", restartStatus, restartNote},
-		{"Peer liveness expiry and IP update propagation", "NOT EXERCISED", "No clock-accelerated expiry or address-change scenario is injected."},
+		{"UpdateIP / signed endpoint-address propagation", "NOT EXERCISED", "This scale runner does not change a node's advertised IPv6 address or verify that peers replace the old endpoint after an owner-signed update."},
+		{"Service-record lookup and service reachability", "NOT EXERCISED", "The simnode admin API tests peer identity/name routing only; it does not publish or resolve public/private service records or open a service stream."},
 		{"Malformed or malicious DHT referrals", "NOT EXERCISED", "Attacker-AS nodes are ordinary VX6 peers; this harness does not inject malicious DHT responses."},
 		{"Network partition, churn, and eclipse", "NOT EXERCISED", "Topology primitives exist, but this run path does not apply fault schedules."},
-		{"Per-node XOR indexes and bbolt state", "EXERCISED", "Every round saves each node's NodeID and name-hash XOR indexes, offline/pending entries and bbolt categories/values (diagnostics/<round>/), read through the node's own open store."},
+		{"Per-node XOR indexes and bbolt state", "EXERCISED", "Every capture saves each node's complete NodeID and name-hash indexes, offline/pending entries and bbolt categories/values. routing-map/<capture>.csv.gz audits local buckets and compares stored contacts with a test-wide nearest-K-per-bucket census."},
 		{"IKEv2/IPsec confidentiality and authentication", "NOT EXERCISED", "The scale tier uses an explicit pass-through tunnel. Use the separate two-peer IPsec suite."},
+	}
+	offTableQueries := 0
+	for _, round := range report.Rounds {
+		offTableQueries += round.OffTableQueriesSelected
+	}
+	if report.OffTableLookups && offTableQueries > 0 {
+		items = append(items, coverageItem{"Lookup of targets absent from the corresponding local XOR index", "EXERCISED",
+			fmt.Sprintf("%d ID/name queries were selected only after checking the source's relevant active index; per-query index state and lookup traces are in the report.", offTableQueries)})
+	} else if report.OffTableLookups {
+		items = append(items, coverageItem{"Lookup of targets absent from the corresponding local XOR index", "NOT EXERCISED",
+			"The mode was enabled, but no eligible source-target queries were selected; a zero eligible denominator is not referral-lookup evidence."})
+	} else {
+		items = append(items, coverageItem{"Lookup of targets absent from the corresponding local XOR index", "NOT EXERCISED",
+			"Use -lookups sample -off-table-probes to deliberately select targets missing from the requester's relevant active index."})
 	}
 	if !report.DryRun && report.Totals.Attempts > 0 && report.Totals.Found == 0 {
 		for i := range items {
@@ -117,10 +132,10 @@ func writeReportFiles(dir string, report *Report) error {
 	}
 	fmt.Fprintf(&b, "## Tested revision\n\n- VX6 build revision: `%s`\n- DHT capacity policy (reported by the running nodes): %s\n- Lookup mode: **%s**\n\n",
 		report.BuildRevision, capacity, report.LookupMode)
-	fmt.Fprintf(&b, "## Configuration\n\n- Sim nodes: %d\n- IPsec nodes: %d (not launched by this scale runner)\n- ASes: %d tier-1, %d ISP, %d org, %d attacker\n- Seed: %d\n- Join schedule: `%s`\n- Signed bootstrap contacts per join: %d\n- Sampled graceful restarts: %d\n- Post-join settle rounds: %d at %s each\n- Probe pairs per round: %d (one ID and one name lookup per pair)\n- Lookup timeout: 10 seconds\n\n",
+	fmt.Fprintf(&b, "## Configuration\n\n- Sim nodes: %d\n- IPsec nodes: %d (not launched by this scale runner)\n- ASes: %d tier-1, %d ISP, %d org, %d attacker\n- Seed: %d\n- Join schedule: `%s`\n- Signed bootstrap contacts per join: %d\n- Sampled graceful restarts: %d\n- Post-join settle rounds: %d at %s each\n- Probe limit per round: %d (normal mode: source-target pairs, each by ID and name; off-table mode: individual lookup queries)\n- Off-table lookup mode: **%t** (settle rounds only; target must be absent from its corresponding active XOR index)\n- Lookup timeout: 10 seconds\n\n",
 		report.Params.Nodes, report.Params.IPsecNodes, report.Params.Tier1, report.Params.ISPs, report.Params.Orgs,
 		report.Params.Attackers, report.Params.Seed, report.Params.Schedule, report.Params.Seeds,
-		report.RestartCount, report.SettleRounds, report.SettleGap, report.ProbesPerRound)
+		report.RestartCount, report.SettleRounds, report.SettleGap, report.ProbesPerRound, report.OffTableLookups)
 	duration := report.FinishedAt.Sub(report.StartedAt)
 	totals := report.Totals
 	fmt.Fprintf(&b, "## Overall Results\n\n- Wall-clock run duration: **%s**\n- DHT snapshots: **%d successful**, **%d failed**\n- Lookup attempts/completed: **%d/%d**; exact expected target found: **%d (%.1f%% of completed)**\n- Expected target not returned: **%d**; reachable-view not found: **%d**; incomplete/conflict: **%d**\n- Admin/request errors: **%d**; DHT lookup errors: **%d**\n- Lookup latency p50/p95/p99: **%.2f / %.2f / %.2f ms**\n- Peer queries average/p50/p95: **%.2f / %d / %d**; lookup rounds average/p50/p95: **%.2f / %.0f / %.0f**\n- Simnode combined process CPU time: **%d ms**; host-wide CPU busy estimate: **%.1f%%**\n- Host available memory start/end: **%d / %d MiB**\n\nHost CPU and free-memory values are machine-wide context, not attribution to VX6. Simnode CPU is the sum of measured process user+system time. Per-node RSS comes from each simnode snapshot.\n\n",
@@ -130,14 +145,14 @@ func writeReportFiles(dir string, report *Report) error {
 		totals.AvgQueries, totals.P50Queries, totals.P95Queries, totals.AvgRound, totals.P50Rounds, totals.P95Rounds,
 		report.HostResources.SimnodeCPUTimeMS, report.HostResources.HostCPUUtilizationPct,
 		report.HostResources.StartMemoryAvailableKB/1024, report.HostResources.EndMemoryAvailableKB/1024)
-	fmt.Fprintf(&b, "## Results by Round\n\n| Round | Joined | Snapshots OK/errors | Avg peers | Unique ASNs avg/min/max | Max same ASN /48 | Avg/min/max RSS (MiB/node) | Total node RSS (MiB) | Join ms | Round ms | Lookups attempted/completed | Found | Not found | Missed | Other | Admin/lookup errors | p50/p95/p99 ms | Avg queries/rounds |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	fmt.Fprintf(&b, "## Results by Round\n\n| Round | Joined | Snapshots OK/errors | Avg peers | Unique ASNs avg/min/max | Max same ASN /48 | Avg/min/max RSS (MiB/node) | Total node RSS (MiB) | Join ms | Round ms | Lookups attempted/completed | Found | Not found | Missed | Other | Admin/lookup errors | Off-table selected/eligible | Preflight status/diagnostics errors | p50/p95/p99 ms | Avg queries/rounds |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	var observed *LookupPolicy
 	for _, round := range report.Rounds {
 		l := round.Lookups
 		if observed == nil && round.LookupPolicy != nil {
 			observed = round.LookupPolicy
 		}
-		fmt.Fprintf(&b, "| %s | %d | %d/%d | %.2f | %.2f/%d/%d | %d/%d | %.2f/%.2f/%.2f | %.2f | %.2f | %.2f | %d/%d | %d | %d | %d | %d | %d/%d | %.2f/%.2f/%.2f | %.2f/%.2f |\n",
+		fmt.Fprintf(&b, "| %s | %d | %d/%d | %.2f | %.2f/%d/%d | %d/%d | %.2f/%.2f/%.2f | %.2f | %.2f | %.2f | %d/%d | %d | %d | %d | %d | %d/%d | %d/%d | %d/%d | %.2f/%.2f/%.2f | %.2f/%.2f |\n",
 			round.Label, round.NodesJoined, round.SnapshotsOK, round.SnapshotErrors, round.AvgActivePeers,
 			round.Diversity.AvgUniqueASNsPerTable, round.Diversity.MinUniqueASNsPerTable,
 			round.Diversity.MaxUniqueASNsPerTable, round.Diversity.MaxPeersFromOneASN,
@@ -145,6 +160,8 @@ func writeReportFiles(dir string, report *Report) error {
 			float64(round.AvgRSSKB)/1024, float64(round.MinRSSKB)/1024, float64(round.MaxRSSKB)/1024,
 			float64(round.TotalRSSKB)/1024, round.JoinDurationMS, round.RoundDurationMS,
 			l.Attempts, l.N, l.Found, l.NotFound, l.Missed, l.Other, l.Errors, l.LookupErrors,
+			round.OffTableQueriesSelected, round.OffTableQueriesAvailable,
+			round.OffTableStatusErrors, round.OffTableDiagnosticErrors,
 			l.P50ms, l.P95ms, l.P99ms, l.AvgQueries, l.AvgRound)
 	}
 	fmt.Fprintf(&b, "\n")
@@ -165,14 +182,15 @@ func writeReportFiles(dir string, report *Report) error {
 	if n := len(report.Rounds); n > 0 && len(report.Rounds[n-1].Nodes) > 0 {
 		last := report.Rounds[n-1]
 		fmt.Fprintf(&b, "## Per-node state (final round `%s`)\n\nIn-memory columns come from the routing table; `bbolt` columns come from the node's persisted store.\n\n", last.Label)
-		fmt.Fprintf(&b, "| Node | Active | Offline | Pending | In probation | NodeID buckets | Name-hash buckets | bbolt rows | bbolt active/inactive/probation | bbolt closest ID/name | Values valid/total | As lookup source: found/incomplete/not found of total | RSS MiB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&b, "| Node | Active | Offline | Pending | In probation | NodeID buckets | Name-hash buckets | XOR placement errors/checks | Global nearest ID stored/expected | Global nearest name stored/expected | bbolt rows | bbolt active/inactive/probation | bbolt closest ID/name | Values valid/total | As lookup source: found/incomplete/not found of total | RSS MiB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 		for _, node := range last.Nodes {
 			if node.CaptureError != "" {
-				fmt.Fprintf(&b, "| %s | capture failed: %s | | | | | | | | | | | |\n", node.Name, strings.ReplaceAll(node.CaptureError, "|", "\\|"))
+				fmt.Fprintf(&b, "| %s | capture failed: %s | | | | | | | | | | | | | |\n", node.Name, strings.ReplaceAll(node.CaptureError, "|", "\\|"))
 				continue
 			}
-			fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %d | %d | %d | %d/%d/%d | %d/%d | %d/%d | %d/%d/%d of %d | %.1f |\n",
+			fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %d | %d | %d/%d | %d/%d | %d/%d | %d | %d/%d/%d | %d/%d | %d/%d | %d/%d/%d of %d | %.1f |\n",
 				node.Name, node.Active, node.Offline, node.Pending, node.InProbation, node.IDBuckets, node.NameBuckets,
+				node.XORPlacementErrors, node.XORPlacementChecks, node.GlobalIDPresent, node.GlobalIDExpected, node.GlobalNamePresent, node.GlobalNameExpected,
 				node.StoreRows, node.StoreActive, node.StoreInactive, node.StoreProbation, node.StoreClosestID, node.StoreClosestName,
 				node.StoreValidValues, node.StoreValues, node.FoundAsSource, node.IncompleteAsSource, node.NotFoundAsSource,
 				node.LookupsAsSource, float64(node.RSSKB)/1024)
@@ -193,7 +211,7 @@ func writeReportFiles(dir string, report *Report) error {
 	for _, item := range coverage(report) {
 		fmt.Fprintf(&b, "| %s | **%s** | %s |\n", item.name, item.status, item.note)
 	}
-	fmt.Fprintf(&b, "\n## Evidence Files\n\n- `report.json`: parameters, every round, and every lookup probe.\n- `topology.json`: run-specific namespace names and generated topology.\n- `commands.log`: network setup and teardown commands.\n- `snapshots/<round>/<node>.json`: observed active DHT peers, including both identity and name-hash coordinates.\n- `diagnostics/<capture>/<node>.json`: both XOR indexes with every bucket entry, offline/pending peers, bbolt categories and value health (no payloads), per round, restart and idle capture.\n- `lookups/<round>.json`: every lookup of the round with its per-round trace.\n- `nodes/<name>/node.log` and `simnode.out`: per-node logs.\n- `logs/`: FRR logs.\n\nThis is a DHT-scale simulation, not a proof of global DHT completeness, Sybil resistance, or IPsec security. Re-run with the same parameters and seed for repeatability; the random run ID only isolates Linux resources.\n")
+	fmt.Fprintf(&b, "\n## Evidence Files\n\n- `report.json`: parameters, every round, and every lookup probe.\n- `topology.json`: run-specific namespace names and generated topology.\n- `commands.log`: network setup and teardown commands.\n- `snapshots/<round>/<node>.json`: observed active DHT peers, including both identity and name-hash coordinates.\n- `diagnostics/<capture>/<node>.json`: both XOR indexes with every bucket entry, offline/pending peers, bbolt categories and value health (no payloads), per round, restart and idle capture.\n- `routing-map/<capture>.csv.gz`: all stored peers plus globally nearest-K-per-bucket peers missing from that local table. It reports actual/recomputed local bucket, local rank, global bucket rank, and present/missing status. Bucket-placement errors are failures; missing nearest-K contacts are reported as coverage gaps, not misclassified as bad bucket placement.\n- `lookups/<round>.json`: every lookup of the round with its per-round trace, including off-table probes.\n- `nodes/<name>/node.log` and `simnode.out`: per-node logs.\n- `logs/`: FRR logs.\n\nThis is a DHT-scale simulation, not a proof of global membership, Sybil resistance, or IPsec security. The test-wide census measures ideal nearest-K coverage only for nodes captured in that run. Re-run with the same parameters and seed for repeatability; the random run ID only isolates Linux resources.\n")
 	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte(b.String()), 0o600); err != nil {
 		return err
 	}
