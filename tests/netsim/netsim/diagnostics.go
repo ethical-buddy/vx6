@@ -46,6 +46,10 @@ type NodeRoundSummary struct {
 	StoreValidValues   int    `json:"bbolt_valid_values"`
 	XORPlacementChecks int    `json:"xor_bucket_placement_checks"`
 	XORPlacementErrors int    `json:"xor_bucket_placement_errors"`
+	GlobalIDExpected   int    `json:"global_nearest_node_id_contacts_expected"`
+	GlobalIDPresent    int    `json:"global_nearest_node_id_contacts_present"`
+	GlobalNameExpected int    `json:"global_nearest_name_hash_contacts_expected"`
+	GlobalNamePresent  int    `json:"global_nearest_name_hash_contacts_present"`
 	CachedValues       int    `json:"cached_values"`
 	StoreError         string `json:"store_error,omitempty"`
 	RSSKB              int    `json:"rss_kb"`
@@ -80,6 +84,7 @@ func (s *SimRun) captureDiagnostics(ctx context.Context, label string, nodes []N
 	}()
 	addressASN := s.addressASN()
 	summaries := make([]NodeRoundSummary, 0, len(nodes))
+	captured := make([]NodeDiagnostics, 0, len(nodes))
 	for _, node := range nodes {
 		summary := NodeRoundSummary{Name: node.Name, Label: label}
 		var raw json.RawMessage
@@ -109,14 +114,26 @@ func (s *SimRun) captureDiagnostics(ctx context.Context, label string, nodes []N
 			continue
 		}
 		summary = summarizeDiagnostics(label, diag)
-		checks, failures, err := mapWriter.add(label, diag)
-		if err != nil {
-			summary.CaptureError = "routing map: " + err.Error()
-		} else {
-			summary.XORPlacementChecks = checks
-			summary.XORPlacementErrors = failures
-		}
 		summaries = append(summaries, summary)
+		captured = append(captured, diag)
+	}
+	audits, err := mapWriter.addCapture(label, captured)
+	if err != nil {
+		for i := range summaries {
+			if summaries[i].CaptureError == "" {
+				summaries[i].CaptureError = "routing map: " + err.Error()
+			}
+		}
+	}
+	for i := range summaries {
+		if audit, ok := audits[summaries[i].Name]; ok {
+			summaries[i].XORPlacementChecks = audit.Checks
+			summaries[i].XORPlacementErrors = audit.Failures
+			summaries[i].GlobalIDExpected = audit.IDExpected
+			summaries[i].GlobalIDPresent = audit.IDPresent
+			summaries[i].GlobalNameExpected = audit.NameExpected
+			summaries[i].GlobalNamePresent = audit.NamePresent
+		}
 	}
 	if err := mapWriter.close(); err != nil {
 		return summaries, fmt.Errorf("close XOR routing map: %w", err)

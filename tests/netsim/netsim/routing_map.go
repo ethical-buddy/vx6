@@ -24,16 +24,22 @@ type routingMapWriter struct {
 }
 
 type routingMapEntry struct {
-	owner    string
-	ownerID  string
-	space    string
-	peerID   string
-	peerName string
-	peerHash string
-	actual   int
-	expected int
-	distance *big.Int
-	valid    bool
+	owner, ownerID, space                   string
+	peerID, peerName, peerHash              string
+	actual, expected, localRank, globalRank int
+	distance                                *big.Int
+	inTable, wanted                         bool
+	placement                               string
+}
+
+type routingMapAudit struct {
+	Checks, Failures          int
+	IDExpected, IDPresent     int
+	NameExpected, NamePresent int
+}
+
+type censusPeer struct {
+	name, id, nameHash string
 }
 
 func newRoutingMapWriter(root, label string) (*routingMapWriter, error) {
@@ -47,7 +53,7 @@ func newRoutingMapWriter(root, label string) (*routingMapWriter, error) {
 	}
 	z := gzip.NewWriter(f)
 	w := csv.NewWriter(z)
-	if err := w.Write([]string{"capture", "owner_name", "owner_node_id", "index", "actual_bucket", "expected_bucket", "local_xor_rank", "xor_distance_hex", "peer_name", "peer_node_id", "peer_name_hash", "placement_ok"}); err != nil {
+	if err := w.Write([]string{"capture", "census_nodes", "owner_name", "owner_node_id", "index", "local_bucket", "expected_bucket", "global_bucket_rank", "local_bucket_rank", "xor_distance_hex", "peer_name", "peer_node_id", "peer_name_hash", "global_nearest_k", "in_local_table", "placement"}); err != nil {
 		_ = z.Close()
 		_ = f.Close()
 		return nil, err
@@ -55,73 +61,167 @@ func newRoutingMapWriter(root, label string) (*routingMapWriter, error) {
 	return &routingMapWriter{file: f, zip: z, csv: w}, nil
 }
 
-func (w *routingMapWriter) add(capture string, diag NodeDiagnostics) (checks, failures int, err error) {
-	table := diag.DHT.Table
-	if table.SelfID == "" || table.SelfNameHash == "" {
-		return 0, 1, fmt.Errorf("%s: missing self XOR coordinate", diag.Name)
+// addCapture compares each captured local table with a test-only census. The
+// nearest-K comparison is diagnostic: K is a referral target, not a hard cap.
+func (w *routingMapWriter) addCapture(capture string, diagnostics []NodeDiagnostics) (map[string]routingMapAudit, error) {
+	census := make([]censusPeer, 0, len(diagnostics))
+	for _, diag := range diagnostics {
+		t := diag.DHT.Table
+		if t.SelfID == "" || t.SelfID != diag.NodeID || t.SelfNameHash != dht.NodeNameHash(diag.Name) {
+			continue
+		}
+		census = append(census, censusPeer{name: diag.Name, id: t.SelfID, nameHash: t.SelfNameHash})
 	}
-	if table.SelfID != diag.NodeID || table.SelfNameHash != dht.NodeNameHash(diag.Name) {
-		return 0, 1, fmt.Errorf("%s: diagnostic self identity does not match its XOR coordinates", diag.Name)
-	}
-	entries := make([]routingMapEntry, 0, table.IDIndex.Entries+table.NameIndex.Entries)
-	for _, bucket := range table.IDIndex.Buckets {
-		for _, peer := range bucket.Peers {
-			distance, expected, ok := xorBucket(table.SelfID, peer.NodeID)
-			valid := ok && expected == bucket.Index && peer.NodeID != table.SelfID &&
-				strings.HasPrefix(table.SelfID, "vx6_") && strings.HasPrefix(peer.NodeID, "vx6_") &&
-				peer.Name != "" && peer.NameHash == dht.NodeNameHash(peer.Name)
-			entries = append(entries, routingMapEntry{owner: diag.Name, ownerID: table.SelfID, space: "node_id",
-				peerID: peer.NodeID, peerName: peer.Name, peerHash: peer.NameHash, actual: bucket.Index,
-				expected: expected, distance: distance, valid: valid})
-			checks++
-			if !valid {
-				failures++
-			}
+	audits := make(map[string]routingMapAudit, len(diagnostics))
+	for _, diag := range diagnostics {
+		audit, err := w.addNode(capture, len(census), diag, census)
+		audits[diag.Name] = audit
+		if err != nil {
+			return audits, err
 		}
 	}
-	for _, bucket := range table.NameIndex.Buckets {
-		for _, peer := range bucket.Peers {
-			distance, expected, ok := xorBucket(table.SelfNameHash, peer.NameHash)
-			nameHashOK := peer.Name != "" && peer.NameHash == dht.NodeNameHash(peer.Name)
-			valid := ok && expected == bucket.Index && nameHashOK && strings.HasPrefix(peer.NodeID, "vx6_")
-			entries = append(entries, routingMapEntry{owner: diag.Name, ownerID: table.SelfID, space: "name_hash",
-				peerID: peer.NodeID, peerName: peer.Name, peerHash: peer.NameHash, actual: bucket.Index,
-				expected: expected, distance: distance, valid: valid})
-			checks++
-			if !valid {
-				failures++
+	w.csv.Flush()
+	return audits, w.csv.Error()
+}
+
+func (w *routingMapWriter) addNode(capture string, censusSize int, diag NodeDiagnostics, census []censusPeer) (routingMapAudit, error) {
+	var audit routingMapAudit
+	table := diag.DHT.Table
+	if table.SelfID == "" || table.SelfNameHash == "" || table.SelfID != diag.NodeID || table.SelfNameHash != dht.NodeNameHash(diag.Name) {
+		return audit, fmt.Errorf("%s: missing or inconsistent self XOR coordinates", diag.Name)
+	}
+	entries := make([]routingMapEntry, 0, table.IDIndex.Entries+table.NameIndex.Entries)
+	for _, space := range []string{"node_id", "name_hash"} {
+		selfCoordinate, buckets := table.SelfID, table.IDIndex.Buckets
+		if space == "name_hash" {
+			selfCoordinate, buckets = table.SelfNameHash, table.NameIndex.Buckets
+		}
+		global := make([]routingMapEntry, 0, len(census))
+		for _, peer := range census {
+			if peer.id == table.SelfID {
+				continue
 			}
+			coordinate := peer.id
+			if space == "name_hash" {
+				coordinate = peer.nameHash
+			}
+			distance, bucket, ok := xorBucket(selfCoordinate, coordinate)
+			if !ok {
+				continue
+			}
+			global = append(global, routingMapEntry{owner: diag.Name, ownerID: table.SelfID, space: space,
+				peerID: peer.id, peerName: peer.name, peerHash: peer.nameHash, expected: bucket, distance: distance})
+		}
+		sort.Slice(global, func(i, j int) bool {
+			if global[i].expected != global[j].expected {
+				return global[i].expected < global[j].expected
+			}
+			if cmp := global[i].distance.Cmp(global[j].distance); cmp != 0 {
+				return cmp < 0
+			}
+			return global[i].peerID < global[j].peerID
+		})
+		globalByID := make(map[string]routingMapEntry, len(global))
+		globalBucketRank := make(map[int]int)
+		wanted := make(map[string]bool)
+		for _, entry := range global {
+			globalBucketRank[entry.expected]++
+			entry.globalRank = globalBucketRank[entry.expected]
+			entry.wanted = entry.globalRank <= dht.K
+			globalByID[entry.peerID] = entry
+			if entry.wanted {
+				if space == "node_id" {
+					audit.IDExpected++
+				} else {
+					audit.NameExpected++
+				}
+				wanted[entry.peerID] = true
+			}
+		}
+
+		localByID := make(map[string]routingMapEntry)
+		for _, bucket := range buckets {
+			for _, peer := range bucket.Peers {
+				coordinate := peer.NodeID
+				if space == "name_hash" {
+					coordinate = peer.NameHash
+				}
+				distance, expected, ok := xorBucket(selfCoordinate, coordinate)
+				valid := ok && expected == bucket.Index && peer.NodeID != table.SelfID &&
+					strings.HasPrefix(peer.NodeID, "vx6_") && peer.Name != "" && peer.NameHash == dht.NodeNameHash(peer.Name)
+				entry := routingMapEntry{owner: diag.Name, ownerID: table.SelfID, space: space,
+					peerID: peer.NodeID, peerName: peer.Name, peerHash: peer.NameHash, actual: bucket.Index,
+					expected: expected, distance: distance, inTable: true, placement: "correct"}
+				if !valid {
+					entry.placement = "wrong_bucket_or_identity"
+					audit.Failures++
+				}
+				audit.Checks++
+				localByID[peer.NodeID] = entry
+			}
+		}
+		stored := make([]routingMapEntry, 0, len(localByID))
+		for _, entry := range localByID {
+			stored = append(stored, entry)
+		}
+		sort.Slice(stored, func(i, j int) bool {
+			if stored[i].actual != stored[j].actual {
+				return stored[i].actual < stored[j].actual
+			}
+			if cmp := stored[i].distance.Cmp(stored[j].distance); cmp != 0 {
+				return cmp < 0
+			}
+			return stored[i].peerID < stored[j].peerID
+		})
+		localBucketRank := make(map[int]int)
+		for _, entry := range stored {
+			localBucketRank[entry.actual]++
+			entry.localRank = localBucketRank[entry.actual]
+			if censusEntry, ok := globalByID[entry.peerID]; ok {
+				entry.globalRank, entry.wanted = censusEntry.globalRank, censusEntry.wanted
+			}
+			localByID[entry.peerID] = entry
+			entries = append(entries, entry)
+		}
+		for id := range wanted {
+			if _, present := localByID[id]; present {
+				if space == "node_id" {
+					audit.IDPresent++
+				} else {
+					audit.NamePresent++
+				}
+				continue
+			}
+			entry := globalByID[id]
+			entry.placement = "missing_global_nearest_k"
+			entries = append(entries, entry)
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].owner != entries[j].owner {
-			return entries[i].owner < entries[j].owner
-		}
 		if entries[i].space != entries[j].space {
 			return entries[i].space < entries[j].space
+		}
+		if entries[i].expected != entries[j].expected {
+			return entries[i].expected < entries[j].expected
 		}
 		if cmp := entries[i].distance.Cmp(entries[j].distance); cmp != 0 {
 			return cmp < 0
 		}
 		return entries[i].peerID < entries[j].peerID
 	})
-	var rank int
-	lastOwner, lastSpace := "", ""
 	for _, entry := range entries {
-		if entry.owner != lastOwner || entry.space != lastSpace {
-			rank = 1
-			lastOwner, lastSpace = entry.owner, entry.space
-		} else {
-			rank++
+		localBucket, localRank := "", ""
+		if entry.inTable {
+			localBucket, localRank = fmt.Sprint(entry.actual), fmt.Sprint(entry.localRank)
 		}
-		row := []string{capture, entry.owner, entry.ownerID, entry.space, fmt.Sprint(entry.actual), fmt.Sprint(entry.expected),
-			fmt.Sprint(rank), fmt.Sprintf("%064x", entry.distance), entry.peerName, entry.peerID, entry.peerHash, fmt.Sprint(entry.valid)}
+		row := []string{capture, fmt.Sprint(censusSize), entry.owner, entry.ownerID, entry.space, localBucket,
+			fmt.Sprint(entry.expected), fmt.Sprint(entry.globalRank), localRank, fmt.Sprintf("%064x", entry.distance),
+			entry.peerName, entry.peerID, entry.peerHash, fmt.Sprint(entry.wanted), fmt.Sprint(entry.inTable), entry.placement}
 		if err := w.csv.Write(row); err != nil {
-			return checks, failures, err
+			return audit, err
 		}
 	}
-	w.csv.Flush()
-	return checks, failures, w.csv.Error()
+	return audit, nil
 }
 
 func (w *routingMapWriter) close() error {
@@ -152,7 +252,7 @@ func xorBucket(a, b string) (*big.Int, int, bool) {
 	x := new(big.Int).SetBytes(left)
 	x.Xor(x, new(big.Int).SetBytes(right))
 	if x.Sign() == 0 {
-		return x, -1, false
+		return x, 0, true
 	}
 	return x, x.BitLen() - 1, true
 }

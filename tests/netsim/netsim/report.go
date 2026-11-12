@@ -46,7 +46,7 @@ func coverage(report *Report) []coverageItem {
 		{"Service-record lookup and service reachability", "NOT EXERCISED", "The simnode admin API tests peer identity/name routing only; it does not publish or resolve public/private service records or open a service stream."},
 		{"Malformed or malicious DHT referrals", "NOT EXERCISED", "Attacker-AS nodes are ordinary VX6 peers; this harness does not inject malicious DHT responses."},
 		{"Network partition, churn, and eclipse", "NOT EXERCISED", "Topology primitives exist, but this run path does not apply fault schedules."},
-		{"Per-node XOR indexes and bbolt state", "EXERCISED", "Every capture saves each node's complete NodeID and name-hash indexes, offline/pending entries and bbolt categories/values. routing-map/<capture>.csv.gz independently recomputes each active entry's XOR bucket and local distance rank."},
+		{"Per-node XOR indexes and bbolt state", "EXERCISED", "Every capture saves each node's complete NodeID and name-hash indexes, offline/pending entries and bbolt categories/values. routing-map/<capture>.csv.gz audits local buckets and compares stored contacts with a test-wide nearest-K-per-bucket census."},
 		{"IKEv2/IPsec confidentiality and authentication", "NOT EXERCISED", "The scale tier uses an explicit pass-through tunnel. Use the separate two-peer IPsec suite."},
 	}
 	offTableQueries := 0
@@ -182,15 +182,16 @@ func writeReportFiles(dir string, report *Report) error {
 	if n := len(report.Rounds); n > 0 && len(report.Rounds[n-1].Nodes) > 0 {
 		last := report.Rounds[n-1]
 		fmt.Fprintf(&b, "## Per-node state (final round `%s`)\n\nIn-memory columns come from the routing table; `bbolt` columns come from the node's persisted store.\n\n", last.Label)
-		fmt.Fprintf(&b, "| Node | Active | Offline | Pending | In probation | NodeID buckets | Name-hash buckets | XOR placement errors/checks | bbolt rows | bbolt active/inactive/probation | bbolt closest ID/name | Values valid/total | As lookup source: found/incomplete/not found of total | RSS MiB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&b, "| Node | Active | Offline | Pending | In probation | NodeID buckets | Name-hash buckets | XOR placement errors/checks | Global nearest ID stored/expected | Global nearest name stored/expected | bbolt rows | bbolt active/inactive/probation | bbolt closest ID/name | Values valid/total | As lookup source: found/incomplete/not found of total | RSS MiB |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 		for _, node := range last.Nodes {
 			if node.CaptureError != "" {
-				fmt.Fprintf(&b, "| %s | capture failed: %s | | | | | | | | | | | | |\n", node.Name, strings.ReplaceAll(node.CaptureError, "|", "\\|"))
+				fmt.Fprintf(&b, "| %s | capture failed: %s | | | | | | | | | | | | | |\n", node.Name, strings.ReplaceAll(node.CaptureError, "|", "\\|"))
 				continue
 			}
-			fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %d | %d | %d/%d | %d | %d/%d/%d | %d/%d | %d/%d | %d/%d/%d of %d | %.1f |\n",
+			fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %d | %d | %d/%d | %d/%d | %d/%d | %d | %d/%d/%d | %d/%d | %d/%d | %d/%d/%d of %d | %.1f |\n",
 				node.Name, node.Active, node.Offline, node.Pending, node.InProbation, node.IDBuckets, node.NameBuckets,
-				node.XORPlacementErrors, node.XORPlacementChecks, node.StoreRows, node.StoreActive, node.StoreInactive, node.StoreProbation, node.StoreClosestID, node.StoreClosestName,
+				node.XORPlacementErrors, node.XORPlacementChecks, node.GlobalIDPresent, node.GlobalIDExpected, node.GlobalNamePresent, node.GlobalNameExpected,
+				node.StoreRows, node.StoreActive, node.StoreInactive, node.StoreProbation, node.StoreClosestID, node.StoreClosestName,
 				node.StoreValidValues, node.StoreValues, node.FoundAsSource, node.IncompleteAsSource, node.NotFoundAsSource,
 				node.LookupsAsSource, float64(node.RSSKB)/1024)
 		}
@@ -210,7 +211,7 @@ func writeReportFiles(dir string, report *Report) error {
 	for _, item := range coverage(report) {
 		fmt.Fprintf(&b, "| %s | **%s** | %s |\n", item.name, item.status, item.note)
 	}
-	fmt.Fprintf(&b, "\n## Evidence Files\n\n- `report.json`: parameters, every round, and every lookup probe.\n- `topology.json`: run-specific namespace names and generated topology.\n- `commands.log`: network setup and teardown commands.\n- `snapshots/<round>/<node>.json`: observed active DHT peers, including both identity and name-hash coordinates.\n- `diagnostics/<capture>/<node>.json`: both XOR indexes with every bucket entry, offline/pending peers, bbolt categories and value health (no payloads), per round, restart and idle capture.\n- `routing-map/<capture>.csv.gz`: one row per active peer per index, with actual and independently computed XOR bucket, distance and local rank. This verifies local bucket placement, not globally optimal peer selection.\n- `lookups/<round>.json`: every lookup of the round with its per-round trace, including off-table probes.\n- `nodes/<name>/node.log` and `simnode.out`: per-node logs.\n- `logs/`: FRR logs.\n\nThis is a DHT-scale simulation, not a proof of global DHT completeness, Sybil resistance, or IPsec security. Re-run with the same parameters and seed for repeatability; the random run ID only isolates Linux resources.\n")
+	fmt.Fprintf(&b, "\n## Evidence Files\n\n- `report.json`: parameters, every round, and every lookup probe.\n- `topology.json`: run-specific namespace names and generated topology.\n- `commands.log`: network setup and teardown commands.\n- `snapshots/<round>/<node>.json`: observed active DHT peers, including both identity and name-hash coordinates.\n- `diagnostics/<capture>/<node>.json`: both XOR indexes with every bucket entry, offline/pending peers, bbolt categories and value health (no payloads), per round, restart and idle capture.\n- `routing-map/<capture>.csv.gz`: all stored peers plus globally nearest-K-per-bucket peers missing from that local table. It reports actual/recomputed local bucket, local rank, global bucket rank, and present/missing status. Bucket-placement errors are failures; missing nearest-K contacts are reported as coverage gaps, not misclassified as bad bucket placement.\n- `lookups/<round>.json`: every lookup of the round with its per-round trace, including off-table probes.\n- `nodes/<name>/node.log` and `simnode.out`: per-node logs.\n- `logs/`: FRR logs.\n\nThis is a DHT-scale simulation, not a proof of global membership, Sybil resistance, or IPsec security. The test-wide census measures ideal nearest-K coverage only for nodes captured in that run. Re-run with the same parameters and seed for repeatability; the random run ID only isolates Linux resources.\n")
 	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte(b.String()), 0o600); err != nil {
 		return err
 	}

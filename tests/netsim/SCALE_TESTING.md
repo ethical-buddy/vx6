@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Measure DHT formation and lookup as the simulated network grows beyond the number of peers a single node can keep in its local routing table. The important scale result is not just whether a lookup succeeds: it is whether the target was absent from the requester's relevant local XOR index before the lookup, whether referrals move the search closer, and whether the exact expected identity is returned.
+Measure DHT formation and lookup as the simulated network grows. A larger node count alone does not prove referrals work: the important condition is that a known target is absent from the requester's relevant local XOR index before lookup. Record whether referrals move the search closer and whether the exact expected identity is returned. Because K=20 is not a hard cap, small and medium networks may still retain most or all peers locally.
 
 This is a DHT test. The scale tier runs separate VX6 node processes in isolated Linux network namespaces and uses the simulator's signed-record-gated pass-through transport. It does not test IKEv2, ESP, or IPsec. Those remain a separate two-node test.
 
@@ -12,7 +12,7 @@ Each run writes a Markdown and JSON report, topology and command logs, per-round
 
 The `-off-table-probes` mode runs only in settle rounds. Before selecting a probe, it reads the source node's diagnostics and independently checks that the target is absent from the appropriate active index: NodeID for an ID lookup, name-hash for a name lookup. Reports state the checked index and show candidate pairs available and selected. If no eligible candidates exist, the report shows zero and does not imply referral lookup was tested. Every sampled and off-table request asks for a referral trace; records in `lookups/<round>.json` include the responders, referrals, errors, duplicates, XOR progress and stop reason.
 
-At every diagnostic capture, `routing-map/<capture>.csv.gz` contains each stored active peer in both indexes, its local XOR distance/rank, the bucket actually reported by the node, and the bucket independently recalculated by the runner. A mismatch fails the final run. This verifies that stored entries are filed into the correct local XOR range. It does not prove that the peer learned every globally closest node: no node has a global membership list, and Kademlia buckets are local views.
+At every diagnostic capture, `routing-map/<capture>.csv.gz` contains each stored active peer in both indexes and any globally nearest-K contact absent from that table. It reports local XOR distance/rank, actual and recalculated bucket, global per-bucket rank, and whether the contact is present. A wrong local bucket fails the run; a missing globally-nearest contact is reported as a coverage gap, not as a malformed route. The global census is the set of nodes whose snapshots succeeded in that capture. This gives an independent plane map without pretending that nodes themselves know global membership.
 
 The scale harness exercises bootstrap joining, NodeID lookup and canonical-name lookup. It does not currently exercise a live signed UpdateIP/address-change propagation, service-record lookup, or opening a public/private service stream. UpdateIP signing/rejection has unit coverage elsewhere; that is not the same as proving propagation between live nodes. These missing workflows must be reported as NOT EXERCISED, not counted as passing DHT scale coverage.
 
@@ -61,17 +61,25 @@ The pre-#78 simulator did not exercise referrals: all simulated peer dials faile
 
 The updated #77 runner requests full traces for ordinary sampled and off-table lookups, independently audits local XOR bucket placement, and records each node's full active table and bbolt categories. Rerun it on a Linux host with resource headroom; retain all failures, including timeouts, expired-record errors, rejected referrals, and admin errors.
 
-### Resource estimate for 10,000 nodes
+### Test sizes and what they prove
 
-The 100-node run measured 22.14 MiB average process RSS per node. A straight-line estimate is about 216 GiB for 10,000 simnode processes alone. This estimate excludes FRR, kernel/network-namespace memory, the runner, filesystem cache, and growth in per-node tables; it is a planning estimate, not a guarantee. We did not run 500, 1,000, or 10,000 nodes on the 14.3 GiB local host. Five hundred nodes would already imply roughly 10.8 GiB from simnode RSS alone at the measured average, so it was not safe to attempt here.
+There is no 1,000- or 10,000-process requirement. Daiker's available Linux VM has reached roughly 200 nodes before saturating CPU; use the largest size that completes reliably on the available host, with 200 as the initial target and 300 only if a pilot shows safe headroom. Do not interpret an incomplete or CPU-saturated run as a DHT result.
 
-For a 10,000-node run, use a dedicated Linux host/VM with at least 320 GiB RAM, 32-64 CPU cores, at least 500 GiB free NVMe storage, file-descriptor limit >=100,000, and enough process/PID capacity. These are conservative starting recommendations derived from the 100-node observation and expected full snapshots, not hard simulator requirements. Run the 1,000-node pilot first; stop if memory or disk headroom is insufficient. Do not run on a production machine.
+Use three complementary checks:
+
+1. **Small exact checks (3, 5, 10 nodes):** exhaustively query every directed non-self pair by NodeID and canonical-name hash. These confirm identity/name lookup behavior and the test harness. They often become full-mesh/local-table hits, so do not count them as referral proof.
+2. **Real-process growth and referral checks (up to about 200-300 nodes):** add nodes in waves, capture every node after each wave/settle/idle period, and select only targets known to the test census but absent from the source's matching active XOR index. For every selected lookup, preserve its full referral trace. This is the integration proof for actual processes, network namespace routing, admission, and lookup behavior within the tested size.
+3. **Low-resource virtual-plane check (target 1,000 virtual identities):** add a deterministic in-process test that uses VX6's production XOR bucket and closest-contact selection code, but no OS processes, sockets, FRR, or namespaces. It should exercise incremental joins and idle refresh rounds, compare each node's local tables with a test-only global census, and test ID/name lookups where the target is deliberately absent locally. Report actual bucket placement, per-bucket population, global-nearest-K coverage, lookup path/stop reason, and convergence by round. This is an algorithmic scale check, not a substitute for the real-process run; it must be implemented and independently tested before anyone reports its results.
+
+This split answers two different questions without asking Daiker's host to run thousands of binaries: the bounded process test asks whether real nodes can exchange referrals; the virtual test asks whether the routing math and maintenance logic scale over a larger deterministic population. No passing result from the virtual test alone proves production networking, signed-record verification, liveness, IP updates, or service access.
+
+The current routing table uses dynamic buckets. `K=20` is the normal referral/replication target, not a hard per-bucket cap, and 256 empty bucket headers do not mean 256 populated buckets. Therefore `256 * 20 = 5,120` is not a network or implementation maximum. At small network sizes a node may know nearly every peer; that produces fast local hits but does not exercise referrals. The harness must report the source's pre-lookup local-index state and separately measure only lookups whose known target was absent there.
 
 ## Reproduction on Linux
 
 Requirements: Linux with IPv6, Go matching the repository toolchain, `iproute2`, FRR (`bgpd` and `zebra`), root or equivalent network-namespace capabilities, and a dedicated disposable host. The simulator changes only its run-scoped namespaces and cleans them after normal completion. A hard kill can leave those namespaces; use the documented `teardown` command with that run's `topology.json`. Never use host networking in Docker. If using Docker, it needs the namespace/network administration capabilities required by the nested Linux topology; keep it isolated and disposable.
 
-Build the runner and the simnode from this PR checkout:
+Build the runner and simnode from this PR checkout:
 
 ```sh
 go test ./tests/netsim/...
@@ -82,46 +90,32 @@ go build -o /tmp/vx6-simnode-main ./tests/netsim/simnode
 
 Use the same runner, seed, topology, schedule, settle duration, and lookup options for baseline and current binaries. Build the baseline simnode from pre-fix commit `64dcc57`; build the candidate from merged commit `106d622` plus merged harness guard PR #78. Do not combine binaries in one run. For future runs, record the exact source commit and binary SHA-256 rather than relying on branch names.
 
-First run the 1,000-node resource pilot (250 ASes; same topology distribution):
+Run the bounded process test first. Start at 100 nodes and increase to 200 only if the host has headroom. Use a fresh output directory per run:
 
 ```sh
-sudo install -d -m 0700 -o root -g root /var/tmp/vx6-netsim-1k
+sudo install -d -m 0700 -o root -g root /var/tmp/vx6-netsim-200
 sudo /tmp/vx6-netsim run \
-  -tier1 8 -isps 64 -orgs 178 -attackers 0 \
-  -nodes 1000 \
-  -schedule 1,1,2,4,8,16,32,64,128,256,488 \
+  -tier1 4 -isps 16 -orgs 40 -attackers 0 \
+  -nodes 200 \
+  -schedule 1,1,2,4,8,16,32,64,72 \
   -seed 69 -seeds-per-join 1 \
   -simnode /tmp/vx6-simnode-main \
-  -lookups sample -off-table-probes -probes 500 \
+  -lookups sample -off-table-probes -probes 400 \
   -settle-rounds 2 -settle-gap 60s -restart-count 0 \
   -idle 2m -idle-interval 30s \
-  -out /var/tmp/vx6-netsim-1k
+  -out /var/tmp/vx6-netsim-200
 ```
 
-If the pilot finishes with adequate RAM and disk headroom, run the 10,000-node profile (250 ASes; 15 growth waves; one bootstrap contact per join):
+The 200-node example uses 60 ASes to keep topology diversity while staying within the host limit Daiker observed. If a 200-node run saturates the machine or misses namespace deadlines, keep the smaller completed size and report the resource limit; do not force 300. `-probes 400` is an upper bound per settle round, not a promise that 400 eligible pairs exist. The report must show the eligible and selected denominators separately.
 
-```sh
-sudo install -d -m 0700 -o root -g root /var/tmp/vx6-netsim-10k-main
-sudo /tmp/vx6-netsim run \
-  -tier1 8 -isps 64 -orgs 178 -attackers 0 \
-  -nodes 10000 \
-  -schedule 1,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,1808 \
-  -seed 69 -seeds-per-join 1 \
-  -simnode /tmp/vx6-simnode-main \
-  -lookups sample -off-table-probes -probes 1000 \
-  -settle-rounds 2 -settle-gap 60s -restart-count 0 \
-  -idle 2m -idle-interval 30s \
-  -out /var/tmp/vx6-netsim-10k-main
-```
-
-For a baseline comparison, build a separate simnode from the recorded pre-#76 commit `64dcc57`; build the candidate from current `main`. Use this PR's runner for both runs. Run the same topology, seed, schedule, settle duration, and probe count against each simnode. Do not mix node binaries in one run. Use a fresh output directory for every run. The generated topology hash and binary hashes are recorded for comparison. Set `-probes 1000` for the 10k run; this means up to 1,000 individual off-table lookups per settle round, split across NodeID and name-hash probes based on eligible targets. Inspect `routing-map/idle-*.csv.gz` to see the full idle routing map and verify local bucket placement.
+For a before/after comparison, build one candidate simnode from recorded pre-#76 commit `64dcc57` and one from current `main`, then run each separately with the exact same size, seed, schedule, and probe options. Do not mix binaries in one network. Inspect `routing-map/idle-*.csv.gz` for every completed idle capture.
 
 The scale run is **MEASURED**, not a blanket PASS. Report, at minimum:
 
 1. For each join wave and settle round: node count, successful/failed snapshots, active/offline/pending counts, probation, both index bucket counts and occupancy, bbolt rows/categories/values, lookup outcomes, query/round counts, latency, per-node and total RSS, CPU time, host memory, and cleanup status.
 2. Off-table probes: eligible and selected denominator; ID and name-hash results separately; exact target found, reachable-view miss, incomplete, conflict, and errors; lookup traces showing each referral and whether XOR distance improved.
 3. Per-node snapshots and the sanitized full output directory/archive. Keep private keys and PID namespaces out of anything uploaded publicly.
-4. Compare the pre-#76 baseline against merged #76 behavior only on the same topology and build tools. Explain any revision, configuration, or hardware difference.
+4. Compare pre-#76 baseline against current behavior only at a size the host can complete reliably. Explain any revision, configuration, or hardware difference.
 
 ## Interpretation Limits
 
