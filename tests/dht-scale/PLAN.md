@@ -61,6 +61,7 @@ Then increase one stage at a time:
 ```sh
 go run ./tests/dht-scale -nodes 500 -pairs 250 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-500
 go run ./tests/dht-scale -nodes 1000 -pairs 500 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-1000
+go run ./tests/dht-scale -nodes 2000 -pairs 1000 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-2000
 go run ./tests/dht-scale -nodes 10000 -pairs 0 -repair-rounds 2 -seed 75 -out /tmp/vx6-dht-10000
 ```
 
@@ -70,7 +71,7 @@ Detailed per-node join, lookup, and final-snapshot JSON artifacts are gzip-compr
 /usr/bin/time -v go run ./tests/dht-scale -nodes 500 -pairs 250 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-500
 ```
 
-Always use a fresh output path. Keep the complete output directory for each run. Record CPU model/core count, RAM, kernel, Go version, exact command, commit SHA, and whether the host was otherwise idle. Do not run multiple scale jobs in parallel on the same host when comparing resource numbers. A 500-node baseline before repair artifacts used about 456 MiB Go heap-system space, 1,001 goroutines, and 232 MB of output. Repair rounds add two lookups per node per round plus full per-node snapshots and traces, so measure output size before starting 10,000 nodes. Ensure adequate free disk (at least 10 GB is a reasonable starting margin for the 10,000-node evidence run) and monitor actual RSS with `/usr/bin/time -v`; stop if the filesystem approaches capacity or the process approaches available RAM. These are conservative test-host estimates, not VX6 production requirements or a guarantee that a run will fit every host. The harness accepts up to 10,000 nodes; this is a test guard, not a VX6 network limit.
+Always use a fresh output path. Keep the complete output directory for each run. Record CPU model/core count, RAM, kernel, Go version, exact command, commit SHA, and whether the host was otherwise idle. Do not run multiple scale jobs in parallel on the same host when comparing resource numbers. A 500-node baseline before repair artifacts used about 456 MiB Go heap-system space, 1,001 goroutines, and 232 MB of output. The first 2,000-node repair run used about 2.28 GiB Go heap-system, created 133,827 bbolt rows / 730.6 MB of database files, and wrote 709 MB of full artifacts. For a 10,000-node run, use a host with at least 32 GB RAM and 20 GB free disk as a conservative starting point, use a disk-backed output directory (not quota-limited `/tmp` or tmpfs), and monitor actual RSS with `/usr/bin/time -v`; stop if the filesystem approaches capacity or the process approaches available RAM. These are conservative test-host estimates, not VX6 production requirements or a guarantee that a run will fit every host. The harness accepts up to 10,000 nodes; this is a test guard, not a VX6 DHT node limit.
 
 ## Staged Execution and Stop Rules
 
@@ -79,7 +80,8 @@ Always use a fresh output path. Keep the complete output directory for each run.
 3. `100` nodes: first meaningful growth sample; inspect every snapshot and failed trace.
 4. `500` nodes: compare each repair round's completion, peer-degree distribution, global-top-four recall, database size, heap, process RSS, and CPU. Check whether each metric stabilizes or improves across rounds.
 5. `1,000` nodes: run only after 500 finishes cleanly and resource use is acceptable.
-6. `10,000` nodes: run only after checking free disk and memory against the measured 500/1,000 growth. Use `-pairs 0` and two repair rounds for the first capacity run; it still performs both repair lookups for every node and one sampled positive target per node per coordinate. Capture process RSS, CPU, duration, and all compressed snapshots/traces. Do not run this concurrently with another scale job.
+6. `2,000` nodes: inspect lookup completion and repair-round stability before assigning the 10,000-node run.
+7. `10,000` nodes: run on a disk-backed host with at least 32 GB RAM and 20 GB free disk, only after checking the 2,000-node run. Use `-pairs 0` and two repair rounds for the first capacity run; it still performs both repair lookups for every node and one sampled positive target per node per coordinate. Capture process RSS, CPU, duration, and all compressed snapshots/traces. Do not run this concurrently with another scale job.
 
 Stop and investigate before increasing size if any node has zero active contacts after joining, a lookup has a target present in its reachable topology but fails to find it, referrals fail signature verification, traces omit expected queries, the bbolt snapshot differs from memory without an explained retention rule, output size or runtime grows unexpectedly, or the host approaches memory/FD limits. Report incomplete lookups separately from not-found results. Never convert exhausted local search into proof of global absence.
 
