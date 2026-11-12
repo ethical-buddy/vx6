@@ -65,7 +65,7 @@ For comparable resource readings, run:
 /usr/bin/time -v go run ./tests/dht-scale -nodes 500 -pairs 250 -seed 75 -out /tmp/vx6-dht-500
 ```
 
-Always use a fresh output path. Keep the complete output directory for each run. Record CPU model/core count, RAM, kernel, Go version, exact command, commit SHA, and whether the host was otherwise idle. Do not run multiple scale jobs in parallel on the same host when comparing resource numbers. A 500-node local baseline from this runner used about 428 MB Go heap-system space, 1,001 goroutines, and 231 MB of report/database files; use at least 8 GB RAM and 5 GB free disk for the first 1,000-node attempt, and watch actual RSS with `/usr/bin/time -v`. These are conservative test-host estimates, not VX6 production requirements or a guarantee that 1,000 will fit every host.
+Always use a fresh output path. Keep the complete output directory for each run. Record CPU model/core count, RAM, kernel, Go version, exact command, commit SHA, and whether the host was otherwise idle. Do not run multiple scale jobs in parallel on the same host when comparing resource numbers. A 500-node local baseline used about 456 MiB Go heap-system space, 1,001 goroutines, and 232 MB of report/database files; use at least 8 GB RAM and 5 GB free disk for the first 1,000-node attempt, and watch actual RSS with `/usr/bin/time -v`. These are conservative test-host estimates, not VX6 production requirements or a guarantee that 1,000 will fit every host.
 
 ## Staged Execution and Stop Rules
 
