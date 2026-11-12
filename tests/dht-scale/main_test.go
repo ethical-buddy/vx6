@@ -45,6 +45,24 @@ func TestTopRecallCountsOverlapAgainstOracle(t *testing.T) {
 	}
 }
 
+func TestDetailedArtifactsAreRecognizedForAbsoluteAndRelativePaths(t *testing.T) {
+	for _, path := range []string{
+		"/tmp/vx6-run/lookups/000001.json",
+		"/tmp/vx6-run/join/000001.json",
+		"/tmp/vx6-run/snapshots/all-nodes.json",
+		"lookups/index.json",
+	} {
+		if !detailedArtifactPath(path) {
+			t.Errorf("detailed artifact path not recognized: %s", path)
+		}
+	}
+	for _, path := range []string{"report.json", "/tmp/vx6-run/host.json"} {
+		if detailedArtifactPath(path) {
+			t.Errorf("summary artifact should remain uncompressed: %s", path)
+		}
+	}
+}
+
 func TestSummarySeparatesIncompleteMatchesFromNegativeControls(t *testing.T) {
 	rows := []lookupSample{
 		{Space: "node_id", FoundTarget: true, Outcome: string(dht.LookupFound)},

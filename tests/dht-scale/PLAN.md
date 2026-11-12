@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This test answers a bounded question: as a VX6 overlay grows by nodes joining through existing contacts, do the production DHT tables and iterative NodeID/name-hash lookup code learn and find signed peer identities? It records enough state to explain a miss instead of reporting only a success percentage.
+This test answers a bounded question: as a VX6 overlay grows by nodes joining through existing contacts, do the production DHT tables and iterative NodeID/name-hash lookup code learn and find signed peer identities, and do repeated network-wide repair passes improve local routing state? It records enough state to explain a miss instead of reporting only a success percentage.
 
-It does not claim to prove that every online node is always discoverable, that the DHT is secure against Sybil/eclipse attacks, or that IKE/IPsec works. The runner uses the production `internal/dht.Server`, `RoutingTable`, DHT wire request validation/handler, signed endpoint-record code, and iterative lookup. Each simulated node is an in-process Go server on a distinct IPv6 loopback TCP port. IKE, ESP, public Internet routing, and cross-machine behavior are intentionally outside this test; see `tests/ipsec-e2e` for the separate two-peer IPsec proof.
+It does not claim to prove that every online node is always discoverable, that the DHT is secure against Sybil/eclipse attacks, or that IKE/IPsec works. The runner uses the production `internal/dht.Server`, `RoutingTable`, DHT wire request validation/handler, signed endpoint-record code, and iterative lookup. Each simulated node is an in-process Go server on a distinct IPv6 loopback TCP port. IKE, ESP, public Internet routing, the full `vx6` binary lifecycle, and cross-machine behavior are intentionally outside this test; see `tests/ipsec-e2e` for the separate two-peer IPsec proof.
 
 ## Why This Shape
 
@@ -21,19 +21,23 @@ It does not claim to prove that every online node is always discoverable, that t
 2. Start node zero as the initial contact.
 3. For each new node, select one existing contact using the recorded seed. Add only the directly contacted pair to each other's active routing table to model a successful authenticated peer exchange.
 4. Ask that one contact for bootstrap referrals using the joining node's complete NodeID. Verify each referral's signed endpoint record, issue a DHT query to it, and add it only after it responds.
-5. The entrant then performs its own iterative lookup for its NodeID and canonical name hash. Each lookup has its production 20-round/4-parallel/80-query/10-second protocol ceilings. Successful responders with valid signed endpoint records are promoted in the simulated local table.
+5. The entrant performs one iterative self-lookup for its NodeID and canonical name hash during join. Each lookup has its production 20-round/4-parallel/80-query/10-second protocol ceilings. Successful responders with valid signed endpoint records are promoted in the simulated local table.
 6. The entrant models announcements to the four closest responsive peers in each coordinate space. Their tables are updated as if the subsequent peer-authenticated contact exchange completed. This is a topology/admission model only: the runner does not perform IKE or Ed25519 private-key proof, and the report says so explicitly.
 7. Save bootstrap contacts, referrals, self-lookup traces, responsive peers, and modeled announcements in `join/`.
 8. After all joins, target every node once from a different sampled node in both lookup spaces: NodeID and canonical name hash. Also run `-pairs` seeded random source/target pairs in both spaces, plus two negative controls for identities that are not in the network.
 9. For every lookup, attach the production lookup trace. Record seeds, each queried responder, errors/timeouts, returned referrals, XOR shared-prefix progress, duplicate/rejected contacts, stop reason, query count, rounds, found identity, and elapsed time.
-10. At final capture, export every active/offline/pending entry in both routing indexes and persist peer observations to one bbolt file per simulated node. Reopen each database and load candidates to verify the storage round-trip. The tables are two XOR views over one local active peer set; they are not two globally complete databases.
+10. After all nodes join, run `-repair-rounds` network-wide repair passes (default 3). In each pass, visit every node in a seeded shuffled order, run a self-lookup in each coordinate, promote successful responders, and model reciprocal announcements to the four closest responsive peers per coordinate. Save every repair lookup trace and a compressed full routing-table snapshot after each pass. These are immediate explicit rounds, not a wait for the daemon timer or a fake-clock test of its scheduling.
+11. Run the sampled target and negative-control lookups after repair. At final capture, export every active/offline/pending entry in both routing indexes and persist peer observations to one bbolt file per simulated node. Reopen each database and load candidates to verify the storage round-trip. The tables are two XOR views over one local active peer set; they are not two globally complete databases.
 
 ## What the Report Contains
 
 - `report.md` and `report.json`: version, revision, seed, actual lookup limits, population, complete-found versus found-but-incomplete counts, positive and negative lookup outcomes split by coordinate, exact-top-four comparisons, query and elapsed-time percentiles, local peer counts, bucket totals and placement audit, bbolt rows/bytes, heap use, goroutine count, and run duration.
-- `snapshots/all-nodes.json`: every node's complete public signed identity record (NodeID, name, IPv6 loopback endpoint, public key, sequence/times, signature), join index, active/offline/pending counts, both indexes' non-empty buckets, bucket occupancy, peer metadata, liveness/probation/use observations, and bbolt category membership. Private keys are never emitted.
-- `lookups/index.json`: compact index of all attempts. Each `lookups/NNNNNN-*.json` includes that attempt's full routing trace and independent global top-four oracle.
-- `join/NNNNNN.json`: bootstrap contact, referrals, self-lookups, and reciprocal announcements modeled for each join. Separate files hold the full self-lookup traces.
+- `snapshots/all-nodes.json.gz`: every node's complete public signed identity record (NodeID, name, IPv6 loopback endpoint, public key, sequence/times, signature), join index, active/offline/pending counts, both indexes' non-empty buckets, bucket occupancy, peer metadata, liveness/probation/use observations, and bbolt category membership. Private keys are never emitted.
+- `lookups/index.json.gz`: compact index of all attempts. Each `lookups/NNNNNN-*.json.gz` includes that attempt's full routing trace and independent global top-four oracle.
+- `join/NNNNNN.json.gz`: bootstrap contact, referrals, self-lookups, and reciprocal announcements modeled for each join. Separate compressed files hold the full self-lookup traces.
+- `repair/round-NN.json`: aggregate completion, query count, active degree, and global-nearest-peer recall for a maintenance pass.
+- `repair/traces/round-NN-lookups.jsonl.gz`: one full result and routing trace for every node's NodeID and name-hash self-lookup in that pass.
+- `repair/round-NN-snapshot.jsonl.gz`: one complete two-index routing-table diagnostic snapshot per node after that pass, including bucket contents and local liveness/usage metadata.
 - `stores/NNNNNN.db`: the bbolt peer store created from that node's final observation snapshot, reopened and read back as part of the run. It contains no private keys.
 - `host.json`: Go/runtime/platform context. Use `/usr/bin/time -v` around the command for process peak RSS and CPU time; do not interpret Go heap as total process RSS.
 
@@ -49,31 +53,33 @@ From the repository root:
 go test ./tests/dht-scale
 go run ./tests/dht-scale -nodes 3 -pairs 4 -seed 75 -out /tmp/vx6-dht-3
 go run ./tests/dht-scale -nodes 10 -pairs 20 -seed 75 -out /tmp/vx6-dht-10
-go run ./tests/dht-scale -nodes 100 -pairs 100 -seed 75 -out /tmp/vx6-dht-100
+go run ./tests/dht-scale -nodes 100 -pairs 100 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-100
 ```
 
 Then increase one stage at a time:
 
 ```sh
-go run ./tests/dht-scale -nodes 500 -pairs 250 -seed 75 -out /tmp/vx6-dht-500
-go run ./tests/dht-scale -nodes 1000 -pairs 500 -seed 75 -out /tmp/vx6-dht-1000
+go run ./tests/dht-scale -nodes 500 -pairs 250 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-500
+go run ./tests/dht-scale -nodes 1000 -pairs 500 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-1000
+go run ./tests/dht-scale -nodes 10000 -pairs 0 -repair-rounds 2 -seed 75 -out /tmp/vx6-dht-10000
 ```
 
-For comparable resource readings, run:
+Detailed per-node join, lookup, and final-snapshot JSON artifacts are gzip-compressed by default; pass `-compress-artifacts=false` for plain JSON. Repair traces and per-round snapshots are always compressed JSONL. For comparable resource readings, run:
 
 ```sh
-/usr/bin/time -v go run ./tests/dht-scale -nodes 500 -pairs 250 -seed 75 -out /tmp/vx6-dht-500
+/usr/bin/time -v go run ./tests/dht-scale -nodes 500 -pairs 250 -repair-rounds 3 -seed 75 -out /tmp/vx6-dht-500
 ```
 
-Always use a fresh output path. Keep the complete output directory for each run. Record CPU model/core count, RAM, kernel, Go version, exact command, commit SHA, and whether the host was otherwise idle. Do not run multiple scale jobs in parallel on the same host when comparing resource numbers. A 500-node local baseline used about 456 MiB Go heap-system space, 1,001 goroutines, and 232 MB of report/database files; use at least 8 GB RAM and 5 GB free disk for the first 1,000-node attempt, and watch actual RSS with `/usr/bin/time -v`. These are conservative test-host estimates, not VX6 production requirements or a guarantee that 1,000 will fit every host.
+Always use a fresh output path. Keep the complete output directory for each run. Record CPU model/core count, RAM, kernel, Go version, exact command, commit SHA, and whether the host was otherwise idle. Do not run multiple scale jobs in parallel on the same host when comparing resource numbers. A 500-node baseline before repair artifacts used about 456 MiB Go heap-system space, 1,001 goroutines, and 232 MB of output. Repair rounds add two lookups per node per round plus full per-node snapshots and traces, so measure output size before starting 10,000 nodes. Ensure adequate free disk (at least 10 GB is a reasonable starting margin for the 10,000-node evidence run) and monitor actual RSS with `/usr/bin/time -v`; stop if the filesystem approaches capacity or the process approaches available RAM. These are conservative test-host estimates, not VX6 production requirements or a guarantee that a run will fit every host. The harness accepts up to 10,000 nodes; this is a test guard, not a VX6 network limit.
 
 ## Staged Execution and Stop Rules
 
 1. `3` nodes: harness smoke test, signed-record verification, lookup trace completeness, report validity.
 2. `10` nodes: sanity-check staged joining and both routing coordinates.
 3. `100` nodes: first meaningful growth sample; inspect every snapshot and failed trace.
-4. `500` nodes: compare lookup success, peer-degree distribution, global-top-four recall, database size, heap, process RSS, and CPU against 100.
-5. `1,000` nodes: run only after 500 finishes cleanly and resource use is acceptable. Consider 2,000 next only if resource scaling remains predictable. The tool has a hard 5,000-node input guard; that is a harness safety ceiling, not a VX6 DHT node limit.
+4. `500` nodes: compare each repair round's completion, peer-degree distribution, global-top-four recall, database size, heap, process RSS, and CPU. Check whether each metric stabilizes or improves across rounds.
+5. `1,000` nodes: run only after 500 finishes cleanly and resource use is acceptable.
+6. `10,000` nodes: run only after checking free disk and memory against the measured 500/1,000 growth. Use `-pairs 0` and two repair rounds for the first capacity run; it still performs both repair lookups for every node and one sampled positive target per node per coordinate. Capture process RSS, CPU, duration, and all compressed snapshots/traces. Do not run this concurrently with another scale job.
 
 Stop and investigate before increasing size if any node has zero active contacts after joining, a lookup has a target present in its reachable topology but fails to find it, referrals fail signature verification, traces omit expected queries, the bbolt snapshot differs from memory without an explained retention rule, output size or runtime grows unexpectedly, or the host approaches memory/FD limits. Report incomplete lookups separately from not-found results. Never convert exhausted local search into proof of global absence.
 
@@ -97,7 +103,7 @@ Do not label a run “perfect,” “secure,” or “globally complete.” A us
 ## Known Gaps / Follow-up Tests
 
 - The simulator models signed-record checks and successful DHT responses, then models peer admission/announcement. It does not perform IKE authentication or prove possession of the Ed25519 private key through the real node ingress path.
-- Admission and reciprocal announcements after self-lookup are modeled in the harness; they do not exercise the production node lifecycle. Compare with `tests/netsim` and a future node-level test for that contract.
+- Admission and reciprocal announcements after self-lookup are modeled in the harness; they do not exercise the production node lifecycle. The repair rounds invoke production DHT lookup/table code directly but do not wait for or trigger the real daemon's maintenance scheduler. Compare with `tests/netsim` and a future node-level test for that contract.
 - This run does not advance a fake clock through the five-minute liveness cadence, three misses, two-hour probation, or 30-day offline retention. Those need clock-injected unit/integration scenarios.
 - It does not simulate route loss, endpoint address change, ASN/prefix distribution, malicious referrals, Sybil/eclipsing peers, node restart, service publishing, or private-service authorization.
 - Loopback latency and packet delivery are not Internet measurements. Use a separate namespace/FRR test for topology/routing behavior and the two-peer IPsec test for ESP.

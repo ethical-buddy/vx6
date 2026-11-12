@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -27,6 +29,8 @@ import (
 	"github.com/vx6/vx6/internal/record"
 )
 
+var compressDetailedArtifacts bool
+
 type peer struct {
 	id     identity.Identity
 	info   proto.NodeInfo
@@ -50,6 +54,7 @@ type lookupSample struct {
 	Queries        int              `json:"queries"`
 	Rounds         int              `json:"rounds"`
 	DurationMS     float64          `json:"duration_ms"`
+	TraceFile      string           `json:"trace_file"`
 	Trace          *dht.LookupTrace `json:"trace"`
 }
 
@@ -116,16 +121,17 @@ type metrics struct {
 }
 
 type report struct {
-	Schema       string             `json:"schema"`
-	Revision     string             `json:"revision"`
-	Seed         int64              `json:"seed"`
-	StartedAt    time.Time          `json:"started_at"`
-	FinishedAt   time.Time          `json:"finished_at"`
-	Platform     string             `json:"platform"`
-	Transport    string             `json:"transport"`
-	LookupPolicy dht.CapacityPolicy `json:"routing_capacity_policy"`
-	Metrics      metrics            `json:"metrics"`
-	JoinLog      []joinEvent        `json:"join_log"`
+	Schema       string              `json:"schema"`
+	Revision     string              `json:"revision"`
+	Seed         int64               `json:"seed"`
+	StartedAt    time.Time           `json:"started_at"`
+	FinishedAt   time.Time           `json:"finished_at"`
+	Platform     string              `json:"platform"`
+	Transport    string              `json:"transport"`
+	LookupPolicy dht.CapacityPolicy  `json:"routing_capacity_policy"`
+	Metrics      metrics             `json:"metrics"`
+	JoinLog      []joinEvent         `json:"join_log"`
+	RepairRounds []repairRoundReport `json:"repair_rounds"`
 }
 
 type joinEvent struct {
@@ -142,14 +148,61 @@ type joinEvent struct {
 	AdmissionNote           string   `json:"admission_model_note"`
 }
 
+type repairRoundReport struct {
+	Round                int       `json:"round"`
+	StartedAt            time.Time `json:"started_at"`
+	FinishedAt           time.Time `json:"finished_at"`
+	Nodes                int       `json:"nodes"`
+	Lookups              int       `json:"self_lookups"`
+	Complete             int       `json:"complete_lookups"`
+	Incomplete           int       `json:"incomplete_lookups"`
+	Errors               int       `json:"lookup_errors"`
+	QueriedPeers         int       `json:"queried_peers"`
+	MeanActivePeers      float64   `json:"mean_active_peers"`
+	MinActivePeers       int       `json:"min_active_peers"`
+	MaxActivePeers       int       `json:"max_active_peers"`
+	IDGlobalTop4Recall   float64   `json:"node_id_global_top4_recall_percent"`
+	NameGlobalTop4Recall float64   `json:"name_hash_global_top4_recall_percent"`
+	SnapshotFile         string    `json:"snapshot_file"`
+	TraceFile            string    `json:"trace_file"`
+}
+
+type repairNodeSnapshot struct {
+	NodeID     string               `json:"node_id"`
+	Name       string               `json:"name"`
+	Active     int                  `json:"active_peers"`
+	IDRecall   float64              `json:"node_id_global_top4_recall_percent"`
+	NameRecall float64              `json:"name_hash_global_top4_recall_percent"`
+	Table      dht.TableDiagnostics `json:"table"`
+}
+
+type oraclePeer struct {
+	info     proto.NodeInfo
+	nodeID   [32]byte
+	nameHash [32]byte
+}
+
+type rankedPeer struct {
+	info proto.NodeInfo
+	dist [32]byte
+}
+
+type xorOracle struct {
+	peers []*oraclePeer
+	cache map[string][]proto.NodeInfo
+}
+
 func main() {
 	nodes := flag.Int("nodes", 100, "number of simulated nodes (start with 3, 10, 100, then 500/1000)")
 	pairs := flag.Int("pairs", 200, "additional seeded random source/target pairs; every target is also looked up from a sampled source")
+	repairRounds := flag.Int("repair-rounds", 3, "post-growth network-wide self-lookup and reciprocal-announcement rounds; set 0 to disable")
+	compressArtifacts := flag.Bool("compress-artifacts", true, "gzip detailed per-node join, lookup, and final-snapshot JSON artifacts")
 	seed := flag.Int64("seed", 75, "deterministic topology and lookup sampling seed")
 	out := flag.String("out", "", "new output directory; defaults to ./dht-scale-<nodes>-<UTC timestamp>")
 	flag.Parse()
-	if *nodes < 2 || *nodes > 5000 || *pairs < 0 {
-		fatal("nodes must be 2..5000 and pairs must be nonnegative")
+	compressDetailedArtifacts = *compressArtifacts
+	if *nodes < 2 || *nodes > 10000 || *pairs < 0 || *repairRounds < 0 || *repairRounds > 10 {
+		fatal("nodes must be 2..10000, pairs nonnegative, and repair-rounds 0..10")
 	}
 	started := time.Now().UTC()
 	if *out == "" {
@@ -158,10 +211,13 @@ func main() {
 	if _, err := os.Stat(*out); err == nil {
 		fatal("output path already exists: %s", *out)
 	}
-	for _, dir := range []string{"snapshots", "lookups", "stores", "join"} {
+	for _, dir := range []string{"snapshots", "lookups", "stores", "join", "repair"} {
 		if err := os.MkdirAll(filepath.Join(*out, dir), 0o700); err != nil {
 			fatal("create output directory: %v", err)
 		}
+	}
+	if err := os.MkdirAll(filepath.Join(*out, "repair", "traces"), 0o700); err != nil {
+		fatal("create repair trace directory: %v", err)
 	}
 	rng := rand.New(rand.NewSource(*seed))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -225,6 +281,17 @@ func main() {
 		writeJSON(filepath.Join(*out, "join", fmt.Sprintf("%06d.json", i)), event)
 	}
 	defer closePeers(peers)
+	oracle := newXOROracle(peers)
+
+	// Joining nodes self-lookup once as they enter. These additional rounds
+	// model the network-wide maintenance needed after later nodes have joined.
+	// The production timer/wait lifecycle is not run by this simulator.
+	repairReports := make([]repairRoundReport, 0, *repairRounds)
+	for round := 1; round <= *repairRounds; round++ {
+		report := runRepairRound(ctx, round, peers, oracle, rng, *out)
+		repairReports = append(repairReports, report)
+		writeJSON(filepath.Join(*out, "repair", fmt.Sprintf("round-%02d.json", round)), report)
+	}
 
 	lookups := make([]lookupSample, 0, 2*(*nodes+*pairs))
 	lookupSequence := 0
@@ -236,7 +303,7 @@ func main() {
 			if sourceIndex == targetIndex {
 				sourceIndex = (sourceIndex + 1) % *nodes
 			}
-			lookups = append(lookups, runLookup(ctx, lookupSequence, false, peers[sourceIndex], target, byName, peers, *out))
+			lookups = append(lookups, runLookup(ctx, lookupSequence, false, peers[sourceIndex], target, byName, oracle, *out))
 			lookupSequence++
 		}
 	}
@@ -247,7 +314,7 @@ func main() {
 			targetIndex++
 		}
 		for _, byName := range []bool{false, true} {
-			lookups = append(lookups, runLookup(ctx, lookupSequence, false, peers[sourceIndex], peers[targetIndex], byName, peers, *out))
+			lookups = append(lookups, runLookup(ctx, lookupSequence, false, peers[sourceIndex], peers[targetIndex], byName, oracle, *out))
 			lookupSequence++
 		}
 	}
@@ -255,7 +322,7 @@ func main() {
 	missing := &peer{info: proto.NodeInfo{ID: "vx6_" + hex.EncodeToString(missingIDHash[:]), Name: fmt.Sprintf("MISSING-%d", *seed)}}
 	missing.info.NameHash = dht.NodeNameHash(missing.info.Name)
 	for _, byName := range []bool{false, true} {
-		lookups = append(lookups, runLookup(ctx, lookupSequence, true, peers[rng.Intn(*nodes)], missing, byName, peers, *out))
+		lookups = append(lookups, runLookup(ctx, lookupSequence, true, peers[rng.Intn(*nodes)], missing, byName, oracle, *out))
 		lookupSequence++
 	}
 	writeJSON(filepath.Join(*out, "lookups", "index.json"), lookups)
@@ -293,8 +360,8 @@ func main() {
 	if *nodes > 0 {
 		m.MeanActivePeers = float64(activeTotal) / float64(*nodes)
 		for _, p := range peers {
-			m.IDGlobalTop4Recall += topRecall(p.server.RT.ClosestNodes(p.info.ID, 4), independentTop(peers, p.info.ID, false, 4))
-			m.NameGlobalTop4Recall += topRecall(p.server.RT.ClosestNodesByNameHash(p.info.NameHash, 4), independentTop(peers, p.info.NameHash, true, 4))
+			m.IDGlobalTop4Recall += topRecall(p.server.RT.ClosestNodes(p.info.ID, 4), oracle.Top(p.info.ID, false, 4))
+			m.NameGlobalTop4Recall += topRecall(p.server.RT.ClosestNodesByNameHash(p.info.NameHash, 4), oracle.Top(p.info.NameHash, true, 4))
 		}
 		m.IDGlobalTop4Recall /= float64(*nodes)
 		m.NameGlobalTop4Recall /= float64(*nodes)
@@ -307,10 +374,10 @@ func main() {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	m.HeapAllocBytes, m.HeapSysBytes, m.Goroutines = mem.HeapAlloc, mem.HeapSys, runtime.NumGoroutine()
-	rv := report{Schema: "vx6-dht-scale-report/v1", Seed: *seed, StartedAt: started,
+	rv := report{Schema: "vx6-dht-scale-report/v2", Seed: *seed, StartedAt: started,
 		FinishedAt: time.Now().UTC(), Platform: runtime.GOOS + "/" + runtime.GOARCH,
 		Transport:    "production VX6 DHT wire protocol over IPv6 loopback TCP; IPsec intentionally bypassed",
-		LookupPolicy: dht.CapacityPolicyInfo(), Metrics: m, JoinLog: joinLog}
+		LookupPolicy: dht.CapacityPolicyInfo(), Metrics: m, JoinLog: joinLog, RepairRounds: repairReports}
 	if revision := os.Getenv("VX6_BUILD_REVISION"); revision != "" {
 		rv.Revision = revision
 	} else if info, ok := debug.ReadBuildInfo(); ok {
@@ -429,6 +496,102 @@ func announceClosest(joiner *peer, target string, byName bool, responders map[st
 	}
 }
 
+func runRepairRound(ctx context.Context, round int, peers []*peer, oracle *xorOracle, rng *rand.Rand, out string) repairRoundReport {
+	started := time.Now().UTC()
+	report := repairRoundReport{Round: round, StartedAt: started, Nodes: len(peers), Lookups: 2 * len(peers),
+		MinActivePeers: len(peers), SnapshotFile: filepath.Join("repair", fmt.Sprintf("round-%02d-snapshot.jsonl.gz", round)),
+		TraceFile: filepath.Join("repair", "traces", fmt.Sprintf("round-%02d-lookups.jsonl.gz", round))}
+	tracePath := filepath.Join(out, report.TraceFile)
+	traceFile, err := os.Create(tracePath)
+	if err != nil {
+		fatal("create repair trace file: %v", err)
+	}
+	traceGzip := gzip.NewWriter(traceFile)
+	traceEncoder := json.NewEncoder(traceGzip)
+	order := rng.Perm(len(peers))
+	for _, index := range order {
+		p := peers[index]
+		idResult, idTrace, idErr := repairLookup(ctx, p, dht.NodeIDKey(p.info.ID))
+		nameResult, nameTrace, nameErr := repairLookup(ctx, p, dht.NodeNameKey(p.info.Name))
+		for _, item := range []struct {
+			space  string
+			result dht.NodeLookupResult
+			trace  *dht.LookupTrace
+			err    error
+		}{{"node_id", idResult, idTrace, idErr}, {"name_hash", nameResult, nameTrace, nameErr}} {
+			if item.result.Outcome == dht.LookupIncomplete {
+				report.Incomplete++
+			} else if item.err != nil {
+				report.Errors++
+			} else {
+				report.Complete++
+			}
+			report.QueriedPeers += item.result.QueriedNodes
+			if err := traceEncoder.Encode(map[string]any{"round": round, "node_id": p.info.ID, "name": p.info.Name,
+				"space": item.space, "result": item.result, "error": errorString(item.err), "trace": item.trace}); err != nil {
+				fatal("encode repair lookup trace: %v", err)
+			}
+		}
+		responders := promoteResponders(p, peers, idTrace, nameTrace)
+		announced := make(map[string]struct{})
+		announceClosest(p, dht.NodeIDKey(p.info.ID), false, responders, announced)
+		announceClosest(p, dht.NodeNameKey(p.info.Name), true, responders, announced)
+	}
+	if err := traceGzip.Close(); err != nil {
+		fatal("close repair trace gzip: %v", err)
+	}
+	if err := traceFile.Close(); err != nil {
+		fatal("close repair trace file: %v", err)
+	}
+
+	snapshotPath := filepath.Join(out, report.SnapshotFile)
+	snapshotFile, err := os.Create(snapshotPath)
+	if err != nil {
+		fatal("create repair snapshot: %v", err)
+	}
+	snapshotGzip := gzip.NewWriter(snapshotFile)
+	snapshotEncoder := json.NewEncoder(snapshotGzip)
+	for i, p := range peers {
+		table := p.server.RT.Diagnostics(time.Now().UTC())
+		state := repairNodeSnapshot{NodeID: p.info.ID, Name: p.info.Name, Active: table.Active, Table: table,
+			IDRecall:   topRecall(p.server.RT.ClosestNodes(p.info.ID, 4), oracle.Top(p.info.ID, false, 4)),
+			NameRecall: topRecall(p.server.RT.ClosestNodesByNameHash(p.info.NameHash, 4), oracle.Top(p.info.NameHash, true, 4))}
+		if err := snapshotEncoder.Encode(state); err != nil {
+			fatal("encode repair snapshot node %d: %v", i, err)
+		}
+		report.MeanActivePeers += float64(state.Active)
+		if state.Active < report.MinActivePeers {
+			report.MinActivePeers = state.Active
+		}
+		if state.Active > report.MaxActivePeers {
+			report.MaxActivePeers = state.Active
+		}
+		report.IDGlobalTop4Recall += state.IDRecall
+		report.NameGlobalTop4Recall += state.NameRecall
+	}
+	if len(peers) > 0 {
+		report.MeanActivePeers /= float64(len(peers))
+		report.IDGlobalTop4Recall /= float64(len(peers))
+		report.NameGlobalTop4Recall /= float64(len(peers))
+	}
+	if err := snapshotGzip.Close(); err != nil {
+		fatal("close repair snapshot gzip: %v", err)
+	}
+	if err := snapshotFile.Close(); err != nil {
+		fatal("close repair snapshot file: %v", err)
+	}
+	report.FinishedAt = time.Now().UTC()
+	return report
+}
+
+func repairLookup(ctx context.Context, p *peer, key string) (dht.NodeLookupResult, *dht.LookupTrace, error) {
+	trace := &dht.LookupTrace{}
+	lookupCtx, cancel := context.WithTimeout(dht.WithLookupTrace(ctx, trace), 10*time.Second)
+	defer cancel()
+	result, err := p.server.RecursiveFindNodeDetailed(lookupCtx, key)
+	return result, trace, err
+}
+
 func errorString(err error) string {
 	if err == nil {
 		return ""
@@ -436,7 +599,7 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-func runLookup(ctx context.Context, sequence int, negative bool, source, target *peer, byName bool, all []*peer, out string) lookupSample {
+func runLookup(ctx context.Context, sequence int, negative bool, source, target *peer, byName bool, oracle *xorOracle, out string) lookupSample {
 	targetKey := dht.NodeIDKey(target.info.ID)
 	targetCoord := target.info.ID
 	space := "node_id"
@@ -454,7 +617,7 @@ func runLookup(ctx context.Context, sequence int, negative bool, source, target 
 	if err != nil {
 		sample.Error = err.Error()
 	}
-	for _, n := range independentTop(all, targetCoord, byName, 4) {
+	for _, n := range oracle.Top(targetCoord, byName, 4) {
 		sample.ExpectedTop4 = append(sample.ExpectedTop4, n.ID)
 	}
 	if byName {
@@ -477,7 +640,11 @@ func runLookup(ctx context.Context, sequence int, negative bool, source, target 
 		}
 	}
 	filename := fmt.Sprintf("%06d-%s-%s-%s.json", sequence, source.info.ID, target.info.ID, space)
+	sample.TraceFile = filepath.ToSlash(filepath.Join("lookups", filename+".gz"))
 	writeJSON(filepath.Join(out, "lookups", filename), sample)
+	// The full trace is already persisted in the per-lookup artifact. Keep the
+	// compact index row in memory so large runs do not retain every trace twice.
+	sample.Trace = nil
 	return sample
 }
 
@@ -498,42 +665,76 @@ func topRecall(got, expected []proto.NodeInfo) float64 {
 	return 100 * float64(matched) / float64(len(expected))
 }
 
-func independentTop(peers []*peer, target string, byName bool, k int) []proto.NodeInfo {
-	target = strings.TrimPrefix(target, "vx6_")
-	tb, _ := hex.DecodeString(target)
-	type ranked struct {
-		info proto.NodeInfo
-		d    []byte
-	}
-	rows := make([]ranked, 0, len(peers))
+func newXOROracle(peers []*peer) *xorOracle {
+	oracle := &xorOracle{peers: make([]*oraclePeer, 0, len(peers)), cache: make(map[string][]proto.NodeInfo)}
 	for _, p := range peers {
-		coord := strings.TrimPrefix(p.info.ID, "vx6_")
-		if byName {
-			coord = p.info.NameHash
-		}
-		b, _ := hex.DecodeString(coord)
-		d := make([]byte, len(tb))
-		for i := range d {
-			d[i] = tb[i] ^ b[i]
-		}
-		rows = append(rows, ranked{p.info, d})
+		row := &oraclePeer{info: p.info}
+		idBytes, _ := hex.DecodeString(strings.TrimPrefix(p.info.ID, "vx6_"))
+		nameBytes, _ := hex.DecodeString(p.info.NameHash)
+		copy(row.nodeID[:], idBytes)
+		copy(row.nameHash[:], nameBytes)
+		oracle.peers = append(oracle.peers, row)
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		for k := range rows[i].d {
-			if rows[i].d[k] != rows[j].d[k] {
-				return rows[i].d[k] < rows[j].d[k]
+	return oracle
+}
+
+func (o *xorOracle) Top(target string, byName bool, k int) []proto.NodeInfo {
+	if k <= 0 {
+		return nil
+	}
+	target = strings.TrimPrefix(target, "vx6_")
+	space := "id:"
+	if byName {
+		space = "name:"
+	}
+	cacheKey := space + target + fmt.Sprintf(":%d", k)
+	if cached, ok := o.cache[cacheKey]; ok {
+		return cached
+	}
+	targetBytes, err := hex.DecodeString(target)
+	if err != nil || len(targetBytes) != 32 {
+		return nil
+	}
+	var targetCoord [32]byte
+	copy(targetCoord[:], targetBytes)
+	best := make([]rankedPeer, 0, k)
+	for _, candidate := range o.peers {
+		coord := candidate.nodeID
+		if byName {
+			coord = candidate.nameHash
+		}
+		row := rankedPeer{info: candidate.info}
+		for i := range row.dist {
+			row.dist[i] = targetCoord[i] ^ coord[i]
+		}
+		position := len(best)
+		for i := range best {
+			comparison := bytes.Compare(row.dist[:], best[i].dist[:])
+			if comparison < 0 || (comparison == 0 && row.info.ID < best[i].info.ID) {
+				position = i
+				break
 			}
 		}
-		return rows[i].info.ID < rows[j].info.ID
-	})
-	if len(rows) > k {
-		rows = rows[:k]
+		if position >= k {
+			continue
+		}
+		best = append(best, rankedPeer{})
+		copy(best[position+1:], best[position:])
+		best[position] = row
+		if len(best) > k {
+			best = best[:k]
+		}
 	}
-	out := make([]proto.NodeInfo, len(rows))
-	for i := range rows {
-		out[i] = rows[i].info
+	result := make([]proto.NodeInfo, len(best))
+	for i := range best {
+		result[i] = best[i].info
 	}
-	return out
+	o.cache[cacheKey] = result
+	return result
+}
+
+func independentTop(peers []*peer, target string, byName bool, k int) []proto.NodeInfo {
+	return newXOROracle(peers).Top(target, byName, k)
 }
 
 func captureNode(p *peer, index int, storesDir string) (nodeSnapshot, error) {
@@ -712,13 +913,43 @@ func percent(n, d int) float64 {
 	return 100 * float64(n) / float64(d)
 }
 func writeJSON(path string, v any) {
+	compress := compressDetailedArtifacts && detailedArtifactPath(path)
+	if compress {
+		path += ".gz"
+	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		fatal("marshal %s: %v", path, err)
 	}
+	if compress {
+		file, err := os.Create(path)
+		if err != nil {
+			fatal("create %s: %v", path, err)
+		}
+		writer := gzip.NewWriter(file)
+		if _, err := writer.Write(append(b, '\n')); err != nil {
+			_ = file.Close()
+			fatal("compress %s: %v", path, err)
+		}
+		if err := writer.Close(); err != nil {
+			_ = file.Close()
+			fatal("close gzip %s: %v", path, err)
+		}
+		if err := file.Close(); err != nil {
+			fatal("close %s: %v", path, err)
+		}
+		return
+	}
 	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
 		fatal("write %s: %v", path, err)
 	}
+}
+
+func detailedArtifactPath(path string) bool {
+	path = filepath.ToSlash(path)
+	return strings.Contains(path, "/join/") || strings.Contains(path, "/lookups/") ||
+		strings.HasPrefix(path, "join/") || strings.HasPrefix(path, "lookups/") ||
+		strings.HasSuffix(path, "/snapshots/all-nodes.json") || path == "snapshots/all-nodes.json"
 }
 func writeMarkdown(path string, r report, lookups []lookupSample, snaps []nodeSnapshot) {
 	m := r.Metrics
@@ -726,7 +957,14 @@ func writeMarkdown(path string, r report, lookups []lookupSample, snaps []nodeSn
 	fmt.Fprintf(&b, "# VX6 DHT Scale Run\n\n- Revision: `%s`\n- Started: %s\n- Platform: `%s`\n- Transport: %s\n- Seed: `%d`\n- Nodes: **%d**\n- Routing K: **%d**; active/offline caps: **%d/%d** (0 means uncapped)\n\n", r.Revision, r.StartedAt.Format(time.RFC3339), r.Platform, r.Transport, r.Seed, m.Nodes, r.LookupPolicy.K, r.LookupPolicy.MaxActivePeers, r.LookupPolicy.MaxOfflinePeers)
 	fmt.Fprintf(&b, "## Lookup Results\n\n| Metric | Result |\n|---|---:|\n| Total attempts | %d |\n| Found | %d (%.2f%%) |\n| Name-hash found | %d/%d (%.2f%%) |\n| NodeID found | %d/%d (%.2f%%) |\n| Not found in reachable view | %d |\n| Incomplete | %d |\n| Other errors | %d |\n| Returned first-four equal global oracle | %d/%d (%.2f%%) |\n| Queries p50 / p95 | %d / %d |\n| Duration p50 / p95 | %.2f / %.2f ms |\n\n", m.LookupAttempts, m.Found, percent(m.Found, m.LookupAttempts), m.NameLookupFound, m.NameLookupAttempts, percent(m.NameLookupFound, m.NameLookupAttempts), m.IDLookupFound, m.IDLookupAttempts, percent(m.IDLookupFound, m.IDLookupAttempts), m.NotFound, m.Incomplete, m.Errors, m.ExactTop4, m.Top4Checks, percent(m.ExactTop4, m.Top4Checks), m.P50Queries, m.P95Queries, m.P50DurationMS, m.P95DurationMS)
 	fmt.Fprintf(&b, "- Complete found (no exhausted lookup budget): **%d**; matched target but incomplete: **%d**\n- Complete found by coordinate: NodeID **%d/%d**, name hash **%d/%d**\n- Negative controls: not-found **%d/%d**, incomplete **%d**, false positives **%d**\n\n", m.FoundComplete, m.FoundIncomplete, m.IDLookupCompleteFound, m.IDLookupAttempts-m.NegativeLookups/2, m.NameLookupCompleteFound, m.NameLookupAttempts-m.NegativeLookups/2, m.NegativeNotFound, m.NegativeLookups, m.NegativeIncomplete, m.NegativeFalsePositive)
-	fmt.Fprintf(&b, "## Idle Routing Snapshot\n\nThis is a final-state snapshot after all staged joins and sampled lookups; this run does not wait through the production 5-minute maintenance cadence.\n\n- Active peer entries: %d total; mean %.2f, min %d, max %d\n- Non-empty NodeID buckets summed across nodes: %d\n- Non-empty name-hash buckets summed across nodes: %d\n- Active-table recall of each node's global nearest four: NodeID %.2f%%; name-hash %.2f%%\n- Heap allocation after capture: %d bytes; heap system: %d bytes; goroutines: %d\n- Elapsed: %.2f seconds\n- Per-node snapshots: `snapshots/all-nodes.json`\n- Per-lookup records and traces: `lookups/`\n- Per-node bbolt files: `stores/`\n- Join events: `join/`\n\n", m.ActivePeerCount, m.MeanActivePeers, m.MinActivePeers, m.MaxActivePeers, m.IDNonEmptyBuckets, m.NameNonEmptyBuckets, m.IDGlobalTop4Recall, m.NameGlobalTop4Recall, m.HeapAllocBytes, m.HeapSysBytes, m.Goroutines, m.ElapsedSeconds)
+	fmt.Fprintf(&b, "## Final Routing Snapshot\n\nThis snapshot follows staged joins, the configured explicit repair rounds, and sampled lookups. Repair rounds directly invoke production lookup/table code; they do not wait for or prove the daemon's periodic maintenance scheduler.\n\n- Active peer entries: %d total; mean %.2f, min %d, max %d\n- Non-empty NodeID buckets summed across nodes: %d\n- Non-empty name-hash buckets summed across nodes: %d\n- Active-table recall of each node's global nearest four: NodeID %.2f%%; name-hash %.2f%%\n- Heap allocation after capture: %d bytes; heap system: %d bytes; goroutines: %d\n- Elapsed: %.2f seconds\n- Per-node final snapshots: `snapshots/all-nodes.json`\n- Per-lookup records and traces: `lookups/`\n- Per-node bbolt files: `stores/`\n- Join events: `join/`\n\n", m.ActivePeerCount, m.MeanActivePeers, m.MinActivePeers, m.MaxActivePeers, m.IDNonEmptyBuckets, m.NameNonEmptyBuckets, m.IDGlobalTop4Recall, m.NameGlobalTop4Recall, m.HeapAllocBytes, m.HeapSysBytes, m.Goroutines, m.ElapsedSeconds)
+	if len(r.RepairRounds) > 0 {
+		fmt.Fprintf(&b, "## Repair-Round Convergence\n\n| Round | Complete / total | Incomplete | Errors | Queries | Mean active peers | Active min-max | NodeID top-four recall | Name top-four recall |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+		for _, rr := range r.RepairRounds {
+			fmt.Fprintf(&b, "| %d | %d / %d | %d | %d | %d | %.2f | %d-%d | %.2f%% | %.2f%% |\n", rr.Round, rr.Complete, rr.Lookups, rr.Incomplete, rr.Errors, rr.QueriedPeers, rr.MeanActivePeers, rr.MinActivePeers, rr.MaxActivePeers, rr.IDGlobalTop4Recall, rr.NameGlobalTop4Recall)
+		}
+		fmt.Fprintf(&b, "\nPer-node snapshots: `repair/round-NN-snapshot.jsonl.gz`; per-node lookup traces: `repair/traces/`. These rounds are immediate and seeded-shuffled, not wall-clock timer firings.\n\n")
+	}
 	fmt.Fprintf(&b, "- Bucket-placement errors (independent XOR audit): NodeID **%d**, name hash **%d**\n- bbolt peer rows / total store bytes: **%d / %d**\n", m.IDBucketPlacementErrors, m.NameBucketPlacementErrors, m.BboltPeerRows, m.BboltBytes)
 	fmt.Fprintf(&b, "## Interpretation\n\nThis is a deterministic-growth simulation using production `RoutingTable`, DHT request validation/handler, signed endpoint records, and iterative lookup over loopback TCP. IPsec, IKE, public Internet routing, realistic IPv6/ASN diversity, malicious Sybil behavior, and multi-host packet loss are not exercised. The global XOR oracle is only a test oracle: a DHT is not expected to return a globally closest peer unless its reachable referrals expose that peer. `not_found_reachable` means the search exhausted the reachable view; it is not proof the target is globally absent. `incomplete` means a query failed or the lookup budget expired.\n\nThe snapshots show locally stored peers in both indexes; the two indexes are views over each node's local verified peer set, not globally complete maps. Compare route degree and bucket ranks with lookup traces. The bbolt files record the peer observations at capture time and are not a claim that restart bootstrap was exercised.\n\n### Sampled query outcomes\n\n| Space | Attempts | Found | Exact top four | Mean queries | p95 queries |\n|---|---:|---:|---:|---:|---:|\n")
 	for _, space := range []string{"node_id", "name_hash"} {
